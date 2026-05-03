@@ -210,13 +210,21 @@ def ensure_workspace_keyfile(root: Path) -> Path:
 DEFAULT_MAX_ATTEMPTS = 3
 
 
-def default_config(root: Path, target: str, benchmark: str, metric: str, gate: str | None) -> dict[str, Any]:
+def default_config(
+    root: Path,
+    target: str,
+    benchmark: str,
+    metric: str,
+    gate: str | None,
+    project_name: str | None = None,
+) -> dict[str, Any]:
     # Import here to avoid a circular import at module load.
     from .frontier_strategies import DEFAULT_FRONTIER_STRATEGY
     return {
         "repo_root": str(root),
         "workspace_dir": WORKSPACE_NAME,
         "worktrees_dir": "worktrees",
+        "project_name": project_name or root.name,
         "target": target,
         "benchmark": benchmark,
         "gate": gate,
@@ -456,6 +464,7 @@ def init_workspace(
     gate: str | None,
     host: str | None = None,
     commit_strategy: str = "all",
+    project_name: str | None = None,
 ) -> str:
     if commit_strategy not in ("all", "tracked-only"):
         raise RuntimeError(
@@ -463,7 +472,7 @@ def init_workspace(
         )
     run_id = _allocate_run(root)
     ensure_workspace_dirs(root)
-    config = default_config(root, target, benchmark, metric, gate)
+    config = default_config(root, target, benchmark, metric, gate, project_name=project_name)
     config["execution_backend"] = "worktree"
     config["commit_strategy"] = commit_strategy
     atomic_write_json(config_path(root), config)

@@ -594,6 +594,8 @@ def _workspace_summary(root: Path) -> dict[str, Any]:
     )
 
     return {
+        "project_name": config.get("project_name") or root.name,
+        "project_name_source": "configured" if config.get("project_name") else "repo",
         "target": config.get("target", ""),
         "benchmark": config.get("benchmark", ""),
         "gate": config.get("gate"),
@@ -651,6 +653,7 @@ def create_app(root: Path | None = None) -> Flask:
         return jsonify(
             {
                 "metric": metric,
+                "project_name": config.get("project_name") or _root().name,
                 "target": config.get("target", ""),
                 "best_score": best_committed_score(graph, metric),
                 "baseline_score": baseline,

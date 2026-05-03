@@ -242,7 +242,9 @@ async function switchRun(runId) {
 // ─── Render: Top bar ─────────────────────────────────────
 function renderTopbar() {
   const s = state.stats;
-  document.getElementById('target-file').textContent = s.target || '';
+  document.getElementById('target-file').innerHTML = s.target
+    ? `<strong>${esc(s.project_name || 'evo project')}</strong><span>Entrypoint ${esc(s.target)}</span>`
+    : '';
   const pill = document.getElementById('status-pill');
   const text = document.getElementById('status-text');
   if (s.active > 0) {
@@ -1141,13 +1143,14 @@ function renderProjectSettings(panel, ws) {
   panel.innerHTML = `
     <div class="settings-hero">
       <div>
-        <div class="settings-section-title">Project</div>
-        <div class="settings-section-sub">what this workspace optimizes</div>
+        <div class="settings-section-title">${esc(ws.project_name || 'Project')}</div>
+        <div class="settings-section-sub">benchmark contract and evaluation entrypoint</div>
       </div>
       <div class="settings-hero-badge mono">${esc(backendLabel(ws.default_backend))}</div>
     </div>
     <div class="settings-rows">
-      <div class="settings-row"><span>target</span><strong class="mono">${esc(ws.target || '--')}</strong></div>
+      <div class="settings-row"><span>Project name</span><strong>${esc(ws.project_name || '--')}${ws.project_name_source === 'repo' ? ' · repo fallback' : ''}</strong></div>
+      <div class="settings-row"><span>Evaluation entrypoint</span><strong class="mono">${esc(ws.target || '--')}</strong></div>
       <div class="settings-row"><span>metric</span><strong>${esc(ws.metric || '--')}</strong></div>
       <div class="settings-row"><span>host</span><strong>${esc(ws.host || '--')}</strong></div>
       <div class="settings-row"><span>commit strategy</span><strong>${esc(ws.commit_strategy || '--')}</strong></div>

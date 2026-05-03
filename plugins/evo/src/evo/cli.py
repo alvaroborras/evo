@@ -307,6 +307,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         gate=args.gate,
         host=args.host,
         commit_strategy=commit_strategy,
+        project_name=args.name,
     )
     if args.instrumentation_mode:
         meta_file = evo_dir(root) / "meta.json"
@@ -466,6 +467,7 @@ def cmd_config_show(args: argparse.Namespace) -> int:
         return 0
 
     print(f"target: {data.get('target', '')}")
+    print(f"project_name: {data.get('project_name') or root.name}")
     print(f"benchmark: {data.get('benchmark', '')}")
     print(f"metric: {data.get('metric', '')}")
     print(f"host: {get_host(root) or '<not set>'}")
@@ -488,7 +490,9 @@ def cmd_config_set(args: argparse.Namespace) -> int:
     _require_workspace(root)
     with advisory_lock(lock_file_for(config_path(root))):
         config = load_config(root)
-        if args.field == "target":
+        if args.field == "project-name":
+            config["project_name"] = args.value
+        elif args.field == "target":
             config["target"] = args.value
         elif args.field == "benchmark":
             config["benchmark"] = args.value
@@ -2784,6 +2788,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     init_p = sub.add_parser("init")
+    init_p.add_argument("--name", help="human-readable project name for dashboard/display")
     init_p.add_argument("--target", required=True)
     init_p.add_argument("--benchmark", required=True)
     init_p.add_argument("--metric", required=True, choices=["max", "min"])
@@ -2828,7 +2833,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_set_p = config_sub.add_parser("set", help="set basic workspace configuration fields")
     config_set_p.add_argument(
         "field",
-        choices=["target", "benchmark", "metric", "commit-strategy"],
+        choices=["project-name", "target", "benchmark", "metric", "commit-strategy"],
     )
     config_set_p.add_argument("value")
     config_set_p.set_defaults(func=cmd_config)

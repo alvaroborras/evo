@@ -154,6 +154,8 @@ class TestDashboardFrontierStrategy(unittest.TestCase):
         res = self.client.get("/api/workspace")
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
+        self.assertEqual(data["project_name"], self.root.name)
+        self.assertEqual(data["project_name_source"], "configured")
         self.assertEqual(data["host"], "codex")
         self.assertEqual(data["commit_strategy"], "tracked-only")
         self.assertIn("runtime_env", data)
@@ -183,6 +185,15 @@ class TestDashboardFrontierStrategy(unittest.TestCase):
         self.assertEqual(pool_entry["runtime"]["slot_count"], 2)
         self.assertEqual(pool_entry["runtime"]["leased_count"], 1)
         self.assertEqual(pool_entry["node_ids"], ["exp_0001"])
+
+    def test_workspace_endpoint_falls_back_to_repo_name_for_legacy_project_name(self):
+        cfg = load_config(self.root)
+        cfg.pop("project_name", None)
+        save_config(self.root, cfg)
+
+        data = self.client.get("/api/workspace").get_json()
+        self.assertEqual(data["project_name"], self.root.name)
+        self.assertEqual(data["project_name_source"], "repo")
 
     def test_node_endpoint_reports_latest_check_summary(self):
         graph = load_graph(self.root)

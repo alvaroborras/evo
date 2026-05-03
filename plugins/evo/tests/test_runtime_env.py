@@ -195,10 +195,15 @@ def test_cli_config_show_and_set_basic_fields(tmp_path: Path) -> None:
         evo(["config", "set", "metric", "min"], cwd=tmp_path)
         evo(["config", "set", "commit-strategy", "tracked-only"], cwd=tmp_path)
         shown = json.loads(evo(["config", "show", "--json"], cwd=tmp_path).stdout)
+        assert shown["project_name"] == tmp_path.name
         assert shown["benchmark"] == "python3 eval.py --updated"
         assert shown["metric"] == "min"
         assert shown["commit_strategy"] == "tracked-only"
         assert "runtime_env" in shown
+
+        evo(["config", "set", "project-name", "Demo Project"], cwd=tmp_path)
+        shown = json.loads(evo(["config", "show", "--json"], cwd=tmp_path).stdout)
+        assert shown["project_name"] == "Demo Project"
     finally:
         shutdown_dashboard(tmp_path)
 

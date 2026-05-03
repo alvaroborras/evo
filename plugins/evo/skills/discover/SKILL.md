@@ -150,13 +150,16 @@ build/
 ## 7. Initialize the workspace
 
 ```bash
-evo init --target <file> --benchmark "<command using {worktree} and {target}>" --metric <max|min> \
+evo init --name "<short project name>" \
+  --target <file> --benchmark "<command using {worktree} and {target}>" --metric <max|min> \
   --host <claude-code|codex|opencode|openclaw|hermes|generic> \
   --instrumentation-mode <sdk|inline> [--gate "<gate command>"] \
   [--commit-strategy <all|tracked-only>]
 ```
 
 **`--host` is required.** Pass the host runtime you (the orchestrator) are running under. Allowed values: `claude-code`, `codex`, `opencode`, `openclaw`, `hermes`, `generic`. This is recorded in `.evo/meta.json` and read by `evo dispatch` (the optional fork-cache spawner). On `claude-code`, dispatch is available; on every other host evo's child-spawn falls back to your host's native parallel-Task primitive (no behavior change vs today). Pick the value matching the runtime you invoked `discover` from. Use `evo host set <value>` later if you change runtimes.
+
+**`--name` should be a short human-readable project label** for dashboard display, chosen from the repository/product context. Existing workspaces without a name fall back to the repo directory name; do not hand-edit config just to migrate them.
 
 **`--commit-strategy` is optional.** Default is `all`. Override with `--commit-strategy tracked-only` only when you want the stricter shisa-kanko flow where new files must be staged explicitly and acknowledged at `evo run` time.
 
@@ -171,6 +174,7 @@ Example for a benchmark written at `{worktree}/benchmark.py` that will be commit
 
 ```bash
 evo init \
+  --name "ARC AGI solver" \
   --target agent/solve.py \
   --benchmark "python3 {worktree}/benchmark.py --target {target}" \
   --metric max \
