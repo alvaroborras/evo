@@ -173,6 +173,52 @@ if any(key.startswith("EVO_") for key in os.environ):
         shutdown_dashboard(tmp_path)
 
 
+def test_evo_run_exposes_checkpoint_dir_and_records_attempt_state(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+    write(tmp_path / "agent.py", 'STATE = "baseline"\n')
+    write(
+        tmp_path / "eval.py",
+        """from __future__ import annotations
+import json
+import os
+from pathlib import Path
+
+checkpoint_dir = Path(os.environ["EVO_CHECKPOINT_DIR"])
+checkpoint_dir.mkdir(parents=True, exist_ok=True)
+(checkpoint_dir / "progress.json").write_text(json.dumps({"step": 1}), encoding="utf-8")
+Path(os.environ["EVO_RESULT_PATH"]).write_text(json.dumps({"score": 1.0}), encoding="utf-8")
+""",
+    )
+    run(["git", "add", "."], cwd=tmp_path)
+    run(["git", "commit", "-m", "fixture: checkpoint"], cwd=tmp_path)
+
+    try:
+        evo(
+            [
+                "init",
+                "--target", "agent.py",
+                "--benchmark", "python3 eval.py",
+                "--metric", "max",
+                "--host", "generic",
+            ],
+            cwd=tmp_path,
+        )
+        evo(["new", "--parent", "root", "-m", "checkpoint contract"], cwd=tmp_path)
+        result = evo(["run", "exp_0000"], cwd=tmp_path)
+        assert "COMMITTED exp_0000 1.0" in result.stdout
+
+        attempt = tmp_path / ".evo" / "run_0000" / "experiments" / "exp_0000" / "attempts" / "001"
+        assert (attempt / "checkpoints" / "progress.json").exists()
+        state = json.loads((attempt / "attempt_state.json").read_text(encoding="utf-8"))
+        assert state["phase"] == "complete"
+        assert state["status"] == "committed"
+        assert state["checkpoint_dir"].endswith("attempts/001/checkpoints")
+        outcome = json.loads((attempt / "outcome.json").read_text(encoding="utf-8"))
+        assert outcome["attempt_state"]["status"] == "committed"
+    finally:
+        shutdown_dashboard(tmp_path)
+
+
 def test_cli_config_show_and_set_basic_fields(tmp_path: Path) -> None:
     init_repo(tmp_path)
     write(tmp_path / "agent.py", 'STATE = "baseline"\n')

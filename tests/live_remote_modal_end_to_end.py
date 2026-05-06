@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -508,6 +509,104 @@ def test_modal_streaming_salvages_partial_artifacts() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def test_modal_recovers_after_orchestrator_death() -> None:
+    """Kill local evo mid-benchmark; rerun should reattach to the Modal process."""
+    workdir = Path(tempfile.mkdtemp(prefix="evo-modal-recover-"))
+    repo = workdir / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "agent.py").write_text("STATE = 'baseline'\n", encoding="utf-8")
+    (repo / "eval.py").write_text(
+        "import json, os, time\n"
+        "from pathlib import Path\n"
+        "traces = Path(os.environ['EVO_TRACES_DIR'])\n"
+        "traces.mkdir(parents=True, exist_ok=True)\n"
+        "ckpt = Path(os.environ['EVO_CHECKPOINT_DIR'])\n"
+        "ckpt.mkdir(parents=True, exist_ok=True)\n"
+        "for i in range(5):\n"
+        "    (traces / f'task_{i}.json').write_text(json.dumps({'task_id': str(i), 'score': 1.0}))\n"
+        "    (ckpt / 'progress.json').write_text(json.dumps({'step': i}))\n"
+        "    print(f'tick-{i}', flush=True)\n"
+        "    time.sleep(1)\n"
+        "Path(os.environ['EVO_RESULT_PATH']).write_text(json.dumps({'score': 1.0, 'tasks': {str(i): 1.0 for i in range(5)}}))\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "recover fixture"], cwd=repo, check=True)
+
+    try:
+        provider_config = (
+            "app_name=evo-live-recovery,"
+            "timeout_seconds=300,"
+            "health_timeout_seconds=90.0"
+        )
+        _evo(
+            ["init", "--target", "agent.py",
+             "--benchmark", "python eval.py",
+             "--metric", "max", "--host", "generic"],
+            cwd=repo,
+        )
+        _new_remote_modal(
+            repo,
+            parent="root",
+            hypothesis="modal recovery",
+            provider_config=provider_config,
+            timeout=300,
+        )
+
+        proc = subprocess.Popen(
+            ["uv", "run", "--project", str(PLUGIN_ROOT), "evo", "run", "exp_0000"],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        journal_path = (
+            repo / ".evo" / "run_0000" / "experiments" / "exp_0000"
+            / "attempts" / "001" / "benchmark.log.remote.json"
+        )
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline and not journal_path.exists():
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate(timeout=10)
+                raise AssertionError(
+                    f"evo run exited before recovery test could interrupt it:\n"
+                    f"stdout:\n{stdout}\n\nstderr:\n{stderr}"
+                )
+            time.sleep(0.25)
+        assert journal_path.exists(), "remote benchmark journal was not created"
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=10)
+
+        graph = json.loads((repo / ".evo" / "run_0000" / "graph.json").read_text(encoding="utf-8"))
+        assert graph["nodes"]["exp_0000"]["status"] == "active", graph
+        assert graph["nodes"]["exp_0000"]["current_attempt"] == 1, graph
+
+        time.sleep(5.0)
+        rerun = _evo(["run", "exp_0000"], cwd=repo, check=False, timeout=300)
+        assert rerun.returncode == 0, (rerun.stdout, rerun.stderr)
+        assert "RECOVERING exp_0000 attempt=1" in rerun.stdout, rerun.stdout
+        assert "COMMITTED exp_0000 1.0" in rerun.stdout, rerun.stdout
+
+        attempts_root = repo / ".evo" / "run_0000" / "experiments" / "exp_0000" / "attempts"
+        assert sorted(p.name for p in attempts_root.iterdir()) == ["001"]
+        outcome = json.loads((attempts_root / "001" / "outcome.json").read_text(encoding="utf-8"))
+        assert outcome["outcome"] == "committed", outcome
+        assert outcome["attempt_state"]["status"] == "committed", outcome
+        assert (attempts_root / "001" / "checkpoints" / "progress.json").exists()
+    finally:
+        print("--- backstop cleanup ---")
+        _evo(["reset", "--yes"], cwd=repo, check=False)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def test_branched_tree_modal() -> None:
     """Multi-branch realistic experiment tree on Modal.
 
@@ -726,6 +825,9 @@ def main() -> None:
     print()
     print("=== Modal mid-run salvage ===")
     test_modal_streaming_salvages_partial_artifacts()
+    print()
+    print("=== Modal orchestrator-crash recovery ===")
+    test_modal_recovers_after_orchestrator_death()
     print()
     print("=== Modal multi-branch experiment tree ===")
     test_branched_tree_modal()

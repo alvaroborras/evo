@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shlex
 import shutil
 import socket
@@ -735,6 +736,258 @@ def test_remote_streaming_salvages_partial_logs_and_traces(workdir: Path) -> Non
             _shutdown_dashboard(repo)
 
 
+def test_remote_run_recovers_active_attempt_after_orchestrator_death(workdir: Path) -> None:
+    """If `evo run` dies but the remote benchmark process survives, a later
+    `evo run <exp>` should recover attempt 001 instead of creating 002."""
+    repo = workdir / "repo-recover-active"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "agent.py").write_text("STATE='baseline'\n", encoding="utf-8")
+    (repo / "eval.py").write_text(
+        "import json, os, time\n"
+        "from pathlib import Path\n"
+        "traces = Path(os.environ['EVO_TRACES_DIR'])\n"
+        "traces.mkdir(parents=True, exist_ok=True)\n"
+        "for i in range(5):\n"
+        "    (traces / f'task_{i}.json').write_text(json.dumps({'task_id': str(i), 'score': 1.0}))\n"
+        "    print(f'tick-{i}', flush=True)\n"
+        "    time.sleep(1)\n"
+        "Path(os.environ['EVO_RESULT_PATH']).write_text(json.dumps({'score': 1.0, 'tasks': {str(i): 1.0 for i in range(5)}}))\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "recover fixture"], cwd=repo, check=True)
+
+    with managed_localhost_sandbox_agent() as sandbox:
+        sandbox_workspace = workdir / "recover-sandbox-workspace"
+        sandbox_bundles = workdir / "recover-sandbox-bundles"
+        provider_config = (
+            f"base_url={sandbox.base_url},bearer_token={sandbox.bearer_token},"
+            f"workspace_root={sandbox_workspace},bundle_dir={sandbox_bundles}"
+        )
+        _evo(
+            ["init", "--target", "agent.py",
+             "--benchmark", "python eval.py",
+             "--metric", "max", "--host", "generic"],
+            cwd=repo,
+        )
+        _evo(
+            ["config", "runtime", "set",
+             "--prepare", "printf prepared > runtime_prepared.txt",
+             "--before-run", "printf before > runtime_before.txt"],
+            cwd=repo,
+        )
+        try:
+            _evo(
+                ["new", "--parent", "root", "-m", "recover active",
+                 "--remote", "manual",
+                 "--provider-config", provider_config],
+                cwd=repo,
+            )
+            proc = subprocess.Popen(
+                ["uv", "run", "--project", str(PLUGIN_ROOT), "evo", "run", "exp_0000"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            journal_path = (
+                repo / ".evo" / "run_0000" / "experiments" / "exp_0000"
+                / "attempts" / "001" / "benchmark.log.remote.json"
+            )
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and not journal_path.exists():
+                if proc.poll() is not None:
+                    stdout, stderr = proc.communicate(timeout=5)
+                    raise AssertionError((stdout, stderr))
+                time.sleep(0.25)
+            assert journal_path.exists()
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate(timeout=5)
+
+            graph = json.loads((repo / ".evo" / "run_0000" / "graph.json").read_text(encoding="utf-8"))
+            assert graph["nodes"]["exp_0000"]["status"] == "active", graph
+            assert graph["nodes"]["exp_0000"]["current_attempt"] == 1, graph
+
+            # Let the original remote process finish; rerun should attach/finalize
+            # the existing process id, not start attempt 002.
+            time.sleep(5.0)
+            rerun = _evo(["run", "exp_0000"], cwd=repo, check=False)
+            assert rerun.returncode == 0, (rerun.stdout, rerun.stderr)
+            assert "RECOVERING exp_0000 attempt=1" in rerun.stdout, rerun.stdout
+            assert "COMMITTED exp_0000 1.0" in rerun.stdout, rerun.stdout
+
+            attempts_root = repo / ".evo" / "run_0000" / "experiments" / "exp_0000" / "attempts"
+            assert sorted(p.name for p in attempts_root.iterdir()) == ["001"]
+            outcome = json.loads((attempts_root / "001" / "outcome.json").read_text(encoding="utf-8"))
+            assert outcome["outcome"] == "committed", outcome
+            assert outcome["remote_streams"][0]["state"] == "exited", outcome
+        finally:
+            _shutdown_dashboard(repo)
+
+
+def test_remote_run_fails_and_releases_when_container_dies_before_recovery(workdir: Path) -> None:
+    """If the remote container is gone on recovery, fail clearly and drop lease."""
+    repo = workdir / "repo-container-death"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "agent.py").write_text("STATE='baseline'\n", encoding="utf-8")
+    (repo / "eval.py").write_text(
+        "import json, os, time\n"
+        "from pathlib import Path\n"
+        "traces = Path(os.environ['EVO_TRACES_DIR'])\n"
+        "traces.mkdir(parents=True, exist_ok=True)\n"
+        "for i in range(10):\n"
+        "    (traces / f'task_{i}.json').write_text(json.dumps({'task_id': str(i), 'score': 1.0}))\n"
+        "    print(f'tick-{i}', flush=True)\n"
+        "    time.sleep(1)\n"
+        "Path(os.environ['EVO_RESULT_PATH']).write_text(json.dumps({'score': 1.0}))\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "container death fixture"], cwd=repo, check=True)
+
+    with managed_localhost_sandbox_agent() as sandbox:
+        sandbox_workspace = workdir / "death-sandbox-workspace"
+        sandbox_bundles = workdir / "death-sandbox-bundles"
+        provider_config = (
+            f"base_url={sandbox.base_url},bearer_token={sandbox.bearer_token},"
+            f"workspace_root={sandbox_workspace},bundle_dir={sandbox_bundles}"
+        )
+        _evo(
+            ["init", "--target", "agent.py",
+             "--benchmark", "python eval.py",
+             "--metric", "max", "--host", "generic"],
+            cwd=repo,
+        )
+        try:
+            _evo(
+                ["new", "--parent", "root", "-m", "container dies",
+                 "--remote", "manual",
+                 "--provider-config", provider_config],
+                cwd=repo,
+            )
+            proc = subprocess.Popen(
+                ["uv", "run", "--project", str(PLUGIN_ROOT), "evo", "run", "exp_0000"],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            journal_path = (
+                repo / ".evo" / "run_0000" / "experiments" / "exp_0000"
+                / "attempts" / "001" / "benchmark.log.remote.json"
+            )
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and not journal_path.exists():
+                if proc.poll() is not None:
+                    stdout, stderr = proc.communicate(timeout=5)
+                    raise AssertionError((stdout, stderr))
+                time.sleep(0.25)
+            assert journal_path.exists()
+
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate(timeout=5)
+
+            sandbox.process.terminate()
+            try:
+                sandbox.process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                sandbox.process.kill()
+                sandbox.process.wait(timeout=2.0)
+
+            rerun = _evo(["run", "exp_0000"], cwd=repo, check=False)
+            assert rerun.returncode != 0, rerun.stdout
+            assert "remote_infra_failure:" in rerun.stdout, rerun.stdout
+
+            graph = json.loads((repo / ".evo" / "run_0000" / "graph.json").read_text(encoding="utf-8"))
+            assert graph["nodes"]["exp_0000"]["status"] == "failed", graph
+            state = remote_state.read_state(repo)
+            assert state["sandboxes"] == [], state
+        finally:
+            _shutdown_dashboard(repo)
+
+
+def test_remote_run_recovers_after_benchmark_artifacts_phase(workdir: Path) -> None:
+    """An active remote attempt with fetched benchmark artifacts should finalize."""
+    repo = workdir / "repo-recover-artifacts"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "agent.py").write_text("STATE='baseline'\n", encoding="utf-8")
+    (repo / "eval.py").write_text(
+        "raise SystemExit('benchmark should not rerun during artifacts recovery')\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "artifacts recovery fixture"], cwd=repo, check=True)
+
+    with managed_localhost_sandbox_agent() as sandbox:
+        sandbox_workspace = workdir / "artifacts-sandbox-workspace"
+        sandbox_bundles = workdir / "artifacts-sandbox-bundles"
+        provider_config = (
+            f"base_url={sandbox.base_url},bearer_token={sandbox.bearer_token},"
+            f"workspace_root={sandbox_workspace},bundle_dir={sandbox_bundles}"
+        )
+        _evo(
+            ["init", "--target", "agent.py",
+             "--benchmark", "python eval.py",
+             "--metric", "max", "--host", "generic"],
+            cwd=repo,
+        )
+        try:
+            _evo(
+                ["new", "--parent", "root", "-m", "recover artifacts",
+                 "--remote", "manual",
+                 "--provider-config", provider_config],
+                cwd=repo,
+            )
+            graph_path = repo / ".evo" / "run_0000" / "graph.json"
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            graph["nodes"]["exp_0000"]["status"] = "active"
+            graph["nodes"]["exp_0000"]["current_attempt"] = 1
+            graph_path.write_text(json.dumps(graph, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            attempt = repo / ".evo" / "run_0000" / "experiments" / "exp_0000" / "attempts" / "001"
+            attempt.mkdir(parents=True)
+            (attempt / "result.json").write_text(json.dumps({"score": 1.0, "tasks": {}}), encoding="utf-8")
+            (attempt / "benchmark.log").write_text("already completed\n", encoding="utf-8")
+            (attempt / "attempt_state.json").write_text(
+                json.dumps({
+                    "experiment_id": "exp_0000",
+                    "attempt": 1,
+                    "phase": "artifacts",
+                    "status": "completed",
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:01+00:00",
+                }),
+                encoding="utf-8",
+            )
+
+            rerun = _evo(["run", "exp_0000"], cwd=repo, check=False)
+            assert rerun.returncode == 0, (rerun.stdout, rerun.stderr)
+            assert "RECOVERING exp_0000 attempt=1 phase=artifacts" in rerun.stdout, rerun.stdout
+            assert "COMMITTED exp_0000 1.0" in rerun.stdout, rerun.stdout
+            assert sorted(p.name for p in attempt.parent.iterdir()) == ["001"]
+        finally:
+            _shutdown_dashboard(repo)
+
+
 def test_ssh_provider_full_lifecycle(workdir: Path) -> None:
     repo = _build_repo(workdir)
 
@@ -875,6 +1128,9 @@ def main() -> None:
             test_multiple_remote_leases_same_config_and_pool_size,
             test_plaintext_remote_token_migrates_on_read,
             test_remote_streaming_salvages_partial_logs_and_traces,
+            test_remote_run_recovers_active_attempt_after_orchestrator_death,
+            test_remote_run_fails_and_releases_when_container_dies_before_recovery,
+            test_remote_run_recovers_after_benchmark_artifacts_phase,
             test_ssh_provider_full_lifecycle,
         ):
             sub = workdir / fn.__name__
