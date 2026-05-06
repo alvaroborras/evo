@@ -1269,6 +1269,122 @@ def _finalize_result(root: Path, exp_id: str, node: dict, score: float | None, s
     atomic_write_json(experiment_result_path(root, exp_id), payload)
 
 
+def _remote_stream_journals(root: Path, exp_id: str, attempt: int) -> list[dict]:
+    """Return remote stream journals written beside attempt log files.
+
+    These sidecars are diagnostic/recovery metadata. A corrupt sidecar should
+    not prevent result finalization, so unreadable files are ignored.
+    """
+    base = attempt_dir(root, exp_id, attempt)
+    journals: list[dict] = []
+    for path in sorted(base.glob("*.remote.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload = dict(payload)
+        try:
+            payload["journal_path"] = str(path.relative_to(root))
+        except ValueError:
+            payload["journal_path"] = str(path)
+        journals.append(payload)
+    return journals
+
+
+def _remote_stream_journal_for_log(log_path: Path) -> dict | None:
+    path = log_path.with_name(log_path.name + ".remote.json")
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _remote_infra_error_for_log(log_path: Path) -> str | None:
+    journal = _remote_stream_journal_for_log(log_path)
+    if not journal or journal.get("state") != "failed_infra":
+        return None
+    return str(journal.get("error") or "remote status unavailable")
+
+
+def _resumable_remote_benchmark_journal(
+    root: Path,
+    exp_id: str,
+    attempt: int,
+) -> dict | None:
+    journal = _remote_stream_journal_for_log(
+        attempt_dir(root, exp_id, attempt) / "benchmark.log"
+    )
+    if not journal or journal.get("state") not in {"running", "exited"}:
+        return None
+    if not journal.get("process_id") or not isinstance(journal.get("command"), list):
+        return None
+    return journal
+
+
+def _attempt_state_path(root: Path, exp_id: str, attempt: int) -> Path:
+    return attempt_dir(root, exp_id, attempt) / "attempt_state.json"
+
+
+def _read_attempt_state(root: Path, exp_id: str, attempt: int) -> dict | None:
+    path = _attempt_state_path(root, exp_id, attempt)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_attempt_state(
+    root: Path,
+    exp_id: str,
+    attempt: int,
+    *,
+    phase: str,
+    status: str,
+    started_at: str,
+    extra: dict | None = None,
+) -> None:
+    path = _attempt_state_path(root, exp_id, attempt)
+    prior = _read_attempt_state(root, exp_id, attempt) or {}
+    payload = {
+        **prior,
+        "experiment_id": exp_id,
+        "attempt": attempt,
+        "phase": phase,
+        "status": status,
+        "started_at": prior.get("started_at") or started_at,
+        "updated_at": utc_now(),
+    }
+    if extra:
+        payload.update(extra)
+    atomic_write_json(path, payload)
+
+
+_ATTEMPT_PHASE_ORDER = {
+    "initializing": 0,
+    "runtime_prepare": 1,
+    "runtime_before_run": 2,
+    "benchmark": 3,
+    "artifacts": 4,
+    "gates": 5,
+    "commit": 6,
+    "finalize": 7,
+    "complete": 8,
+    "failed": 99,
+}
+
+
+def _attempt_phase_index(phase: str | None) -> int:
+    return _ATTEMPT_PHASE_ORDER.get(phase or "", -1)
+
+
 def _write_attempt_outcome(
     root: Path,
     exp_id: str,
@@ -1304,6 +1420,12 @@ def _write_attempt_outcome(
         "error": error,
         "commit": commit,
     }
+    remote_streams = _remote_stream_journals(root, exp_id, attempt)
+    if remote_streams:
+        payload["remote_streams"] = remote_streams
+    attempt_state = _read_attempt_state(root, exp_id, attempt)
+    if attempt_state:
+        payload["attempt_state"] = attempt_state
     atomic_write_json(attempt_outcome_path(root, exp_id, attempt), payload)
 
 
@@ -1531,11 +1653,49 @@ def cmd_run(args: argparse.Namespace) -> int:
     from .workspace_executor import workspace_executor_for
     from .backends import load_backend
     backend = load_backend(root, node=node, workspace_config=config)
-    with workspace_executor_for(backend, root, node) as executor:
-        return _cmd_run_impl(
-            args, root, config, graph, node, backend, executor,
-            max_attempts=max_attempts, evaluated_attempts=evaluated_attempts,
-        )
+    try:
+        with workspace_executor_for(backend, root, node) as executor:
+            return _cmd_run_impl(
+                args, root, config, graph, node, backend, executor,
+                max_attempts=max_attempts, evaluated_attempts=evaluated_attempts,
+            )
+    except Exception as exc:  # noqa: BLE001
+        if getattr(backend, "name", None) == "remote" and node.get("status") == "active":
+            attempt_n = int(node.get("current_attempt") or 0)
+            started_at = str(
+                (_read_attempt_state(root, args.exp_id, attempt_n) or {}).get("started_at")
+                or utc_now()
+            )
+            error_msg = f"remote_infra_failure:{exc}"
+
+            def _mark_failed(current_node: dict, _graph: dict) -> None:
+                current_node["status"] = "failed"
+                current_node["error"] = error_msg
+
+            update_node(root, args.exp_id, _mark_failed)
+            if attempt_n > 0:
+                _write_attempt_state(
+                    root, args.exp_id, attempt_n,
+                    phase="failed", status="failed", started_at=started_at,
+                    extra={"error": error_msg},
+                )
+                _write_attempt_outcome(
+                    root, args.exp_id, attempt_n, "failed",
+                    node=node, started_at=started_at, error=error_msg,
+                    parent_score=_resolve_parent_score(graph, node["parent"]),
+                    metric=config.get("metric"),
+                )
+            try:
+                from .backends import DiscardCtx as _DCtx
+                failed_node = dict(node)
+                failed_node["status"] = "failed"
+                backend.release_lease(_DCtx(root=root, node=failed_node))
+            except Exception:
+                pass
+            write_scratchpad(root)
+            print(f"FAILED {args.exp_id} {error_msg}")
+            return 1
+        raise
 
 
 def _next_check_dir(root: Path, exp_id: str) -> tuple[int, Path]:
@@ -1561,6 +1721,7 @@ def _runtime_env_for_attempt(
     worktree: Path,
     env_traces_dir: str,
     env_result_path: str,
+    env_checkpoint_dir: str,
 ) -> dict[str, str]:
     env = resolve_runtime_env(root, config)
     env["EVO_TRACES_DIR"] = env_traces_dir
@@ -1568,6 +1729,7 @@ def _runtime_env_for_attempt(
     env["EVO_EXPERIMENT_ID"] = exp_id
     env["EVO_ATTEMPT"] = attempt_label
     env["EVO_RESULT_PATH"] = env_result_path
+    env["EVO_CHECKPOINT_DIR"] = env_checkpoint_dir
     return env
 
 
@@ -1654,6 +1816,8 @@ def _cmd_run_check(
     target = node_target_path(root, config, node)
     traces_dir = check_dir / "traces"
     traces_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = check_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     benchmark_log = check_dir / "benchmark.log"
     benchmark_err = check_dir / "benchmark_err.log"
     result_path = check_dir / "result.json"
@@ -1662,17 +1826,24 @@ def _cmd_run_check(
     if remote:
         sandbox_traces_dir = f"{worktree}/.evo/check_traces"
         sandbox_result_path = f"{worktree}/.evo/check_result.json"
+        sandbox_checkpoint_dir = f"{worktree}/.evo/check_checkpoints"
         run_cwd: Path | str = worktree
         env_traces_dir = sandbox_traces_dir
         env_result_path = sandbox_result_path
-        executor.run(["rm", "-rf", sandbox_traces_dir, sandbox_result_path], cwd=worktree)
-        executor.run(["mkdir", "-p", sandbox_traces_dir], cwd=worktree)
+        env_checkpoint_dir = sandbox_checkpoint_dir
+        executor.run(
+            ["rm", "-rf", sandbox_traces_dir, sandbox_result_path, sandbox_checkpoint_dir],
+            cwd=worktree,
+        )
+        executor.run(["mkdir", "-p", sandbox_traces_dir, sandbox_checkpoint_dir], cwd=worktree)
     else:
         sandbox_traces_dir = ""
         sandbox_result_path = ""
+        sandbox_checkpoint_dir = ""
         run_cwd = root
         env_traces_dir = str(traces_dir.resolve())
         env_result_path = str(result_path.resolve())
+        env_checkpoint_dir = str((check_dir / "checkpoints").resolve())
 
     benchmark_cmd = _apply_runtime_prefix(
         config,
@@ -1686,6 +1857,7 @@ def _cmd_run_check(
         worktree=worktree,
         env_traces_dir=env_traces_dir,
         env_result_path=env_result_path,
+        env_checkpoint_dir=env_checkpoint_dir,
     )
     gate_records: list[dict] = []
     runtime_records: list[dict] = []
@@ -1718,6 +1890,7 @@ def _cmd_run_check(
             stdout_path=benchmark_log, stderr_path=benchmark_err,
             mirror_remote_dir=sandbox_traces_dir if remote else None,
             mirror_local_dir=traces_dir if remote else None,
+            mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
         )
         if bench.timed_out:
             raise RuntimeError("benchmark_timeout")
@@ -1725,6 +1898,9 @@ def _cmd_run_check(
             benchmark_record = {"command": benchmark_cmd, "returncode": bench.exit_code, "result": None}
             if remote:
                 _fetch_remote_artifacts(executor, sandbox_result_path, sandbox_traces_dir, result_path, traces_dir)
+                infra_error = _remote_infra_error_for_log(benchmark_log)
+                if infra_error is not None:
+                    raise RuntimeError(f"remote_infra_failure:{infra_error}")
             raise RuntimeError(f"benchmark_exit_{bench.exit_code}")
         if remote:
             _fetch_remote_artifacts(executor, sandbox_result_path, sandbox_traces_dir, result_path, traces_dir)
@@ -1843,15 +2019,39 @@ def _cmd_run_impl(
                 )
             return 1
 
-    # Bumped even on failed runs so NNN subdirs never collide.
-    attempt_n = int(node.get("current_attempt", 0)) + 1
-    started_at = utc_now()
+    resume_journal: dict | None = None
+    resume_state: dict | None = None
+    resume_existing_attempt = False
+    resume_attempt = int(node.get("current_attempt") or 0)
+    if executor.is_remote and node.get("status") == "active" and resume_attempt > 0:
+        resume_state = _read_attempt_state(root, args.exp_id, resume_attempt)
+        resume_journal = _resumable_remote_benchmark_journal(
+            root, args.exp_id, resume_attempt
+        )
+        if resume_state is None and resume_journal is None:
+            print(
+                "ERROR: active remote attempt has no recovery metadata; "
+                "use `evo discard ...` or branch a fresh experiment.",
+                file=sys.stderr,
+            )
+            return 1
+        resume_existing_attempt = True
 
-    def _mark_active(current_node: dict, _graph: dict) -> None:
-        current_node["status"] = "active"
-        current_node["current_attempt"] = attempt_n
+    # Bumped even on failed runs so NNN subdirs never collide. A resumable
+    # active remote attempt keeps its original attempt number.
+    attempt_n = resume_attempt if resume_existing_attempt else int(node.get("current_attempt", 0)) + 1
+    started_at = str(
+        (resume_state or {}).get("started_at")
+        or (resume_journal or {}).get("started_at")
+        or utc_now()
+    )
 
-    update_node(root, args.exp_id, _mark_active)
+    if not resume_existing_attempt:
+        def _mark_active(current_node: dict, _graph: dict) -> None:
+            current_node["status"] = "active"
+            current_node["current_attempt"] = attempt_n
+
+        update_node(root, args.exp_id, _mark_active)
 
     worktree = Path(node["worktree"])
     target = node_target_path(root, config, node)
@@ -1860,6 +2060,8 @@ def _cmd_run_impl(
     a_dir.mkdir(parents=True, exist_ok=True)
     traces_dir = attempt_traces_dir(root, args.exp_id, attempt_n)
     traces_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = a_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     benchmark_log = a_dir / "benchmark.log"
     benchmark_err = a_dir / "benchmark_err.log"
     result_path = a_dir / "result.json"
@@ -1876,19 +2078,23 @@ def _cmd_run_impl(
         # resolve elsewhere.
         sandbox_traces_dir = f"{worktree}/.evo/traces"
         sandbox_result_path = f"{worktree}/.evo/result.json"
+        sandbox_checkpoint_dir = f"{worktree}/.evo/checkpoints/{args.exp_id}/{attempt_n:03d}"
         run_cwd: Path | str = worktree
         env_traces_dir = sandbox_traces_dir
         env_result_path = sandbox_result_path
+        env_checkpoint_dir = sandbox_checkpoint_dir
         # Pre-create the traces dir inside the sandbox so the benchmark
         # can write into it without checking exists().
         executor.run(
-            ["mkdir", "-p", sandbox_traces_dir],
+            ["mkdir", "-p", sandbox_traces_dir, sandbox_checkpoint_dir],
             cwd=worktree,
         )
     else:
+        sandbox_checkpoint_dir = ""
         run_cwd = root
         env_traces_dir = str(traces_dir.resolve())
         env_result_path = str(result_path.resolve())
+        env_checkpoint_dir = str(checkpoint_dir.resolve())
 
     benchmark_cmd = _apply_runtime_prefix(
         config,
@@ -1904,7 +2110,31 @@ def _cmd_run_impl(
         worktree=worktree,
         env_traces_dir=env_traces_dir,
         env_result_path=env_result_path,
+        env_checkpoint_dir=env_checkpoint_dir,
     )
+    if resume_existing_attempt:
+        _write_attempt_state(
+            root, args.exp_id, attempt_n,
+            phase=str((resume_state or {}).get("phase") or "unknown"),
+            status="resuming",
+            started_at=started_at,
+            extra={
+                "resumed_at": utc_now(),
+                "checkpoint_dir": str(checkpoint_dir),
+                "remote_checkpoint_dir": sandbox_checkpoint_dir if remote else None,
+            },
+        )
+    else:
+        _write_attempt_state(
+            root, args.exp_id, attempt_n,
+            phase="initializing",
+            status="running",
+            started_at=started_at,
+            extra={
+                "checkpoint_dir": str(checkpoint_dir),
+                "remote_checkpoint_dir": sandbox_checkpoint_dir if remote else None,
+            },
+        )
 
     # Captured before the benchmark runs so it survives crashes too.
     # Use parent commit hash rather than branch ref: branch names like
@@ -1926,12 +2156,28 @@ def _cmd_run_impl(
     gate_records: list[dict] = []
     runtime_records: list[dict] = []
     benchmark_record: dict | None = None
+    resume_phase = str((resume_state or {}).get("phase") or "")
+    benchmark_completed = (
+        resume_existing_attempt
+        and _attempt_phase_index(resume_phase) >= _attempt_phase_index("artifacts")
+        and result_path.exists()
+    )
 
     try:
         for hook_name, log_name in (
             ("prepare", "runtime_prepare.log"),
             ("before_run", "runtime_before_run.log"),
         ):
+            phase_name = f"runtime_{hook_name}"
+            if (
+                resume_existing_attempt
+                and _attempt_phase_index(resume_phase) > _attempt_phase_index(phase_name)
+            ):
+                continue
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase=phase_name, status="running", started_at=started_at,
+            )
             record = _run_runtime_hook(
                 executor,
                 config,
@@ -1945,20 +2191,60 @@ def _cmd_run_impl(
             )
             if record is not None:
                 runtime_records.append(record)
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase=phase_name, status="completed", started_at=started_at,
+            )
 
         # Run benchmark via sh -c so the user-provided command string
         # (with placeholders interpolated) executes through a shell, same
         # semantics as before.
-        bench = executor.stream(
-            ["sh", "-c", benchmark_cmd],
-            cwd=run_cwd, env=env, timeout=args.timeout,
-            stdout_path=benchmark_log, stderr_path=benchmark_err,
-            mirror_remote_dir=sandbox_traces_dir if remote else None,
-            mirror_local_dir=traces_dir if remote else None,
-        )
-        if bench.timed_out:
+        if benchmark_completed:
+            print(
+                f"RECOVERING {args.exp_id} attempt={attempt_n} "
+                f"phase={resume_phase} state={(resume_state or {}).get('status')}"
+            )
+            bench = None
+        elif resume_journal:
+            print(
+                f"RECOVERING {args.exp_id} attempt={attempt_n} "
+                f"process={resume_journal['process_id']} "
+                f"state={resume_journal.get('state')}"
+            )
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="benchmark", status="attaching", started_at=started_at,
+                extra={"process_id": resume_journal.get("process_id")},
+            )
+            bench = executor.attach(
+                str(resume_journal["process_id"]),
+                cmd=[str(part) for part in resume_journal["command"]],
+                cwd=str(resume_journal.get("cwd") or run_cwd),
+                env=env,
+                timeout=args.timeout,
+                stdout_path=benchmark_log,
+                stderr_path=benchmark_err,
+                mirror_remote_dir=sandbox_traces_dir if remote else None,
+                mirror_local_dir=traces_dir if remote else None,
+                mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
+                append=False,
+            )
+        else:
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="benchmark", status="running", started_at=started_at,
+            )
+            bench = executor.stream(
+                ["sh", "-c", benchmark_cmd],
+                cwd=run_cwd, env=env, timeout=args.timeout,
+                stdout_path=benchmark_log, stderr_path=benchmark_err,
+                mirror_remote_dir=sandbox_traces_dir if remote else None,
+                mirror_local_dir=traces_dir if remote else None,
+                mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
+            )
+        if bench is not None and bench.timed_out:
             raise RuntimeError("benchmark_timeout")
-        if (bench.exit_code or 0) != 0:
+        if bench is not None and (bench.exit_code or 0) != 0:
             benchmark_record = {"command": benchmark_cmd, "returncode": bench.exit_code, "result": None}
             # Try to fetch result.json + traces back even on failure --
             # the benchmark may have written something useful before
@@ -1966,15 +2252,43 @@ def _cmd_run_impl(
             if remote:
                 _fetch_remote_artifacts(executor, sandbox_result_path,
                                         sandbox_traces_dir, result_path, traces_dir)
+                executor.fetch_dir(sandbox_checkpoint_dir, checkpoint_dir)
+                infra_error = _remote_infra_error_for_log(benchmark_log)
+                if infra_error is not None:
+                    raise RuntimeError(f"remote_infra_failure:{infra_error}")
             raise RuntimeError(f"benchmark_exit_{bench.exit_code}")
 
         # Pull result.json + traces from the sandbox (no-op for local).
-        if remote:
+        if remote and not benchmark_completed:
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="artifacts", status="running", started_at=started_at,
+            )
             _fetch_remote_artifacts(executor, sandbox_result_path,
                                     sandbox_traces_dir, result_path, traces_dir)
+            executor.fetch_dir(sandbox_checkpoint_dir, checkpoint_dir)
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="artifacts", status="completed", started_at=started_at,
+            )
+        elif not benchmark_completed:
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="benchmark", status="completed", started_at=started_at,
+            )
 
-        score, parsed = load_result(result_path, bench.stdout)
+        bench_stdout = bench.stdout if bench is not None else (
+            benchmark_log.read_text(encoding="utf-8", errors="replace")
+            if benchmark_log.exists() else ""
+        )
+        score, parsed = load_result(result_path, bench_stdout)
         benchmark_record = {"command": benchmark_cmd, "returncode": 0, "result": parsed}
+        _write_attempt_state(
+            root, args.exp_id, attempt_n,
+            phase="artifacts" if remote else "benchmark",
+            status="completed", started_at=started_at,
+            extra={"score": score},
+        )
 
         gate_passed = True
         gate_failures: list[str] = []
@@ -1985,6 +2299,10 @@ def _cmd_run_impl(
         # the benchmark's task_*.json traces.
         gate_env = {k: v for k, v in env.items() if not k.startswith("EVO_")}
 
+        _write_attempt_state(
+            root, args.exp_id, attempt_n,
+            phase="gates", status="running", started_at=started_at,
+        )
         for g in inherited_gates:
             gate_cmd = _apply_runtime_prefix(
                 config,
@@ -1995,6 +2313,7 @@ def _cmd_run_impl(
                 ["sh", "-c", gate_cmd],
                 cwd=run_cwd, env=gate_env, timeout=args.timeout,
                 stdout_path=gate_log_file, stderr_path=gate_log_file,
+                mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
             )
             if gate_result.timed_out:
                 gate_records.append({
@@ -2020,9 +2339,18 @@ def _cmd_run_impl(
 
         if gate_failures:
             print(f"GATE_FAILED {' '.join(gate_failures)}")
+        _write_attempt_state(
+            root, args.exp_id, attempt_n,
+            phase="gates", status="completed", started_at=started_at,
+            extra={"gate_failures": gate_failures},
+        )
 
         keep = compare_scores(metric, score, parent_score) and gate_passed
         if keep:
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="commit", status="running", started_at=started_at,
+            )
             commit = maybe_commit_worktree(
                 node,
                 node.get("hypothesis", "experiment"),
@@ -2078,6 +2406,11 @@ def _cmd_run_impl(
             if config.get("comparison_blocked") and node["parent"] == "root":
                 mark_comparison_blocked(root, False)
             _finalize_result(root, args.exp_id, node, score, "committed", {"commit": commit})
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="complete", status="committed", started_at=started_at,
+                extra={"commit": commit, "score": score},
+            )
             _write_attempt_outcome(
                 root, args.exp_id, attempt_n, "committed",
                 node=node, started_at=started_at, score=score,
@@ -2109,6 +2442,11 @@ def _cmd_run_impl(
 
         update_node(root, args.exp_id, _mark_evaluated)
         _finalize_result(root, args.exp_id, node, score, "evaluated")
+        _write_attempt_state(
+            root, args.exp_id, attempt_n,
+            phase="complete", status="evaluated", started_at=started_at,
+            extra={"score": score},
+        )
         _write_attempt_outcome(
             root, args.exp_id, attempt_n, "evaluated",
             node=node, started_at=started_at, score=score,
@@ -2153,6 +2491,11 @@ def _cmd_run_impl(
 
         update_node(root, args.exp_id, _mark_failed)
         _finalize_result(root, args.exp_id, node, salvaged_score, "failed", {"error": str(exc)})
+        _write_attempt_state(
+            root, args.exp_id, attempt_n,
+            phase="failed", status="failed", started_at=started_at,
+            extra={"error": error_msg, "score": salvaged_score},
+        )
         _write_attempt_outcome(
             root, args.exp_id, attempt_n, "failed",
             node=node, started_at=started_at, score=salvaged_score,

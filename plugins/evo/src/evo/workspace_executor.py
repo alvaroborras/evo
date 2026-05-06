@@ -20,6 +20,7 @@ Stream semantics (run vs. stream):
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -27,6 +28,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -71,6 +73,7 @@ class WorkspaceExecutor:
         stderr_path: Path,
         mirror_remote_dir: Path | str | None = None,
         mirror_local_dir: Path | None = None,
+        mirror_dirs: list[tuple[Path | str, Path]] | None = None,
     ) -> ExecResult:
         raise NotImplementedError
 
@@ -154,10 +157,11 @@ class LocalExecutor(WorkspaceExecutor):
         stderr_path: Path,
         mirror_remote_dir: Path | str | None = None,
         mirror_local_dir: Path | None = None,
+        mirror_dirs: list[tuple[Path | str, Path]] | None = None,
     ) -> ExecResult:
         """Spawn the process and tee stdout/stderr to local files in real
         time. Returns when the process exits or `timeout` elapses."""
-        del mirror_remote_dir, mirror_local_dir
+        del mirror_remote_dir, mirror_local_dir, mirror_dirs
         t0 = time.monotonic()
         with stdout_path.open("wb") as out_f, stderr_path.open("wb") as err_f:
             proc = subprocess.Popen(
@@ -228,9 +232,29 @@ class RemoteExecutor(WorkspaceExecutor):
     duration of `evo run`; closed at the end."""
 
     is_remote = True
+    status_failure_limit = 5
+    status_failure_base_delay = 0.25
+    status_failure_max_delay = 2.0
 
     def __init__(self, client: SandboxClient) -> None:
         self.client = client
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _journal_path(stdout_path: Path, stderr_path: Path) -> Path:
+        if stdout_path == stderr_path:
+            return stdout_path.with_name(stdout_path.name + ".remote.json")
+        return stdout_path.parent / f"{stdout_path.name}.remote.json"
+
+    @staticmethod
+    def _write_journal(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
 
     def run(
         self,
@@ -272,15 +296,11 @@ class RemoteExecutor(WorkspaceExecutor):
         stderr_path: Path,
         mirror_remote_dir: Path | str | None = None,
         mirror_local_dir: Path | None = None,
+        mirror_dirs: list[tuple[Path | str, Path]] | None = None,
     ) -> ExecResult:
         """Long-running process + streamed logs + best-effort trace mirroring."""
         if not cmd:
             raise ValueError("cmd must be a non-empty list")
-
-        stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        stderr_path.parent.mkdir(parents=True, exist_ok=True)
-        stdout_path.write_bytes(b"")
-        stderr_path.write_bytes(b"")
 
         process_id = self.client.process_start(
             command=cmd[0],
@@ -288,10 +308,100 @@ class RemoteExecutor(WorkspaceExecutor):
             cwd=str(cwd),
             env=env or None,
         )
+        return self.attach(
+            process_id,
+            cmd=cmd,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            mirror_remote_dir=mirror_remote_dir,
+            mirror_local_dir=mirror_local_dir,
+            mirror_dirs=mirror_dirs,
+            append=False,
+        )
+
+    def attach(
+        self,
+        process_id: str,
+        *,
+        cmd: list[str],
+        cwd: Path | str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        stdout_path: Path,
+        stderr_path: Path,
+        mirror_remote_dir: Path | str | None = None,
+        mirror_local_dir: Path | None = None,
+        mirror_dirs: list[tuple[Path | str, Path]] | None = None,
+        append: bool = False,
+    ) -> ExecResult:
+        """Attach to an existing remote process and stream/poll until exit.
+
+        This is best-effort with the current sandbox-agent API: it can reuse a
+        process id after an orchestrator restart, but log replay depends on the
+        daemon returning existing log entries when a follow stream is opened.
+        """
+        if not cmd:
+            raise ValueError("cmd must be a non-empty list")
+        return self._stream_existing_process(
+            process_id,
+            cmd=cmd,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            mirror_remote_dir=mirror_remote_dir,
+            mirror_local_dir=mirror_local_dir,
+            mirror_dirs=mirror_dirs,
+            append=append,
+        )
+
+    def _stream_existing_process(
+        self,
+        process_id: str,
+        *,
+        cmd: list[str],
+        cwd: Path | str,
+        env: dict[str, str] | None,
+        timeout: float | None,
+        stdout_path: Path,
+        stderr_path: Path,
+        mirror_remote_dir: Path | str | None,
+        mirror_local_dir: Path | None,
+        mirror_dirs: list[tuple[Path | str, Path]] | None,
+        append: bool,
+    ) -> ExecResult:
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        if not append:
+            stdout_path.write_bytes(b"")
+            stderr_path.write_bytes(b"")
+
         started = time.monotonic()
+        journal_path = self._journal_path(stdout_path, stderr_path)
+        journal: dict[str, Any] = {
+            "state": "running",
+            "process_id": process_id,
+            "command": list(cmd),
+            "cwd": str(cwd),
+            "env_keys": sorted((env or {}).keys()),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "started_at": self._utc_now(),
+            "updated_at": self._utc_now(),
+        }
+        self._write_journal(journal_path, journal)
         stop_event = threading.Event()
         log_errors: list[tuple[str, Exception]] = []
         mirrored_sizes: dict[str, int | None] = {}
+        mirror_pairs: list[tuple[str, Path]] = []
+        if mirror_remote_dir is not None and mirror_local_dir is not None:
+            mirror_pairs.append((str(mirror_remote_dir), mirror_local_dir))
+        for remote_dir, local_dir in mirror_dirs or []:
+            mirror_pairs.append((str(remote_dir), local_dir))
 
         def _consume_logs(stream_name: str, path: Path) -> None:
             log_client = self.client.clone()
@@ -310,27 +420,28 @@ class RemoteExecutor(WorkspaceExecutor):
                 log_client.close()
 
         def _mirror_once(client: SandboxClient) -> None:
-            if mirror_remote_dir is None or mirror_local_dir is None:
+            if not mirror_pairs:
                 return
-            mirror_local_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                entries = client.fs_entries(str(mirror_remote_dir))
-            except Exception:
-                return
-            for entry in entries:
-                if entry.is_dir:
-                    continue
-                if mirrored_sizes.get(entry.path) == entry.size:
-                    continue
+            for remote_dir, local_dir in mirror_pairs:
+                local_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    blob = client.fs_read(entry.path)
+                    entries = client.fs_entries(remote_dir)
                 except Exception:
                     continue
-                (mirror_local_dir / entry.name).write_bytes(blob)
-                mirrored_sizes[entry.path] = entry.size
+                for entry in entries:
+                    if entry.is_dir:
+                        continue
+                    if mirrored_sizes.get(entry.path) == entry.size:
+                        continue
+                    try:
+                        blob = client.fs_read(entry.path)
+                    except Exception:
+                        continue
+                    (local_dir / entry.name).write_bytes(blob)
+                    mirrored_sizes[entry.path] = entry.size
 
         def _mirror_loop() -> None:
-            if mirror_remote_dir is None or mirror_local_dir is None:
+            if not mirror_pairs:
                 return
             mirror_client = self.client.clone()
             try:
@@ -361,12 +472,13 @@ class RemoteExecutor(WorkspaceExecutor):
         stdout_thread.start()
         stderr_thread.start()
         mirror_thread.start()
-        if mirror_remote_dir is not None and mirror_local_dir is not None:
+        if mirror_pairs:
             _mirror_once(self.client)
 
         timed_out = False
         status: dict[str, Any] | None = None
         status_error: Exception | None = None
+        consecutive_status_errors = 0
         deadline = (started + timeout) if timeout is not None else None
         while True:
             if deadline is not None and time.monotonic() >= deadline:
@@ -385,15 +497,46 @@ class RemoteExecutor(WorkspaceExecutor):
                         self.client.process_kill(process_id)
                     except Exception:
                         pass
+                journal.update({
+                    "state": "timed_out",
+                    "timed_out": True,
+                    "remote_status": status,
+                    "updated_at": self._utc_now(),
+                })
+                self._write_journal(journal_path, journal)
                 break
             try:
                 status = self.client.process_status(process_id)
+                consecutive_status_errors = 0
+                status_error = None
             except Exception as exc:  # noqa: BLE001
                 status_error = exc
-                break
-            if mirror_remote_dir is not None and mirror_local_dir is not None:
+                consecutive_status_errors += 1
+                if consecutive_status_errors >= self.status_failure_limit:
+                    status = None
+                    journal.update({
+                        "state": "failed_infra",
+                        "error": str(exc),
+                        "status_failures": consecutive_status_errors,
+                        "updated_at": self._utc_now(),
+                    })
+                    self._write_journal(journal_path, journal)
+                    break
+                time.sleep(min(
+                    self.status_failure_base_delay * (2 ** (consecutive_status_errors - 1)),
+                    self.status_failure_max_delay,
+                ))
+                continue
+            if mirror_pairs:
                 _mirror_once(self.client)
             if status.get("status") != "running":
+                journal.update({
+                    "state": "exited",
+                    "exit_code": status.get("exitCode"),
+                    "remote_status": status,
+                    "updated_at": self._utc_now(),
+                })
+                self._write_journal(journal_path, journal)
                 break
             time.sleep(0.25)
 
@@ -408,13 +551,23 @@ class RemoteExecutor(WorkspaceExecutor):
             if stderr and not stderr.endswith("\n"):
                 stderr += "\n"
             stderr += f"[remote stream disconnected] {status_error}"
-        if log_errors and status is None:
+        if log_errors:
             if stderr and not stderr.endswith("\n"):
                 stderr += "\n"
             stderr += "[remote log follow failed] " + "; ".join(
                 f"{name}: {exc}" for name, exc in log_errors
             )
         stderr_path.write_text(stderr, encoding="utf-8")
+
+        if log_errors:
+            journal.update({
+                "log_follow_errors": [
+                    {"stream": name, "error": str(exc)}
+                    for name, exc in log_errors
+                ],
+                "updated_at": self._utc_now(),
+            })
+            self._write_journal(journal_path, journal)
 
         return ExecResult(
             stdout=stdout,

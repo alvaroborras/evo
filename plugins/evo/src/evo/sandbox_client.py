@@ -23,6 +23,9 @@ import requests
 # bounds long-running benchmarks separately.
 DEFAULT_REQUEST_TIMEOUT = 60.0       # most ops should be <1s; 60s = patience
 LONG_REQUEST_TIMEOUT = 600.0         # process/run with embedded benchmark
+SAFE_REQUEST_ATTEMPTS = 3
+SAFE_REQUEST_BASE_DELAY = 0.25
+SAFE_REQUEST_MAX_DELAY = 2.0
 
 
 @dataclass
@@ -104,11 +107,49 @@ class SandboxAgentClient:
             )
         return resp
 
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        retry: bool = False,
+        **kwargs: Any,
+    ) -> requests.Response:
+        call = getattr(self._session, method)
+        if not retry:
+            resp = call(self._url(path), **kwargs)
+            return self._check(resp)
+
+        last_err: Exception | None = None
+        for attempt in range(SAFE_REQUEST_ATTEMPTS):
+            try:
+                resp = call(self._url(path), **kwargs)
+                return self._check(resp)
+            except SandboxAgentError as exc:
+                last_err = exc
+                if not (500 <= exc.status < 600) or attempt == SAFE_REQUEST_ATTEMPTS - 1:
+                    raise
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_err = exc
+                if attempt == SAFE_REQUEST_ATTEMPTS - 1:
+                    raise
+            time.sleep(min(
+                SAFE_REQUEST_BASE_DELAY * (2 ** attempt),
+                SAFE_REQUEST_MAX_DELAY,
+            ))
+        if last_err is not None:
+            raise last_err
+        raise SandboxAgentError(0, f"{method.upper()} {self._url(path)} failed")
+
     # ---------------------------------------------------------------- health
 
     def health(self) -> dict[str, Any]:
-        resp = self._session.get(self._url("/v1/health"), timeout=DEFAULT_REQUEST_TIMEOUT)
-        self._check(resp)
+        resp = self._request(
+            "get",
+            "/v1/health",
+            retry=True,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
         try:
             return resp.json()
         except ValueError:
@@ -160,12 +201,12 @@ class SandboxAgentClient:
         http_timeout = (
             (timeout_ms / 1000) + 10 if timeout_ms is not None else LONG_REQUEST_TIMEOUT
         )
-        resp = self._session.post(
-            self._url("/v1/processes/run"),
+        resp = self._request(
+            "post",
+            "/v1/processes/run",
             json=body,
             timeout=http_timeout,
         )
-        self._check(resp)
         data = resp.json()
         return ProcessRunResult(
             stdout=data.get("stdout", ""),
@@ -193,12 +234,12 @@ class SandboxAgentClient:
             body["cwd"] = cwd
         if env:
             body["env"] = dict(env)
-        resp = self._session.post(
-            self._url("/v1/processes"),
+        resp = self._request(
+            "post",
+            "/v1/processes",
             json=body,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
         data = resp.json()
         pid = data.get("id")
         if not pid:
@@ -208,11 +249,12 @@ class SandboxAgentClient:
         return str(pid)
 
     def process_status(self, process_id: str) -> dict[str, Any]:
-        resp = self._session.get(
-            self._url(f"/v1/processes/{process_id}"),
+        resp = self._request(
+            "get",
+            f"/v1/processes/{process_id}",
+            retry=True,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
         return resp.json()
 
     def process_logs(
@@ -223,12 +265,13 @@ class SandboxAgentClient:
     ) -> Iterator[ProcessLogEntry]:
         """Yield parsed process log entries."""
         params = {"follow": "true" if follow else "false", "stream": stream}
-        resp = self._session.get(
-            self._url(f"/v1/processes/{process_id}/logs?{urlencode(params)}"),
+        resp = self._request(
+            "get",
+            f"/v1/processes/{process_id}/logs?{urlencode(params)}",
+            retry=not follow,
             stream=follow,
             timeout=None if follow else DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
         try:
             if not follow:
                 payload = resp.json()
@@ -255,43 +298,45 @@ class SandboxAgentClient:
             resp.close()
 
     def process_stop(self, process_id: str) -> None:
-        resp = self._session.post(
-            self._url(f"/v1/processes/{process_id}/stop"),
+        self._request(
+            "post",
+            f"/v1/processes/{process_id}/stop",
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
 
     def process_kill(self, process_id: str) -> None:
-        resp = self._session.post(
-            self._url(f"/v1/processes/{process_id}/kill"),
+        self._request(
+            "post",
+            f"/v1/processes/{process_id}/kill",
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
 
     # ---------------------------------------------------------------- filesystem
 
     def fs_read(self, path: str) -> bytes:
-        resp = self._session.get(
-            self._url(f"/v1/fs/file?{urlencode({'path': path})}"),
+        resp = self._request(
+            "get",
+            f"/v1/fs/file?{urlencode({'path': path})}",
+            retry=True,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
         return resp.content
 
     def fs_write(self, path: str, data: bytes) -> None:
-        resp = self._session.put(
-            self._url(f"/v1/fs/file?{urlencode({'path': path})}"),
+        self._request(
+            "put",
+            f"/v1/fs/file?{urlencode({'path': path})}",
             data=data,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
 
     def fs_entries(self, path: str) -> list[FsEntry]:
-        resp = self._session.get(
-            self._url(f"/v1/fs/entries?{urlencode({'path': path})}"),
+        resp = self._request(
+            "get",
+            f"/v1/fs/entries?{urlencode({'path': path})}",
+            retry=True,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
         # Response is a top-level JSON array of FsEntry objects.
         # FsEntry shape: {name, path, entryType: "file"|"directory"|..., size, modified?}
         out = []
@@ -306,11 +351,12 @@ class SandboxAgentClient:
         return out
 
     def fs_stat(self, path: str) -> dict[str, Any]:
-        resp = self._session.get(
-            self._url(f"/v1/fs/stat?{urlencode({'path': path})}"),
+        resp = self._request(
+            "get",
+            f"/v1/fs/stat?{urlencode({'path': path})}",
+            retry=True,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
         return resp.json()
 
     def fs_mkdir(self, path: str, recursive: bool = True) -> None:
@@ -319,39 +365,39 @@ class SandboxAgentClient:
         # mkdir-p semantics (intermediate dirs created); the flag is a
         # no-op against the server. Server takes path as a query param.
         del recursive
-        resp = self._session.post(
-            self._url(f"/v1/fs/mkdir?{urlencode({'path': path})}"),
+        self._request(
+            "post",
+            f"/v1/fs/mkdir?{urlencode({'path': path})}",
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
 
     def fs_delete(self, path: str, recursive: bool = False) -> None:
         params = {"path": path, "recursive": "true" if recursive else "false"}
-        resp = self._session.delete(
-            self._url(f"/v1/fs/entry?{urlencode(params)}"),
+        self._request(
+            "delete",
+            f"/v1/fs/entry?{urlencode(params)}",
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
 
     def fs_move(self, src: str, dst: str) -> None:
         body = {"from": src, "to": dst}
-        resp = self._session.post(
-            self._url("/v1/fs/move"),
+        self._request(
+            "post",
+            "/v1/fs/move",
             json=body,
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
-        self._check(resp)
 
     def fs_upload_batch(self, dest_dir: str, tar_bytes: bytes) -> None:
         """Upload a tar archive that the server extracts under `dest_dir`."""
         params = {"path": dest_dir}
-        resp = self._session.post(
-            self._url(f"/v1/fs/upload-batch?{urlencode(params)}"),
+        self._request(
+            "post",
+            f"/v1/fs/upload-batch?{urlencode(params)}",
             data=tar_bytes,
             headers={"Content-Type": "application/x-tar"},
             timeout=LONG_REQUEST_TIMEOUT,
         )
-        self._check(resp)
 
     # ---------------------------------------------------------------- close
 
