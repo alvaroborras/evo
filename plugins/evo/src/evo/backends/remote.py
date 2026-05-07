@@ -201,6 +201,32 @@ class RemoteSandboxBackend:
             state["sandboxes"] = keep
         return cleaned
 
+    def sweep_orphans(self, root: Path, live_exp_ids: set[str]) -> list[str]:
+        """Tear down sandboxes whose `leased_by` exp_id is missing from
+        the graph (or is None — already-released but container alive).
+        Returns native_ids of torn-down sandboxes."""
+        torn: list[str] = []
+        with remote_state.locked_state(root, self.state_key) as state:
+            keep: list[dict[str, Any]] = []
+            for sandbox in state["sandboxes"]:
+                lease = sandbox.get("leased_by")
+                exp_id = (lease or {}).get("exp_id") if lease else None
+                # Reclaim if no holder OR holder is no longer in graph
+                if lease is None or (exp_id and exp_id not in live_exp_ids):
+                    handle = self._handle_from_record(sandbox)
+                    if handle is not None:
+                        try:
+                            self.provider.tear_down(handle)
+                            torn.append(handle.native_id)
+                        except Exception:
+                            pass
+                        self._handles.pop(sandbox["id"], None)
+                        self._tokens.pop(sandbox["id"], None)
+                    continue
+                keep.append(sandbox)
+            state["sandboxes"] = keep
+        return torn
+
     # ---------------------------------------------------------------- reset_all
 
     def reset_all(self, root: Path) -> None:

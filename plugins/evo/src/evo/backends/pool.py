@@ -97,6 +97,24 @@ class PoolBackend:
         False so the CLI doesn't report pool nodes as freed by gc."""
         return False
 
+    def sweep_orphans(self, root: Path, live_exp_ids: set[str]) -> list[str]:
+        """Clear slot leases pointing at exp_ids that no longer exist in
+        the graph (or are terminal). Slot directories themselves are
+        user-owned and never touched. Returns slot ids whose leases were
+        cleared."""
+        cleared: list[str] = []
+        with state_io.locked_state(root, self.state_key) as state:
+            for slot in state["slots"]:
+                lease = slot.get("leased_by")
+                if not lease:
+                    continue
+                exp_id = lease.get("exp_id")
+                if exp_id and exp_id in live_exp_ids:
+                    continue
+                slot["leased_by"] = None
+                cleared.append(str(slot.get("path") or slot.get("id") or ""))
+        return cleared
+
     def reset_all(self, root: Path) -> None:
         """Release every lease, then wipe the run's controller-side state.
 

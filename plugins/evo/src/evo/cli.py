@@ -2797,26 +2797,112 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 
 def cmd_gc(args: argparse.Namespace) -> int:
+    """Reclaim resources held by terminated experiments.
+
+    Two passes:
+      1. Per-node — for each node in {committed, failed, pruned} with no
+         active children, dispatch to ITS backend (via node["backend"])
+         and call backend.gc(node). Hybrid workspaces (mixed backends
+         per node via `evo new --backend ...`) are handled because each
+         node's resources go to the backend that allocated them.
+      2. Cross-backend orphan sweep — for every backend present in the
+         workspace (graph nodes + workspace default), call
+         backend.sweep_orphans(live_exp_ids). This catches resources
+         whose graph entry has vanished entirely (stale leases, leaked
+         remote sandboxes, abandoned worktree directories).
+
+    Pass 1 is bounded by graph size; pass 2 is bounded by per-backend
+    state-file size.
+    """
+    from .backends import (
+        DiscardCtx as _DCtx,
+        backend_spec_for_node,
+        load_backend as _lb,
+    )
+
     root = repo_root()
+    config = load_config(root)
     graph = load_graph(root)
-    removed = []
+    live_exp_ids: set[str] = {nid for nid in graph["nodes"] if nid != "root"}
+
+    removed: list[str] = []
+    backends_used: dict[tuple[str, str], Any] = {}
+
+    def _resolve_backend(node: dict | None):
+        """Pick the backend for `node` (or workspace default if None).
+        Cached on (name, frozenset(config_items)) so we instantiate once
+        per distinct backend in this gc run."""
+        if node is not None:
+            spec_name, spec_config = backend_spec_for_node(root, node, workspace_config=config)
+        else:
+            from .backends import backend_spec_from_config
+            spec_name, spec_config = backend_spec_from_config(config)
+        key = (spec_name, json.dumps(spec_config, sort_keys=True))
+        if key in backends_used:
+            return backends_used[key]
+        backend = _lb(root, node=node, explicit_name=spec_name,
+                     explicit_config=spec_config, workspace_config=config)
+        backends_used[key] = backend
+        return backend
+
+    # Pass 1: per-node gc, dispatching by node["backend"]
     for node in graph["nodes"].values():
         if node["id"] == "root":
             continue
         if node.get("status") not in {"committed", "failed", "pruned"}:
             continue
-        children = [graph["nodes"][cid] for cid in node.get("children", []) if cid in graph["nodes"]]
+        children = [graph["nodes"][cid] for cid in node.get("children", [])
+                    if cid in graph["nodes"]]
         if any(child.get("status") == "active" for child in children):
             continue
-        worktree = Path(node["worktree"])
-        if not worktree.exists():
+        try:
+            backend = _resolve_backend(node)
+        except Exception:
             continue
-        # Only report nodes whose backend actually freed something. In pool
-        # mode the slot directory always exists (user-owned) and gc is a
-        # no-op, so reporting the node as 'removed' would be misleading.
-        if remove_worktree_only(root, node):
-            removed.append(node["id"])
-    print(json.dumps({"removed": removed}, indent=2))
+        try:
+            if backend.gc(_DCtx(root=root, node=node)):
+                removed.append(node["id"])
+        except Exception:
+            # Best-effort cleanup; one node's failure doesn't block others.
+            pass
+
+    # Pass 2: cross-backend orphan sweep. Walk every backend referenced
+    # by any node, plus the workspace-default backend, so we sweep state
+    # for resources whose graph entry has vanished.
+    swept: dict[str, list[str]] = {}
+    distinct_specs: dict[tuple[str, str], dict | None] = {}
+    for node in graph["nodes"].values():
+        if node["id"] == "root":
+            continue
+        try:
+            spec_name, spec_config = backend_spec_for_node(root, node, workspace_config=config)
+            key = (spec_name, json.dumps(spec_config, sort_keys=True))
+            distinct_specs[key] = node
+        except Exception:
+            continue
+    # Always include workspace default
+    try:
+        from .backends import backend_spec_from_config
+        spec_name, spec_config = backend_spec_from_config(config)
+        key = (spec_name, json.dumps(spec_config, sort_keys=True))
+        distinct_specs.setdefault(key, None)
+    except Exception:
+        pass
+
+    for (name, _key), example_node in distinct_specs.items():
+        try:
+            backend = _resolve_backend(example_node)
+            if hasattr(backend, "sweep_orphans"):
+                ids = backend.sweep_orphans(root, live_exp_ids)
+                if ids:
+                    swept[name] = swept.get(name, []) + list(ids)
+        except Exception:
+            pass
+
+    output: dict[str, Any] = {"removed": removed}
+    if swept:
+        output["swept"] = swept
+    print(json.dumps(output, indent=2))
     return 0
 
 

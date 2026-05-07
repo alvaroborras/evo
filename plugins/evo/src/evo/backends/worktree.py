@@ -81,6 +81,34 @@ class WorktreeBackend:
         self._remove_worktree_only(ctx.root, ctx.node)
         return True
 
+    def sweep_orphans(self, root: Path, live_exp_ids: set[str]) -> list[str]:
+        """Find worktree directories under `worktrees/` whose graph entry
+        is missing (e.g., post-`evo reset`, manually-edited graph) and
+        remove them. Returns the list of removed dir paths."""
+        from ..core import worktrees_path
+        wt_dir = worktrees_path(root)
+        if not wt_dir.exists():
+            return []
+        removed: list[str] = []
+        for path in sorted(wt_dir.iterdir()):
+            if not path.is_dir():
+                continue
+            # Slot dir names mirror exp_ids (e.g. "exp_0042")
+            if path.name in live_exp_ids:
+                continue
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(path)],
+                    cwd=root, check=False, capture_output=True,
+                )
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(str(path))
+            except Exception:
+                pass
+        if removed:
+            subprocess.run(["git", "worktree", "prune"], cwd=root, check=False)
+        return removed
+
     def reset_all(self, root: Path) -> None:
         """Wipe all worktrees and branches for the active run."""
         from ..core import _load_meta, workspace_path, worktrees_path

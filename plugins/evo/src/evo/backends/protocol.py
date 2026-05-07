@@ -53,6 +53,21 @@ class Backend(Protocol):
         when nothing was cleaned up.
         """
         ...
+    def sweep_orphans(self, root: Path, live_exp_ids: set[str]) -> list[str]:
+        """Reclaim resources held by this backend that no live experiment
+        owns — sandboxes/leases pointing at exp_ids missing from the graph,
+        worktree dirs whose graph entry vanished, etc.
+
+        `live_exp_ids` is the set of exp_ids currently present in the
+        graph. The backend reclaims anything attributed to an exp_id NOT
+        in this set. Returns the list of resource ids actually reclaimed
+        (paths, native_ids, slot indices — backend-specific) for caller
+        reporting.
+
+        Distinct from `gc(ctx)` which operates on a single graph node.
+        `sweep_orphans` is for state the per-node loop can't see.
+        """
+        ...
     def reset_all(self, root: Path) -> None: ...
 
 
