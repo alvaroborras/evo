@@ -17,20 +17,20 @@ from .core import (
     infra_path,
     load_annotations,
     load_config,
+    list_all_notes,
     load_graph,
-    notes_path,
     parse_diff_patch,
     path_to_node,
-    scratchpad_path,
 )
 
 
 FRONTIER_DISPLAY_CAP = 50
 AWAITING_DISPLAY_CAP = 10
 ANNOTATIONS_DISPLAY_CAP = 15
-RECENT_EXPERIMENTS_DISPLAY_CAP = 8
+RECENT_EXPERIMENTS_DISPLAY_CAP = 25
 RECENT_EVALUATED_WINDOW = 20  # how far back to consider an evaluated node "recent"
                                # for the bounded tree's relevance check
+NOTES_DISPLAY_CAP = 20
 
 
 def _format_strategy_label(strategy: dict[str, Any]) -> str:
@@ -127,13 +127,32 @@ def _build_branch_root_map(graph: dict[str, Any]) -> dict[str, str]:
     return cache
 
 
+# Single-letter status codes for the compact tree. Documented in the section
+# header so agents can decode without external reference.
+_STATUS_GLYPH = {
+    "root": "·",
+    "active": "A",
+    "evaluated": "E",
+    "committed": "C",
+    "discarded": "D",
+    "pruned": "P",
+    "failed": "F",
+}
+
+
 def _bounded_tree(graph: dict[str, Any], metric: str,
                   branch_root_map: dict[str, str],
                   recent_evaluated_ids: set[str],
-                  best_path_ids: set[str]) -> str:
-    """Render the tree, expanding only subtrees that contain active /
-    best-path / recent-evaluated descendants. Cold subtrees collapse to one
-    line: '<connector><id> <status> score=X (+N descendants, best=Y)'."""
+                  best_path_ids: set[str],
+                  uniform_epoch: int | None = None) -> str:
+    """Render the tree compactly. Two-space indent (no box-drawing chars).
+    Each node line: '  exp_NNNN G score [epoch=K] [hyp]' where G is the
+    single-char status glyph. ★ marker prefixes best-path nodes; the
+    Best Path section is dropped because the tree carries the same info.
+
+    Subtrees containing active / best-path / recent-evaluated descendants
+    expand fully. Cold subtrees collapse to one line with descendant
+    count and best-score summary (omitted when N=0)."""
     nodes = graph["nodes"]
     sign = -1 if (metric or "").lower() == "min" else 1
 
@@ -191,56 +210,48 @@ def _bounded_tree(graph: dict[str, Any], metric: str,
         return count, best_score
 
     def label(node: dict[str, Any], collapsed: bool = False) -> str:
-        parts: list[str] = [node["id"], node.get("status", "unknown")]
+        glyph = _STATUS_GLYPH.get(node.get("status", ""), "?")
+        marker = "★ " if node["id"] in best_path_ids and node["id"] != "root" else ""
+        parts: list[str] = [f"{marker}{node['id']}", glyph]
         if node.get("score") is not None:
-            parts.append(f"score={node['score']}")
-        if node.get("eval_epoch") is not None:
-            parts.append(f"epoch={node['eval_epoch']}")
+            parts.append(str(node["score"]))
+        epoch = node.get("eval_epoch")
+        if epoch is not None and epoch != uniform_epoch:
+            parts.append(f"e{epoch}")
         if node.get("pruned_reason"):
             parts.append("pruned")
         if node.get("gates"):
-            parts.append(f"gates={len(node['gates'])}")
+            parts.append(f"g{len(node['gates'])}")
         if node.get("hypothesis") and node["id"] != "root":
             parts.append(_hyp_short(node["hypothesis"]))
         line = " ".join(parts)
         if collapsed:
             sub_count, sub_best = descendant_stats(node["id"])
-            best_str = f", best={sub_best}" if sub_best is not None else ""
-            line += f" (+{sub_count} descendants{best_str})"
+            if sub_count > 0:
+                best_str = f" best={sub_best}" if sub_best is not None else ""
+                line += f" (+{sub_count}{best_str})"
         return line
 
     lines: list[str] = []
 
-    def walk(node_id: str, prefix: str = "", is_last: bool = True) -> None:
+    def walk(node_id: str, depth: int = 0) -> None:
         node = nodes.get(node_id)
         if not node:
             return
+        indent = "  " * depth
         if node_id == "root":
             lines.append(label(node))
+        elif not is_relevant(node_id):
+            lines.append(indent + label(node, collapsed=True))
+            return
         else:
-            connector = "└── " if is_last else "├── "
-            if not is_relevant(node_id):
-                lines.append(prefix + connector + label(node, collapsed=True))
-                return
-            lines.append(prefix + connector + label(node))
+            lines.append(indent + label(node))
         children = sorted([c for c in node.get("children", []) if c in nodes])
-        for index, child_id in enumerate(children):
-            extension = "" if node_id == "root" else ("    " if is_last else "│   ")
-            walk(child_id, prefix + extension, index == len(children) - 1)
+        for child_id in children:
+            walk(child_id, depth + 1)
 
     walk("root")
     return "\n".join(lines)
-
-
-def _diff_summary(root: Path, exp_id: str, attempt: int) -> str | None:
-    parsed = parse_diff_patch(root, exp_id, attempt)
-    if not parsed:
-        return None
-    files = parsed["files"]
-    file_str = ", ".join(files[:3])
-    if len(files) > 3:
-        file_str += f" (+{len(files) - 3} more)"
-    return f"{file_str} (+{parsed['added']}/-{parsed['removed']})"
 
 
 def _group_annotations_by_branch_task(
@@ -287,7 +298,6 @@ def build_scratchpad(root: Path) -> str:
     graph = load_graph(root)
     annotations = load_annotations(root).get("annotations", [])
     infra = json.loads(infra_path(root).read_text(encoding="utf-8")).get("events", []) if infra_path(root).exists() else []
-    notes = notes_path(root).read_text(encoding="utf-8") if notes_path(root).exists() else ""
     metric = config.get("metric", "max")
     committed = [node for node in graph["nodes"].values() if node.get("status") == "committed"]
     discarded = [node for node in graph["nodes"].values() if node.get("status") == "discarded"]
@@ -311,61 +321,62 @@ def build_scratchpad(root: Path) -> str:
     if best_committed and best_committed["id"] != "root":
         best_path_ids = {n["id"] for n in path_to_node(graph, best_committed["id"])}
 
+    # Compute uniform epoch — if every non-root node shares the same epoch,
+    # we can drop the per-line epoch suffix in the tree and frontier.
+    epochs_seen = {n.get("eval_epoch") for n in graph["nodes"].values()
+                   if n["id"] != "root" and n.get("eval_epoch") is not None}
+    uniform_epoch = next(iter(epochs_seen)) if len(epochs_seen) == 1 else None
+
+    # Status: one compact line + optional active-worker line.
+    total = len(graph["nodes"]) - 1
+    counts_short = (
+        f"{len(committed)}c/{len(evaluated)}e/{len(discarded)}d/{len(active)}a"
+    )
+    epoch_now = config.get("current_eval_epoch", 1)
+    epoch_str = f"e{epoch_now}" if epoch_now != 1 else ""
     lines = [
         "# Scratchpad",
         "",
         "## Status",
-        f"- Metric: `{metric}`",
-        f"- Current eval epoch: `{config.get('current_eval_epoch', 1)}`",
-        f"- Best score: `{best}`",
-        f"- Total experiments: `{len(graph['nodes']) - 1}`",
-        f"- Committed: `{len(committed)}`",
-        f"- Evaluated (awaiting decision): `{len(evaluated)}`",
-        f"- Discarded: `{len(discarded)}`",
-        f"- Active workers: `{len(active)}`",
+        f"- metric={metric} best={best} total={total} {counts_short} {epoch_str}".rstrip(),
     ]
+    if active:
+        lines.append(f"- {len(active)} active worker(s)")
 
-    # Tree (bounded: expand active / best-path / recent-evaluated subtrees;
-    # collapse cold subtrees as one line each)
-    lines.extend(["", "## Tree", "```"])
-    lines.append(_bounded_tree(graph, metric, branch_root_map,
-                               recent_evaluated_ids, best_path_ids))
-    lines.extend(["```"])
+    # Tree section header documents the status glyphs and the ★ marker so
+    # the agent can decode the compact form without external reference.
+    epoch_note = f", epoch={uniform_epoch} (uniform; per-node epochs omitted)" if uniform_epoch is not None else ""
+    lines.extend([
+        "",
+        f"## Tree (status: A=active C=committed E=evaluated D=discarded P=pruned F=failed; ★=best path{epoch_note})",
+        "```",
+        _bounded_tree(graph, metric, branch_root_map,
+                      recent_evaluated_ids, best_path_ids,
+                      uniform_epoch=uniform_epoch),
+        "```",
+    ])
+    # Best Path is now ★-marked in the tree; no separate section needed.
 
-    # Best path
-    best_node = best_committed
-    if best_node and best_node["id"] != "root":
-        chain = path_to_node(graph, best_node["id"])
-        lines.extend(["", "## Best Path"])
-        path_parts = []
-        for node in chain:
-            if node["id"] == "root":
-                path_parts.append("root")
-            else:
-                score_str = f" ({node.get('score')})" if node.get("score") is not None else ""
-                path_parts.append(f"{node['id']}{score_str}")
-        lines.append(" -> ".join(path_parts))
-
-    # Frontier (strategy-ranked; deterministic seed for stable rendering)
+    # Frontier (strategy-ranked; only render if there's anything to surface)
     ranked_frontier, strategy = _rank_frontier(root, frontier, config, metric)
-    lines.extend(["", f"## Frontier (strategy: {_format_strategy_label(strategy)})"])
     if ranked_frontier:
+        lines.extend(["", f"## Frontier (strategy: {_format_strategy_label(strategy)})"])
         shown = ranked_frontier[:FRONTIER_DISPLAY_CAP]
         for node in shown:
+            score = node.get("score")
+            ne = node.get("epoch")
+            epoch_part = f" e{ne}" if ne is not None and ne != uniform_epoch else ""
             lines.append(
-                f"- `{node['id']}` score=`{node.get('score')}` "
-                f"epoch=`{node.get('epoch')}` {_hyp_short(node.get('hypothesis'))}"
+                f"- {node['id']} {score}{epoch_part} {_hyp_short(node.get('hypothesis'))}".rstrip()
             )
         if len(ranked_frontier) > FRONTIER_DISPLAY_CAP:
             lines.append(
                 f"(+{len(ranked_frontier) - FRONTIER_DISPLAY_CAP} more — see `evo frontier`)"
             )
-    else:
-        lines.append("- No frontier nodes yet.")
 
     if evaluated:
         lines.extend(["", "## Awaiting Decision"])
-        lines.append("These nodes ran but neither committed nor discarded. Retry (edit + `evo run`) or abandon (`evo discard --reason`).")
+        lines.append("Gate failed or score regressed. Retry: edit + `evo run`. Abandon: `evo discard`. Lease still held.")
         evaluated_recent = sorted(
             evaluated,
             key=lambda n: n.get("updated_at", ""),
@@ -373,81 +384,71 @@ def build_scratchpad(root: Path) -> str:
         )
         for node in evaluated_recent[:AWAITING_DISPLAY_CAP]:
             attempts = int(node.get("evaluated_attempts", 0))
+            gate_failed = node.get("gate_failures") or []
+            gates_part = f" gate_failed={gate_failed}" if gate_failed else ""
             lines.append(
-                f"- `{node['id']}` score=`{node.get('score')}` attempts=`{attempts}` "
-                f"gate_failed=`{node.get('gate_failures') or []}` {_hyp_short(node.get('hypothesis'))}"
+                f"- {node['id']} {node.get('score')} a{attempts}{gates_part} "
+                f"{_hyp_short(node.get('hypothesis'))}".rstrip()
             )
         if len(evaluated_recent) > AWAITING_DISPLAY_CAP:
             lines.append(
                 f"(+{len(evaluated_recent) - AWAITING_DISPLAY_CAP} more — see `evo awaiting`)"
             )
 
-    # Gates
-    # Show gates from root (always active) + any unique gates on frontier nodes
+    # Gates (only when present)
     root_gates = graph["nodes"].get("root", {}).get("gates", [])
     if root_gates or any(n.get("gates") for n in frontier):
         lines.extend(["", "## Gates"])
         if root_gates:
             for g in root_gates:
-                lines.append(f"- `{g['name']}` (root): `{_truncate(g['command'], 120)}`")
+                lines.append(f"- {g['name']} (root): {_truncate(g['command'], 120)}")
         seen_names = {g["name"] for g in root_gates}
         for node in frontier[:10]:
             effective = collect_gates_from_path(graph, node["id"])
             for g in effective:
                 if g["name"] not in seen_names:
                     seen_names.add(g["name"])
-                    lines.append(f"- `{g['name']}` (from tree): `{_truncate(g['command'], 120)}`")
+                    lines.append(f"- {g['name']} (tree): {_truncate(g['command'], 120)}")
 
-    # Recent experiments
-    lines.extend(["", "## Recent Experiments"])
-    if recent:
+    # Recent Experiments — only when the tree is collapsing nodes (otherwise
+    # it's pure duplication of what's already in the tree section above).
+    total_nonroot = len(graph["nodes"]) - 1
+    if recent and total_nonroot > RECENT_EXPERIMENTS_DISPLAY_CAP:
+        lines.extend(["", "## Recent Experiments"])
         for node in recent:
+            glyph = _STATUS_GLYPH.get(node.get("status", ""), "?")
+            parent = node.get("parent") or "root"
             lines.append(
-                f"- `{node['id']}` `{node.get('status')}` score=`{node.get('score')}` {_hyp_short(node.get('hypothesis'))}"
+                f"- {node['id']} ← {parent} {glyph} {node.get('score')} {_hyp_short(node.get('hypothesis'))}".rstrip()
             )
-    else:
-        lines.append("- No experiments yet.")
 
-    # Recent diffs
-    recent_committed = [n for n in recent if n.get("status") == "committed" and n["id"] != "root"][:5]
-    if recent_committed:
-        lines.extend(["", "## Recent Diffs"])
-        for node in recent_committed:
-            summary = _diff_summary(root, node["id"], int(node.get("current_attempt", 0)))
-            if summary:
-                lines.append(f"- `{node['id']}`: {summary}")
-
-    # Annotations grouped by (branch_root, task) — keeps insights from sibling
-    # branches visible instead of letting the latest experiment globally
-    # overwrite older per-task analyses.
-    lines.extend(["", "## Annotations"])
+    # Annotations grouped by (branch_root, task)
     if annotations:
         grouped = _group_annotations_by_branch_task(annotations, branch_root_map)
-        for (branch, task_id), entry in grouped[:ANNOTATIONS_DISPLAY_CAP]:
-            lines.append(
-                f"- branch `{branch}` / task `{task_id}` / `{entry['experiment_id']}`: "
-                f"{_truncate(entry['analysis'])}"
-            )
-        if len(grouped) > ANNOTATIONS_DISPLAY_CAP:
-            lines.append(
-                f"(+{len(grouped) - ANNOTATIONS_DISPLAY_CAP} more — see `evo annotations`)"
-            )
-    else:
-        lines.append("- No annotations yet.")
+        if grouped:
+            lines.extend(["", "## Annotations"])
+            for (branch, task_id), entry in grouped[:ANNOTATIONS_DISPLAY_CAP]:
+                lines.append(
+                    f"- {branch}/{task_id} ({entry['experiment_id']}): "
+                    f"{_truncate(entry['analysis'])}"
+                )
+            if len(grouped) > ANNOTATIONS_DISPLAY_CAP:
+                lines.append(
+                    f"(+{len(grouped) - ANNOTATIONS_DISPLAY_CAP} more — see `evo annotations`)"
+                )
 
-    # What Not To Try (deduplicated)
-    lines.extend(["", "## What Not To Try"])
+    # What Not To Try (only when there are discards)
     if discarded:
         deduped = _dedup_discarded(discarded)
-        for hyp, count in deduped:
-            suffix = f" (x{count})" if count > 1 else ""
-            lines.append(f"- {_truncate(hyp)}{suffix}")
-    else:
-        lines.append("- No discarded hypotheses yet.")
+        if deduped:
+            lines.extend(["", "## What Not To Try"])
+            for hyp, count in deduped:
+                suffix = f" (x{count})" if count > 1 else ""
+                lines.append(f"- {_truncate(hyp)}{suffix}")
 
-    # Infrastructure log
-    lines.extend(["", "## Infrastructure Log"])
+    # Infrastructure log (only when present)
     if infra:
+        lines.extend(["", "## Infrastructure Log"])
         for event in infra[-8:]:
             suffix = " (breaking)" if event.get("breaking") else ""
             # 0.3.0 frontier events shipped with key "at" and no "message"
@@ -456,37 +457,44 @@ def build_scratchpad(root: Path) -> str:
             ts = event.get("timestamp") or event.get("at") or "?"
             msg = event.get("message") or f"{event.get('kind', '?')} event"
             lines.append(f"- {ts}: {msg}{suffix}")
-    else:
-        lines.append("- No infrastructure events yet.")
 
-    # Notes -- aggregate per-node notes (from `evo set --note`) plus the
-    # legacy notes.md (left writable for `core.append_note` callers; the
-    # current shipping flow writes per-node).
-    lines.extend(["", "## Notes"])
-    per_node_notes: list[str] = []
-    for node in graph["nodes"].values():
-        if node.get("id") == "root":
-            continue
-        for entry in node.get("notes", []):
-            ts = entry.get("timestamp", "")
-            text = entry.get("text", "").strip()
+    # Notes — cross-cutting findings authored by the orchestrator (and
+    # eventually humans) for future agents to consume. Surfaces both
+    # per-node notes (`evo set <id> --note ...`) and workspace-level
+    # notes (`evo note ...`) in a unified list, most-recent first.
+    all_notes = list_all_notes(graph)
+    if all_notes:
+        lines.extend(["", "## Notes (cross-cutting findings for future agents)"])
+        for entry in all_notes[:NOTES_DISPLAY_CAP]:
+            text = (entry.get("text") or "").strip()
             if not text:
                 continue
-            per_node_notes.append(f"- [{ts} {node['id']}] {text}")
-    aggregated_parts: list[str] = []
-    if per_node_notes:
-        aggregated_parts.append("\n".join(per_node_notes[-12:]))
-    if notes.strip():
-        aggregated_parts.append(_truncate(notes, limit=1200))
-    if aggregated_parts:
-        lines.extend(aggregated_parts)
-    else:
-        lines.append("No notes yet.")
+            ts = entry.get("timestamp", "")
+            scope = entry.get("exp_id") or "workspace"
+            lines.append(f"- [{scope} / {ts}] {text}")
+        if len(all_notes) > NOTES_DISPLAY_CAP:
+            lines.append(
+                f"(+{len(all_notes) - NOTES_DISPLAY_CAP} more — see `evo notes`)"
+            )
+
+    # Drill-downs: tool menu shown last so the orchestrator's most-recent
+    # context window includes it. Bounded sections above point here via
+    # footers like "(+N more — see evo awaiting)".
+    lines.extend([
+        "",
+        "## Drill-downs",
+        "  evo show <id>           full state of one experiment",
+        "  evo tree                full unbounded tree",
+        "  evo path <id>           root-to-node chain with scores",
+        "  evo diff <id> [other]   diff vs parent or between two",
+        "  evo awaiting            evaluated nodes awaiting decision",
+        "  evo discards [--like]   discarded hypotheses, searchable",
+        "  evo annotations [...]   all annotations, filterable",
+        "  evo notes [--exp X]     all notes (workspace + per-node), most-recent first",
+        "  evo frontier [--strat]  strategy-ranked branchable nodes",
+        "  evo restore <id>        revive a pruned/discarded node",
+    ])
     lines.append("")
     return "\n".join(lines)
 
 
-def write_scratchpad(root: Path) -> str:
-    content = build_scratchpad(root)
-    scratchpad_path(root).write_text(content, encoding="utf-8")
-    return content

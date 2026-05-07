@@ -372,13 +372,13 @@ End the skill by reporting in chat:
 ## Inspection commands (for debugging, reference only)
 
 ```bash
-evo get <id>                        # full experiment detail with scores
+evo show <id>                       # full state of one experiment (attempts, diffs, annotations, notes)
 evo config show                     # redacted workspace configuration
 evo config runtime show             # runtime prepare/before-run/prefix recipe
 evo env show                        # redacted runtime env metadata
 evo traces <id> <task>              # per-task trace
 evo annotate <id> <task> "analysis" # record failure analysis
-evo scratchpad                      # full state: tree, best path, frontier, annotations, diffs, gates
+evo scratchpad                      # bounded state summary
 evo gate list <id>                  # effective gates at a node (inherited)
 evo gate check <id>                 # run effective gates without benchmark or state mutation
 ```

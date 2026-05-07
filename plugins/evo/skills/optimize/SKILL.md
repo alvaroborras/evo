@@ -93,7 +93,7 @@ Repeat until interrupted or stall limit reached:
 **Step 0.1 (one-time auto-migration): ensure the workspace knows what runtime you are.** Run `evo host show`. If it prints `<not set>`, the workspace pre-dates the host signature field — declare your runtime now: `evo host set <one of: claude-code, codex, opencode, openclaw, hermes, generic>`. You know what runtime you're operating in (your system prompt, env vars like `CLAUDECODE=1`, your own self-identity); pick the matching value. If genuinely unsure, use `generic`. Do not ask the user — this is a one-time silent migration. Subsequent rounds skip this step (`evo host show` returns the recorded value). After this, on `claude-code` the dispatch fork-cache becomes available (step 5a); other runtimes get no behavior change.
 
 ```bash
-evo scratchpad          # full state: tree, best path, frontier, annotations, diffs, gates, what-not-to-try
+evo scratchpad          # bounded state summary (tree, frontier, awaiting decision, gates, annotations, what-not-to-try, notes)
 evo config show         # redacted workspace config
 evo config runtime show # runtime prepare/before-run/prefix recipe
 evo env show            # redacted runtime env metadata

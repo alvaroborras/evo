@@ -39,8 +39,9 @@ Full CLI reference: `plugins/evo/skills/references/cli-quick-reference.md`. This
 ## Useful Commands
 
 ```bash
-evo scratchpad          # full state summary (tree, best path, frontier, annotations, diffs, gates)
+evo scratchpad          # bounded state summary
 evo status              # one-line: metric, best score, experiment counts
+evo show <id>           # full state of one experiment (attempts, diffs, annotations, notes)
 evo config show         # redacted workspace config
 evo config runtime show # runtime prepare/before-run/prefix recipe
 evo env show            # redacted runtime env metadata
@@ -49,7 +50,7 @@ evo path <id>           # root-to-node chain with scores
 evo diff <id>           # diff vs parent
 evo diff <id> <other>   # diff between any two experiments
 evo annotations         # all annotations (filterable with --task/--exp)
-evo get <id>            # full experiment detail
+evo notes               # all notes (per-node + workspace), recent first
 evo gate list <id>      # effective gates for a node (inherited from ancestors)
 evo gate check <id>     # run effective gates without benchmark or state mutation
 evo gate add <id> --name <name> --command "<command>"  # add a gate
@@ -59,7 +60,7 @@ evo gate add <id> --name <name> --command "<command>"  # add a gate
 
 1. Read `.evo/project.md` to understand the target, what can be changed, and how to interpret results.
 2. Read the scratchpad for current state: `evo scratchpad`
-   The scratchpad contains: status, ASCII tree, best path, frontier, recent experiments, recent diffs, annotations (grouped by task), what not to try, infra log, and notes.
+   It surfaces: best path (★-marked in the tree), frontier (strategy-ranked branchable nodes), evaluated nodes awaiting decision, gates, annotations, what not to try, infra events, and notes. The Drill-downs section at the bottom lists the read-only commands for going deeper on any section.
 3. Study the pointer traces from your brief:
    ```bash
    evo traces <exp_id> <task_id>

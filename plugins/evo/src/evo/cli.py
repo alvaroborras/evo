@@ -16,9 +16,9 @@ from .core import (
     SUPPORTED_HOSTS,
     _load_meta,
     add_gate,
+    add_workspace_note,
     append_annotation,
     append_infra_event,
-    append_note,
     ascii_tree,
     atomic_write_json,
     attempt_dir,
@@ -39,6 +39,7 @@ from .core import (
     get_host,
     graph_path,
     init_workspace,
+    list_all_notes,
     load_annotations,
     load_config,
     load_graph,
@@ -46,7 +47,6 @@ from .core import (
     mark_comparison_blocked,
     maybe_commit_worktree,
     node_target_path,
-    notes_path,
     load_result,
     parse_diff_patch,
     parse_score,
@@ -69,7 +69,7 @@ from .core import (
     render_git_diff,
 )
 from .locking import advisory_lock
-from .scratchpad import write_scratchpad
+from .scratchpad import build_scratchpad
 
 
 def _require_workspace(root: Path) -> tuple[dict, dict]:
@@ -2966,7 +2966,7 @@ def cmd_frontier(args: argparse.Namespace) -> int:
 
 def cmd_scratchpad(args: argparse.Namespace) -> int:
     root = repo_root()
-    print(write_scratchpad(root))
+    print(build_scratchpad(root))
     return 0
 
 
@@ -2999,6 +2999,107 @@ def cmd_discards(args: argparse.Namespace) -> int:
         ]
     discarded.sort(key=lambda n: n.get("updated_at", ""), reverse=True)
     print(json.dumps(discarded, indent=2))
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """Aggregate full state for one experiment node into one JSON blob.
+
+    Replaces the multi-call pattern of `evo path` + reading outcomes +
+    `evo annotations --exp X` + `evo diff X`. The agent never has to
+    read graph state directly — everything it might want about one node
+    is here in one call.
+    """
+    root = repo_root()
+    graph = load_graph(root)
+    if args.exp_id not in graph["nodes"]:
+        raise RuntimeError(f"unknown experiment: {args.exp_id}")
+    node = graph["nodes"][args.exp_id]
+
+    chain = path_to_node(graph, args.exp_id)
+    chain_ids = [n["id"] for n in chain]
+
+    # Walk to find branch root (the child of root that begins this lineage).
+    branch_root = args.exp_id
+    cursor = node
+    while cursor.get("parent") not in (None, "root"):
+        branch_root = cursor["parent"]
+        cursor = graph["nodes"][cursor["parent"]]
+    if node.get("parent") == "root":
+        branch_root = args.exp_id
+
+    parent_score = None
+    if node.get("parent") and node["parent"] in graph["nodes"]:
+        parent_score = graph["nodes"][node["parent"]].get("score")
+
+    score_delta = None
+    if node.get("score") is not None and parent_score is not None:
+        score_delta = round(node["score"] - parent_score, 6)
+
+    # Collect attempts: outcome.json + raw diff text + change_files for each.
+    attempts: list[dict[str, Any]] = []
+    current = int(node.get("current_attempt", 0))
+    for n in range(1, current + 1):
+        outcome_path = attempt_outcome_path(root, args.exp_id, n)
+        if not outcome_path.exists():
+            continue
+        try:
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        # Precompute the per-attempt score delta vs parent so the agent
+        # doesn't have to subtract; mirrors the top-level `score_delta`.
+        a_score = outcome.get("score")
+        a_parent = outcome.get("parent_score")
+        a_delta = (
+            round(a_score - a_parent, 6)
+            if (a_score is not None and a_parent is not None) else None
+        )
+        attempt_payload: dict[str, Any] = {
+            "n": n,
+            "outcome": outcome,
+            "score_delta": a_delta,
+            "change_files": outcome.get("change_files", []),
+        }
+        # Include the raw diff text + line counts so the agent doesn't
+        # have to follow up with `evo diff`.
+        diff_path = (experiments_dir_for(root, args.exp_id)
+                     / "attempts" / f"{n:03d}" / "diff.patch")
+        if diff_path.exists():
+            try:
+                attempt_payload["diff"] = diff_path.read_text(encoding="utf-8")
+                parsed = parse_diff_patch(root, args.exp_id, n)
+                if parsed:
+                    attempt_payload["diff_added"] = parsed["added"]
+                    attempt_payload["diff_removed"] = parsed["removed"]
+            except OSError:
+                pass
+        attempts.append(attempt_payload)
+
+    # Annotations filtered to this exp.
+    all_annotations = load_annotations(root).get("annotations", [])
+    annotations = [a for a in all_annotations if a.get("experiment_id") == args.exp_id]
+
+    payload = {
+        "id": args.exp_id,
+        "hypothesis": node.get("hypothesis"),
+        "status": node.get("status"),
+        "score": node.get("score"),
+        "parent_id": node.get("parent"),
+        "parent_score": parent_score,
+        "score_delta": score_delta,
+        "branch_root": branch_root,
+        "path_to_root": chain_ids,
+        "children": list(node.get("children", [])),
+        "effective_gates": collect_gates_from_path(graph, args.exp_id),
+        "attempts": attempts,
+        "annotations": annotations,
+        "notes": list(node.get("notes", [])),
+        "tags": list(node.get("tags", [])),
+        "discard_reason": node.get("discard_reason"),
+        "pruned_reason": node.get("pruned_reason"),
+    }
+    print(json.dumps(payload, indent=2))
     return 0
 
 
@@ -3121,10 +3222,38 @@ def cmd_set(args: argparse.Namespace) -> int:
             if args.tag not in current_node["tags"]:
                 current_node["tags"].append(args.tag)
         if args.note:
-            current_node["notes"].append({"text": args.note, "timestamp": utc_now()})
+            current_node["notes"].append({
+                "text": args.note,
+                "timestamp": utc_now(),
+                "exp_id": current_node["id"],
+            })
 
     node = update_node(root, args.exp_id, _mutate)
     print(json.dumps(node, indent=2))
+    return 0
+
+
+def cmd_note(args: argparse.Namespace) -> int:
+    """Add a workspace-level note (no experiment attached)."""
+    root = repo_root()
+    entry = add_workspace_note(root, args.text)
+    print(json.dumps(entry, indent=2))
+    return 0
+
+
+def cmd_notes_list(args: argparse.Namespace) -> int:
+    """List all notes (workspace + per-node), most-recent first."""
+    root = repo_root()
+    graph = load_graph(root)
+    notes = list_all_notes(graph)
+    if getattr(args, "exp", None):
+        notes = [n for n in notes if n.get("exp_id") == args.exp]
+    if getattr(args, "workspace", False):
+        notes = [n for n in notes if n.get("exp_id") is None]
+    limit = getattr(args, "limit", None)
+    if limit:
+        notes = notes[: int(limit)]
+    print(json.dumps(notes, indent=2))
     return 0
 
 
@@ -3675,6 +3804,14 @@ def build_parser() -> argparse.ArgumentParser:
     get_p.add_argument("filename", nargs="?")
     get_p.set_defaults(func=cmd_get)
 
+    show_p = sub.add_parser(
+        "show",
+        help="full state of one experiment (status, score, attempts, "
+             "annotations, notes, gates, lineage) as one JSON blob",
+    )
+    show_p.add_argument("exp_id")
+    show_p.set_defaults(func=cmd_show)
+
     path_p = sub.add_parser("path")
     path_p.add_argument("exp_id")
     path_p.set_defaults(func=cmd_path)
@@ -3710,6 +3847,27 @@ def build_parser() -> argparse.ArgumentParser:
     set_p.add_argument("--tag")
     set_p.add_argument("--note")
     set_p.set_defaults(func=cmd_set)
+
+    # `evo note "<text>"` — workspace-level note (no exp_id).
+    # `evo set <exp_id> --note "<text>"` remains the per-node path.
+    note_p = sub.add_parser(
+        "note",
+        help="add a workspace-level note (cross-cutting observation, "
+             "not tied to any experiment)",
+    )
+    note_p.add_argument("text")
+    note_p.set_defaults(func=cmd_note)
+
+    notes_p = sub.add_parser(
+        "notes",
+        help="list all notes (workspace + per-node), most-recent first",
+    )
+    notes_p.add_argument("--exp", help="filter to one experiment id")
+    notes_p.add_argument("--workspace", action="store_true",
+                         help="filter to workspace-level notes only")
+    notes_p.add_argument("--limit", type=int,
+                         help="max notes to return (default: all)")
+    notes_p.set_defaults(func=cmd_notes_list)
 
     infra_p = sub.add_parser("infra")
     infra_p.add_argument("-m", "--message", required=True)

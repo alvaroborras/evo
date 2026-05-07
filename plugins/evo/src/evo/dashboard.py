@@ -25,12 +25,10 @@ from .core import (
     load_annotations,
     load_config,
     load_graph,
-    notes_path,
     repo_root,
     runtime_env_summary,
     runtime_env_values_path,
     save_config,
-    scratchpad_path,
 )
 from .frontier_strategies import (
     DEFAULT_FRONTIER_STRATEGY,
@@ -38,7 +36,7 @@ from .frontier_strategies import (
     resolve_from_config,
     validate_frontier_strategy,
 )
-from .scratchpad import write_scratchpad
+from .scratchpad import build_scratchpad
 
 STATIC_DIR = Path(__file__).parent / "static"
 _SECRET_SUBSTRINGS = ("token", "secret", "password", "api_key")
@@ -811,7 +809,7 @@ def create_app(root: Path | None = None) -> Flask:
 
     @app.get("/api/scratchpad")
     def scratchpad():
-        return Response(write_scratchpad(_root()), mimetype="text/plain")
+        return Response(build_scratchpad(_root()), mimetype="text/plain")
 
     @app.get("/api/annotations")
     def annotations():

@@ -969,8 +969,7 @@ def test_scratchpad_aggregates_per_node_notes(root: Path) -> None:
     evo(["new", "--parent", "root", "-m", "baseline"], cwd=root)
     evo(["run", "exp_0000"], cwd=root)
     evo(["set", "exp_0000", "--note", "this is a per-node note for exp_0000"], cwd=root)
-    evo(["scratchpad"], cwd=root)
-    scratchpad = (root / ".evo" / "run_0000" / "scratchpad.md").read_text(encoding="utf-8")
+    scratchpad = evo(["scratchpad"], cwd=root).stdout
     assert "## Notes" in scratchpad
     assert "this is a per-node note for exp_0000" in scratchpad, scratchpad
 

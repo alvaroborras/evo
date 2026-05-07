@@ -5,15 +5,17 @@ experiments; the Agent SDK instruments benchmark code.
 
 ## Mental Model
 
-- `evo init` creates `.evo/`, config, graph state, and the dashboard.
-- `evo new` creates one experiment workspace from a parent node.
-- `evo run` executes benchmark + inherited gates, then commits only if the
+- `evo init` sets up a workspace and starts the dashboard.
+- `evo new` allocates an experiment under a parent node.
+- `evo run` executes benchmark + inherited gates and commits if the
   score improves and gates pass.
 - `evo run --check` validates wiring without mutating experiment state.
+- `evo scratchpad` is your bounded view of current state.
 - `evo gate ...` defines branch policy; gates inherit down the tree.
 - `evo config runtime ...` and `evo env ...` describe runtime state.
-- Workspace ops (`bash/read/write/edit/glob/grep`) are the safe way to touch
-  remote experiment files.
+- Workspace ops (`bash/read/write/edit/glob/grep`) are the portable way
+  to touch experiment files — required for remote backends, recommended
+  for local so the same code works regardless of backend.
 
 ## Setup
 
@@ -49,7 +51,7 @@ evo config set metric <max|min>
 evo config set commit-strategy <all|tracked-only>
 ```
 
-Do not hand-edit `.evo/run_*/config.json` unless debugging the CLI itself.
+Do not hand-edit config files; use `evo config set` or the dashboard.
 
 ## Runtime Recipe
 
@@ -115,19 +117,16 @@ evo gc
 
 Lifecycle command rules:
 
-- `evo discard` is for non-committed nodes (active/evaluated/failed). Refuses
-  `committed` (use `evo prune` — discard would orphan the commit). Refuses
-  `active` without `--force` (the run may still be writing). Refuses any node
-  with non-discarded children.
-- `evo prune` is for committed or evaluated nodes you want to mark as
-  exhausted while preserving the result. The git commit stays alive via the
-  anchor ref `refs/evo-anchor/<run>/<exp>`.
-- `evo restore` undoes a prune (status flips back to committed) or undoes a
-  discard if the commit is still reachable (recreates the regular branch ref
-  from the anchor). If the commit was lost to git GC, restore points you at
-  `experiments/<id>/attempts/NNN/diff.patch` for manual replay.
-- `evo gc` is a sweeper that frees worktree directories from
-  committed/failed/pruned nodes. Branches and commits are kept.
+- `evo discard` is for non-committed nodes (active/evaluated/failed).
+  Refuses `committed` (use `evo prune` instead). Refuses `active` without
+  `--force`. Refuses any node with non-discarded children.
+- `evo prune` accepts `committed` or `evaluated` nodes. Marks the lineage
+  exhausted; the result stays available for `evo restore` later.
+- `evo restore` reverts a prune or discard. Discarded nodes can be
+  restored as long as the result hasn't been garbage-collected; if it
+  has, the error message tells you where to find the saved diff.
+- `evo gc` reclaims disk by freeing worktree directories from finished
+  nodes. Run it periodically; not part of the experiment-iteration flow.
 
 Outcomes:
 
@@ -153,35 +152,42 @@ evo gate check <node_id> [--timeout <seconds>]
 - Gate pass/fail is exit-code based only. A command that prints a low score and
   exits 0 passes. Use tests or `--min-score` style gates that exit non-zero on
   regression.
-- `evo gate check` writes `gate_check.json` under checks and does not run the
-  benchmark or mutate node state.
+- `evo gate check` validates gates without running the benchmark and does
+  not mutate node state.
 
 ## Inspection
 
 ```bash
-evo status
-evo tree
+evo status                                        # one-liner: metric, best, counts
+evo scratchpad                                    # bounded state digest
+evo show <exp_id>                                 # full state of one experiment
+evo tree                                          # full tree (no bounding)
 evo frontier [--strategy <kind>] [--params '<json>'] [--seed <n>]
-evo scratchpad
-evo get <exp_id> [filename]
-evo path <exp_id>
-evo diff <exp_id> [other_id]
-evo traces <exp_id> [task_id]
-evo log <exp_id> <filename>
-evo annotations [--task <id>] [--exp <id>]
-evo annotate <exp_id> [task_id] "<analysis>"
-evo set <exp_id> [--tag <tag>] [--note <note>]
-evo infra -m "<message>" [--breaking]
+evo path <exp_id>                                 # root-to-node chain
+evo diff <exp_id> [other_id]                      # diff vs parent or between two
+evo traces <exp_id> [task_id]                     # per-task trace detail
+evo get <exp_id> [filename]                       # raw artifact read
+evo log <exp_id> <filename>                       # raw log read
+evo awaiting                                      # evaluated nodes pending decision
+evo discards [--like "<text>"]                    # discarded nodes, searchable
+evo annotations [--task <id>] [--exp <id>]        # per-experiment analyses
+evo notes [--exp <id>] [--workspace] [--limit N]  # all notes, recent first
 ```
 
-Useful files under `.evo/run_*/experiments/<exp_id>/`:
+## Annotation & Notes
 
-- `attempts/NNN/outcome.json`
-- `attempts/NNN/benchmark.log`
-- `attempts/NNN/benchmark_err.log`
-- `attempts/NNN/gate_<name>.log`
-- `checks/NNN/check.json`
-- `checks/NNN/gate_check.json`
+```bash
+evo annotate <exp_id> [task_id] "<analysis>"      # per-experiment, attempt-time
+evo set <exp_id> --note "<text>" [--tag <tag>]    # per-node, orchestrator
+evo note "<text>"                                  # workspace-level, untied
+evo infra -m "<message>" [--breaking]             # infra/strategy events
+```
+
+- Subagents annotate their own experiments before discard so the lesson
+  outlives the worktree.
+- Orchestrators attach per-node notes for cross-cutting findings tied to
+  a specific node, and write workspace notes for round-level observations
+  not tied to any one experiment.
 
 ## Workspace Ops
 
@@ -214,8 +220,9 @@ evo dispatch status <job_id>
 evo dispatch kill <job_id>
 ```
 
-`dispatch` is subagent async for `claude-code` fork-cache. It is not background
-benchmark execution. `evo run` remains a blocking evaluation transaction.
+`dispatch` is async subagent spawning, available on `claude-code` only.
+It is not background benchmark execution — `evo run` is always a blocking
+evaluation transaction.
 
 ## Common Mistakes
 

@@ -19,8 +19,6 @@ ANNOTATIONS_FILE = "annotations.json"
 INFRA_FILE = "infra_log.json"
 META_FILE = "meta.json"
 PROJECT_FILE = "project.md"
-SCRATCHPAD_FILE = "scratchpad.md"
-NOTES_FILE = "notes.md"
 KEYFILE_NAME = "keyfile"
 RUNTIME_ENV_VALUES_FILE = "runtime_env_values.json"
 
@@ -135,14 +133,6 @@ def project_path(root: Path) -> Path:
     return evo_dir(root) / PROJECT_FILE
 
 
-def scratchpad_path(root: Path) -> Path:
-    return workspace_path(root) / SCRATCHPAD_FILE
-
-
-def notes_path(root: Path) -> Path:
-    return workspace_path(root) / NOTES_FILE
-
-
 def runtime_env_values_path(root: Path) -> Path:
     return workspace_path(root) / RUNTIME_ENV_VALUES_FILE
 
@@ -245,6 +235,7 @@ def default_graph() -> dict[str, Any]:
     return {
         "root": "root",
         "next_id": 0,
+        "workspace_notes": [],
         "nodes": {
             "root": {
                 "id": "root",
@@ -264,6 +255,43 @@ def default_graph() -> dict[str, Any]:
             }
         },
     }
+
+
+def add_workspace_note(root: Path, text: str) -> dict[str, Any]:
+    """Write a workspace-level note (not tied to any experiment).
+    Returns the new record."""
+    gpath = graph_path(root)
+    with advisory_lock(lock_file_for(gpath)):
+        graph = load_json(gpath, default_graph())
+        graph.setdefault("workspace_notes", [])
+        entry = {
+            "text": text,
+            "timestamp": utc_now(),
+            "exp_id": None,
+        }
+        graph["workspace_notes"].append(entry)
+        atomic_write_json(gpath, graph)
+        return entry
+
+
+def list_all_notes(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every note in the graph (workspace + per-node), sorted by
+    timestamp descending. Each record includes its `exp_id` (None for
+    workspace notes) so callers can render a flat list without re-walking."""
+    out: list[dict[str, Any]] = []
+    for entry in graph.get("workspace_notes", []) or []:
+        copy = dict(entry)
+        copy.setdefault("exp_id", None)
+        out.append(copy)
+    for node in graph["nodes"].values():
+        if node.get("id") == "root":
+            continue
+        for entry in node.get("notes", []):
+            copy = dict(entry)
+            copy.setdefault("exp_id", node["id"])
+            out.append(copy)
+    out.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    return out
 
 
 def load_config(root: Path) -> dict[str, Any]:
@@ -482,10 +510,6 @@ def init_workspace(
     ensure_workspace_keyfile(root)
     if not project_path(root).exists():
         atomic_write_text(project_path(root), "# Project Understanding\n\n")
-    if not notes_path(root).exists():
-        atomic_write_text(notes_path(root), "# Notes\n\n")
-    if not scratchpad_path(root).exists():
-        atomic_write_text(scratchpad_path(root), "# Scratchpad\n\n")
     if host is not None:
         set_host(root, host)
     return run_id
@@ -625,18 +649,6 @@ def append_infra_event(root: Path, message: str, breaking: bool) -> dict[str, An
         data.setdefault("events", []).append(event)
         atomic_write_json(path, data)
         return event
-
-
-def append_note(root: Path, content: str) -> None:
-    path = notes_path(root)
-    with advisory_lock(lock_file_for(path)):
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        if existing and not existing.endswith("\n"):
-            existing += "\n"
-        existing += content
-        if not existing.endswith("\n"):
-            existing += "\n"
-        atomic_write_text(path, existing)
 
 
 def allocate_experiment(
