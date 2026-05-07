@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SRC = REPO_ROOT / "plugins" / "evo" / "src"
 sys.path.insert(0, str(PLUGIN_SRC))
 sys.path.insert(0, str(REPO_ROOT / "tests"))

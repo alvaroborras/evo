@@ -10,7 +10,7 @@ Modal credits per run.
 
 Run from repo root:
     EVO_LIVE_TEST_MODAL=1 uv run --project plugins/evo \
-        python tests/live_modal_provider.py
+        python tests/live/_modal_provider_helper.py
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SRC = REPO_ROOT / "plugins" / "evo" / "src"
 sys.path.insert(0, str(PLUGIN_SRC))
 
