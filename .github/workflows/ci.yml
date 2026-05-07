@@ -118,10 +118,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v3
-      - name: Configure git author (some tests `git commit`)
+      - name: Configure git for tests (author + default branch)
         run: |
           git config --global user.email "ci@evo.test"
           git config --global user.name "evo-ci"
+          git config --global init.defaultBranch main
       - name: Install plugin (editable, pulls portalocker + flask + pyyaml) + pytest
         run: |
           python -m pip install -e plugins/evo

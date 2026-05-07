@@ -40,10 +40,13 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v3
-      - name: Configure git author (some tests `git commit`)
+      - name: Configure git for tests (author + default branch)
         run: |
           git config --global user.email "ci@evo.test"
           git config --global user.name "evo-ci"
+          # Some e2e tests `git init --bare` and expect `main` as the default;
+          # ubuntu-latest's git defaults to `master`.
+          git config --global init.defaultBranch main
       - name: Verify all 7 version pins agree
         run: python3 scripts/check_versions.py
       - name: Verify tag matches package version
