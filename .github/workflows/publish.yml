@@ -168,3 +168,70 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: twine upload --non-interactive dist/*
+
+  github-release:
+    # Only run on the unified `v*` tag form (full release of all packages).
+    # Skip for per-package tags (py-v*, node-v*, cli-v*) since those aren't
+    # the user-facing release surface.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish-python, publish-node, publish-cli]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history + tags for `git log <prev>..<curr>`
+      - name: Build release notes from commit log
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF##*/}"
+
+          # Find the previous v* tag (excluding this one). If none exists,
+          # walk back to the repo's first commit.
+          PREV=$(git tag --list 'v*' --sort=-version:refname \
+                 | grep -v "^${TAG}$" | head -n 1 || true)
+          if [ -z "$PREV" ]; then
+            RANGE=""
+          else
+            RANGE="${PREV}..${TAG}"
+          fi
+
+          {
+            echo "## What changed"
+            echo
+            # One bullet per non-merge, non-bump commit.
+            git log $RANGE --no-merges --format="- %s" \
+              | grep -vE '^- (release: bump|Bump release|Align alpha release)' \
+              || echo "- (no substantive commits since previous release)"
+            echo
+            if [ -n "$PREV" ]; then
+              echo "**Full diff**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+          } > /tmp/release-notes.md
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # Pre-release if the version has a hyphen (alpha/beta/rc).
+          if echo "$TAG" | grep -q '-'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.notes.outputs.tag }}"
+          PRERELEASE_FLAG=""
+          if [ "${{ steps.notes.outputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          # If a release for this tag already exists (manual creation), update its
+          # body in place; otherwise create it.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md $PRERELEASE_FLAG
+          fi
