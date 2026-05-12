@@ -219,6 +219,110 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: twine upload --non-interactive dist/*
 
+  release-smoke:
+    # Verify the artifacts we just published actually work for a fresh
+    # user — install evo-hq-cli from PyPI, install host CLIs from npm /
+    # curl-installer, install skills from GitHub via `npx skills add`,
+    # then run the full evo flow against a fixture repo with a mid-run
+    # `evo direct` injection. Asserts subagents fired, the directive was
+    # consumed, and the score beat baseline.
+    #
+    # Reactive, not gating: artifacts are already published by the time
+    # this runs. Failure here means "what we just released is broken" —
+    # not "block the release" (too late).
+    #
+    # Skipped for per-SDK tags (py-v*, node-v*) since those don't change
+    # evo-hq-cli, which is what the smoke installs from PyPI.
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/tags/cli-v')
+    needs: [publish-cli]
+    runs-on: ubuntu-latest
+    # Each host run can take 5-10 min (codex slow, opencode + openclaw
+    # ~7 min on 4G sandboxes). Five in parallel → wall time is the
+    # slowest host. 30 min is a safety upper bound that lets a misbehaving
+    # host's fail-fast / timeout fire cleanly without burning CI.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#cli-v}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Wait for evo-hq-cli to be queryable on PyPI
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Polling PyPI for evo-hq-cli==$VERSION (publish job just finished)..."
+          for i in $(seq 1 30); do
+            if pip index versions evo-hq-cli 2>/dev/null | grep -q "$VERSION"; then
+              echo "Found evo-hq-cli==$VERSION on PyPI"
+              break
+            fi
+            echo "  attempt $i: not yet, sleeping 10s..."
+            sleep 10
+          done
+      - name: Install test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-xdist 'e2b>=2.20'
+      - name: Verify the evo-test-4g sandbox template exists
+        # opencode + openclaw tests use the `evo-test-4g` e2b template
+        # (default 1GB OOM-kills the agent + skills + plugin combo).
+        # Build the template once per e2b account; this step surfaces a
+        # clear error if the secret's account doesn't have it.
+        if: env.E2B_API_KEY != ''
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          try:
+              from e2b import Sandbox
+          except ImportError:
+              sys.exit("e2b SDK not installed")
+          try:
+              sbx = Sandbox.create(template="evo-test-4g", timeout=60)
+              sbx.kill()
+              print("evo-test-4g template found")
+          except Exception as e:
+              print(f"::error::evo-test-4g template missing or inaccessible: {e}")
+              print("Build it once per e2b account via:")
+              print("  Template.build(Template().from_ubuntu_image('22.04'),")
+              print("                 name='evo-test-4g', memory_mb=4096, cpu_count=2)")
+              sys.exit(1)
+          PY
+      - name: Run release smoke (5 hosts in parallel)
+        env:
+          EVO_LIVE_TEST_RELEASE_SMOKE: "1"
+          EVO_RELEASE_SMOKE_VERSION: ${{ steps.version.outputs.version }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$E2B_API_KEY" ]; then
+            echo "::warning::E2B_API_KEY not set; release smoke is a no-op"
+            echo "  Add it at Settings → Secrets → Actions to enable post-release verification."
+            exit 0
+          fi
+          # `-n 5`: each host gets its own pytest-xdist worker = its own
+          # sandbox. 5 sandboxes burn in parallel; total wall time is the
+          # slowest single host, not the sum. tests with no API key for
+          # their host (e.g. ANTHROPIC_API_KEY missing) skip cleanly.
+          #
+          # `--maxfail=0`: don't stop on first failure — surface results
+          # for all 5 hosts in one CI run. `-ra`: short test summary at
+          # the end. `--tb=short`: skip noisy framework frames.
+          pytest tests/live/test_release_smoke.py -v -s -n 5 \
+            --dist=loadgroup --maxfail=0 -ra --tb=short
+
   github-release:
     # Only run on the unified `v*` tag form (full release of all packages).
     # Skip for per-package tags (py-v*, node-v*, cli-v*) since those aren't
