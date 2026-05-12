@@ -1,0 +1,37 @@
+{
+  "description": "Session has exp_id; drain reads exp queue, ignores workspace events.",
+  "session_id": "sub1",
+  "sessions": {
+    "sub1": {
+      "schema_version": 1,
+      "session_id": "sub1",
+      "host": "claude-code",
+      "pid": 5555,
+      "registered_at": "2026-01-01T00:00:00+00:00",
+      "last_seen_at": "2026-01-01T00:00:00+00:00",
+      "exp_id": "exp_0001",
+      "parent_session_id": "orch_root"
+    }
+  },
+  "workspace_events": [
+    {"schema_version": 1, "id": "01WS00000000000000000001", "ts": "2026-01-01T00:00:01+00:00", "text": "orchestrator only"}
+  ],
+  "exp_events": {
+    "exp_0001": [
+      {"schema_version": 1, "id": "01EXP00000000000000000001", "ts": "2026-01-01T00:00:02+00:00", "text": "subagent focus"}
+    ]
+  },
+  "offsets": {},
+  "markers": ["sub1"],
+  "expected": {
+    "text": "[evo direct] subagent focus",
+    "newWorkspaceOffset": null,
+    "newExpOffset": "01EXP00000000000000000001",
+    "marker_after": false,
+    "offset_after": {
+      "schema_version": 1,
+      "session_id": "sub1",
+      "last_exp_event_id": "01EXP00000000000000000001"
+    }
+  }
+}

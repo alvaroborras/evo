@@ -1,0 +1,43 @@
+{
+  "description": "Three events. Offset already at event B. Drain should yield only C, D.",
+  "session_id": "orch2",
+  "sessions": {
+    "orch2": {
+      "schema_version": 1,
+      "session_id": "orch2",
+      "host": "claude-code",
+      "pid": 9999,
+      "registered_at": "2026-01-01T00:00:00+00:00",
+      "last_seen_at": "2026-01-01T00:00:00+00:00",
+      "exp_id": null,
+      "parent_session_id": null
+    }
+  },
+  "workspace_events": [
+    {"schema_version": 1, "id": "01EVENT0000000000000000A", "ts": "2026-01-01T00:00:01+00:00", "text": "first"},
+    {"schema_version": 1, "id": "01EVENT0000000000000000B", "ts": "2026-01-01T00:00:02+00:00", "text": "second"},
+    {"schema_version": 1, "id": "01EVENT0000000000000000C", "ts": "2026-01-01T00:00:03+00:00", "text": "third"},
+    {"schema_version": 1, "id": "01EVENT0000000000000000D", "ts": "2026-01-01T00:00:04+00:00", "text": "fourth"}
+  ],
+  "exp_events": {},
+  "offsets": {
+    "orch2": {
+      "schema_version": 1,
+      "session_id": "orch2",
+      "last_workspace_event_id": "01EVENT0000000000000000B",
+      "updated_at": "2026-01-01T00:00:02+00:00"
+    }
+  },
+  "markers": ["orch2"],
+  "expected": {
+    "text": "[evo direct] third\n[evo direct] fourth",
+    "newWorkspaceOffset": "01EVENT0000000000000000D",
+    "newExpOffset": null,
+    "marker_after": false,
+    "offset_after": {
+      "schema_version": 1,
+      "session_id": "orch2",
+      "last_workspace_event_id": "01EVENT0000000000000000D"
+    }
+  }
+}

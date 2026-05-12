@@ -1,7 +1,7 @@
 """Integration tests for the remote-sandbox backend, against a real
 sandbox-agent binary running on localhost.
 
-No mocks. No Flask fakes. The fixture downloads the real
+The fixture downloads the real
 rivet-dev/sandbox-agent release (cached after first run) and spawns it
 on a free port; tests exercise the actual HTTP surface, the actual
 git-bundle round-trip, and the actual evo CLI.

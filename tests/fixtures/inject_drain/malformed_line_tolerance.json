@@ -1,0 +1,31 @@
+{
+  "description": "Workspace queue has a valid event followed by a malformed JSON line (mid-write tear). Drain should tolerate the bad line and emit the valid event.",
+  "session_id": "orch_tol",
+  "sessions": {
+    "orch_tol": {
+      "schema_version": 1,
+      "session_id": "orch_tol",
+      "host": "claude-code",
+      "pid": 4242,
+      "registered_at": "2026-01-01T00:00:00+00:00",
+      "last_seen_at": "2026-01-01T00:00:00+00:00",
+      "exp_id": null,
+      "parent_session_id": null
+    }
+  },
+  "raw_workspace_jsonl": "{\"schema_version\":1,\"id\":\"01EVENT0000000000000000A\",\"ts\":\"2026-01-01T00:00:01+00:00\",\"text\":\"valid event\"}\n{\"schema_version\":1,\"id\":\"01EVENT0000000000000000B\",\"ts\":\"2026-01\n",
+  "exp_events": {},
+  "offsets": {},
+  "markers": ["orch_tol"],
+  "expected": {
+    "text": "[evo direct] valid event",
+    "newWorkspaceOffset": "01EVENT0000000000000000A",
+    "newExpOffset": null,
+    "marker_after": false,
+    "offset_after": {
+      "schema_version": 1,
+      "session_id": "orch_tol",
+      "last_workspace_event_id": "01EVENT0000000000000000A"
+    }
+  }
+}

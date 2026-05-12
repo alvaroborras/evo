@@ -1,0 +1,263 @@
+"""Live install verification — runs evo's per-host install commands on
+fresh e2b sandboxes and asserts ``evo doctor <host>`` passes.
+
+Catches the kind of regression that unit tests can't see: PyPI/npm
+versions diverging, marketplace path layouts changing, native CLIs
+adding interactive prompts, etc.
+
+Slow (~10 min per host). Gated.
+
+Run all:
+    EVO_LIVE_TEST_INSTALL_SANDBOX=1 \\
+    E2B_API_KEY=... \\
+    pytest tests/live/test_install_sandbox.py -v -s
+
+Run one host:
+    EVO_LIVE_TEST_INSTALL_SANDBOX=1 \\
+    E2B_API_KEY=... \\
+    pytest tests/live/test_install_sandbox.py::test_opencode -v -s
+
+OpenClaw needs the custom ``evo-test-4g`` template (default 1GB sandbox
+OOMs during ``npm install -g openclaw``). Build it once:
+    python -c "from e2b import Template; \\
+        Template.build(Template().from_ubuntu_image('22.04'), \\
+        name='evo-test-4g', memory_mb=4096, cpu_count=2)"
+
+Hermes is xfail until evo-hq-cli ≥0.4.0 ships to PyPI; the install
+verifies the entry-point that 0.3.x doesn't ship.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "evo"
+
+
+def _gate() -> None:
+    if os.environ.get("EVO_LIVE_TEST_INSTALL_SANDBOX") != "1":
+        pytest.skip("set EVO_LIVE_TEST_INSTALL_SANDBOX=1 to enable")
+    if not os.environ.get("E2B_API_KEY"):
+        pytest.skip("E2B_API_KEY not set")
+    try:
+        import e2b  # noqa: F401
+    except ImportError:
+        pytest.skip("e2b SDK not installed (`pip install 'e2b>=2.20'`)")
+
+
+def _make_evo_tarball(out: Path) -> None:
+    """Bundle the local ``plugins/evo`` source tree for sandbox upload."""
+    def filt(tar):
+        skip = (".git", ".venv", "node_modules", "__pycache__", "build",
+                "dist", ".pytest_cache", ".egg-info")
+        if any(s in tar.name for s in skip):
+            return None
+        return tar
+
+    with tarfile.open(out, "w:gz") as tar:
+        tar.add(str(PLUGIN_ROOT), arcname="evo-plugin", filter=filt)
+
+
+@pytest.fixture(scope="session")
+def evo_tarball():
+    _gate()
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as f:
+        path = Path(f.name)
+    try:
+        _make_evo_tarball(path)
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+
+
+class _Harness:
+    """Wraps an e2b sandbox with helpers: upload, run-with-streaming, kill.
+
+    Tests use this through the ``sandbox`` / ``sandbox_4g`` fixtures."""
+
+    def __init__(self, sbx, evo_tarball: Path):
+        self.sbx = sbx
+        self._uploaded = False
+        self._evo_tarball = evo_tarball
+        self._sudo = "sudo " if self.run("whoami").strip() != "root" else ""
+
+    def upload_evo(self) -> None:
+        if self._uploaded:
+            return
+        self.sbx.files.write("/tmp/evo-plugin.tar.gz", self._evo_tarball.read_bytes())
+        self.run("tar -xzf /tmp/evo-plugin.tar.gz -C /tmp/")
+        self._uploaded = True
+
+    def run(self, cmd: str, *, timeout: int = 180, must_succeed: bool = True) -> str:
+        short = cmd[:90] + ("…" if len(cmd) > 90 else "")
+        print(f"$ {short}", flush=True)
+        r = self.sbx.commands.run(
+            cmd,
+            timeout=timeout,
+            on_stdout=lambda x: print(f"  | {x.rstrip()}", flush=True),
+            on_stderr=lambda x: print(f"  ! {x.rstrip()}", flush=True),
+        )
+        if must_succeed and r.exit_code != 0:
+            raise AssertionError(
+                f"command failed (exit {r.exit_code}): {short}\nstderr: {r.stderr[-500:]}"
+            )
+        return r.stdout
+
+    def install_base_deps(self) -> None:
+        """apt deps + uv + evo CLI from local source."""
+        self.upload_evo()
+        self.run(
+            f"{self._sudo}apt-get update -qq && {self._sudo}apt-get install -y "
+            f"--no-install-recommends git curl ca-certificates python3 python3-venv "
+            f">/dev/null",
+            timeout=300,
+        )
+        self.run("curl -LsSf https://astral.sh/uv/install.sh | sh > /tmp/uv.log 2>&1",
+                 timeout=120)
+        self.run(
+            "export PATH=$HOME/.local/bin:$PATH; "
+            "uv tool install /tmp/evo-plugin > /tmp/evo-tool-install.log 2>&1 || "
+            "(cat /tmp/evo-tool-install.log; exit 1)",
+            timeout=300,
+        )
+        self.run("export PATH=$HOME/.local/bin:$PATH; evo --version")
+
+    def install_node(self, version: str = "22") -> None:
+        """Install Node from NodeSource (apt's nodejs is too old for some hosts)."""
+        self.run(
+            f"curl -fsSL https://deb.nodesource.com/setup_{version}.x "
+            f"| {self._sudo}bash - >/tmp/node-setup.log 2>&1",
+            timeout=120,
+        )
+        self.run(f"{self._sudo}apt-get install -y nodejs >/dev/null", timeout=180)
+
+
+def _spawn(template: str | None = None, timeout: int = 1200):
+    from e2b import Sandbox
+    return Sandbox.create(template=template, timeout=timeout)
+
+
+@pytest.fixture
+def sandbox(evo_tarball):
+    _gate()
+    sbx = _spawn(timeout=1200)
+    h = _Harness(sbx, evo_tarball)
+    try:
+        h.install_base_deps()
+        yield h
+    finally:
+        try:
+            sbx.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@pytest.fixture
+def sandbox_4g(evo_tarball):
+    """Larger sandbox for hosts whose npm install OOMs on the default 1GB."""
+    _gate()
+    sbx = _spawn(template="evo-test-4g", timeout=1500)
+    h = _Harness(sbx, evo_tarball)
+    try:
+        h.install_base_deps()
+        yield h
+    finally:
+        try:
+            sbx.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Per-host install verifications
+# ---------------------------------------------------------------------------
+
+
+def test_opencode(sandbox):
+    """Opencode: official installer + `evo install opencode`."""
+    sandbox.run(
+        "curl -fsSL https://opencode.ai/install | bash > /tmp/opencode.log 2>&1",
+        timeout=240,
+    )
+    sandbox.run("export PATH=$HOME/.opencode/bin:$PATH; opencode --version")
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; evo install opencode"
+    )
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; evo doctor opencode"
+    )
+
+
+def test_claude_code(sandbox):
+    """Claude Code: npm install + non-interactive `claude plugin install`."""
+    sandbox.install_node("22")
+    sandbox.run(
+        f"{sandbox._sudo}npm install -g @anthropic-ai/claude-code > /tmp/cc.log 2>&1",
+        timeout=300,
+    )
+    sandbox.run("claude --version")
+    sandbox.run("claude plugin marketplace add evo-hq/evo 2>&1 | tail -5",
+                timeout=120)
+    sandbox.run("claude plugin install evo@evo-hq-evo 2>&1 | tail -5", timeout=120)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor claude-code")
+
+
+def test_codex(sandbox):
+    """Codex: npm install + marketplace add + `evo install codex`."""
+    sandbox.install_node("22")
+    sandbox.run(
+        f"{sandbox._sudo}npm install -g @openai/codex > /tmp/codex.log 2>&1",
+        timeout=300,
+    )
+    sandbox.run("codex --version")
+    sandbox.run("codex plugin marketplace add evo-hq/evo 2>&1 | tail -5",
+                timeout=120)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo install codex")
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor codex")
+
+
+def test_openclaw(sandbox_4g):
+    """OpenClaw: npm install (heavy) + marketplace install + pi-extension."""
+    sandbox_4g.install_node("22")
+    sandbox_4g.run(
+        f"{sandbox_4g._sudo}npm install -g openclaw > /tmp/openclaw.log 2>&1",
+        timeout=600,
+    )
+    sandbox_4g.run("openclaw --version")
+    sandbox_4g.run(
+        "openclaw plugins install evo --marketplace https://github.com/evo-hq/evo "
+        "2>&1 | tail -10",
+        timeout=240,
+    )
+    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo install openclaw")
+    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo doctor openclaw")
+
+
+def test_hermes(sandbox):
+    """Hermes: official installer + `evo install hermes --from-path` against
+    the local source tarball.
+
+    The README's plain ``evo install hermes`` pulls evo-hq-cli from PyPI;
+    until 0.4.0 ships, that pulls the older 0.3.x without the
+    ``hermes_agent.plugins`` entry-point. Live tests bypass PyPI by
+    installing from the uploaded local source via ``--from-path``."""
+    sandbox.run(
+        "curl -fsSL "
+        "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh "
+        "| bash > /tmp/hermes.log 2>&1",
+        timeout=900,
+    )
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; hermes --version")
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$PATH; "
+        "evo install hermes --from-path /tmp/evo-plugin"
+    )
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor hermes")

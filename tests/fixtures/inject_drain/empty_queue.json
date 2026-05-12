@@ -1,0 +1,27 @@
+{
+  "description": "Registered session, no events. Marker present but stale.",
+  "session_id": "orch_empty",
+  "sessions": {
+    "orch_empty": {
+      "schema_version": 1,
+      "session_id": "orch_empty",
+      "host": "claude-code",
+      "pid": 1234,
+      "registered_at": "2026-01-01T00:00:00+00:00",
+      "last_seen_at": "2026-01-01T00:00:00+00:00",
+      "exp_id": null,
+      "parent_session_id": null
+    }
+  },
+  "workspace_events": [],
+  "exp_events": {},
+  "offsets": {},
+  "markers": ["orch_empty"],
+  "expected": {
+    "text": null,
+    "newWorkspaceOffset": null,
+    "newExpOffset": null,
+    "marker_after": false,
+    "offset_after": null
+  }
+}

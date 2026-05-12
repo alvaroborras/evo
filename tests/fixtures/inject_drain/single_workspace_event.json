@@ -1,0 +1,38 @@
+{
+  "description": "Fresh orchestrator session, one workspace event, no prior offset.",
+  "session_id": "orch1",
+  "sessions": {
+    "orch1": {
+      "schema_version": 1,
+      "session_id": "orch1",
+      "host": "claude-code",
+      "pid": 1234,
+      "registered_at": "2026-01-01T00:00:00+00:00",
+      "last_seen_at": "2026-01-01T00:00:00+00:00",
+      "exp_id": null,
+      "parent_session_id": null
+    }
+  },
+  "workspace_events": [
+    {
+      "schema_version": 1,
+      "id": "01HZA00000000000000000A001",
+      "ts": "2026-01-01T00:00:01+00:00",
+      "text": "be bold"
+    }
+  ],
+  "exp_events": {},
+  "offsets": {},
+  "markers": ["orch1"],
+  "expected": {
+    "text": "[evo direct] be bold",
+    "newWorkspaceOffset": "01HZA00000000000000000A001",
+    "newExpOffset": null,
+    "marker_after": false,
+    "offset_after": {
+      "schema_version": 1,
+      "session_id": "orch1",
+      "last_workspace_event_id": "01HZA00000000000000000A001"
+    }
+  }
+}

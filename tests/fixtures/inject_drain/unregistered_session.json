@@ -1,0 +1,18 @@
+{
+  "description": "Marker exists but session not in registry. Drain should be lenient: text=null, marker unlinked.",
+  "session_id": "ghost",
+  "sessions": {},
+  "workspace_events": [
+    {"schema_version": 1, "id": "01EVENT0000000000000000A", "ts": "2026-01-01T00:00:01+00:00", "text": "should not be delivered"}
+  ],
+  "exp_events": {},
+  "offsets": {},
+  "markers": ["ghost"],
+  "expected": {
+    "text": null,
+    "newWorkspaceOffset": null,
+    "newExpOffset": null,
+    "marker_after": false,
+    "offset_after": null
+  }
+}
