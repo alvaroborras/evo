@@ -69,7 +69,15 @@ def install(args: argparse.Namespace) -> int:
     #     root. Works only when evo runs from a real checkout (parents[3]
     #     resolves to plugins/evo/); for uv-tool installs this picks up the
     #     tool's site-packages dir, which is wrong — pass --from-path instead.
-    #   default:           pip install evo-hq-cli  (PyPI).
+    #   default:           pip install evo-hq-cli==<running version> (PyPI).
+    #                      Pinning the running version (rather than bare
+    #                      `evo-hq-cli`) handles pre-releases — pip skips
+    #                      `0.4.0a10` from a bare `pip install evo-hq-cli`
+    #                      (needs --pre), so users who installed an alpha
+    #                      via `uv tool install evo-hq-cli==0.4.0-alpha.N`
+    #                      would otherwise see hermes drop back to the last
+    #                      stable (0.3.3) and the hermes_agent.plugins
+    #                      entry-point check would fail.
     target_path = getattr(args, "from_path", None)
     if target_path:
         target = str(target_path)
@@ -81,8 +89,10 @@ def install(args: argparse.Namespace) -> int:
         cmd = [str(py), "-m", "pip", "install", "-e", target]
         print(f"installing evo-hq-cli (editable) from {target}…", flush=True)
     else:
-        cmd = [str(py), "-m", "pip", "install", "evo-hq-cli"]
-        print("installing evo-hq-cli into hermes venv via pip…", flush=True)
+        from evo import __version__ as _evo_version
+        spec = f"evo-hq-cli=={_evo_version}"
+        cmd = [str(py), "-m", "pip", "install", spec]
+        print(f"installing {spec} into hermes venv via pip…", flush=True)
 
     rc = subprocess.run(cmd).returncode
     if rc != 0:

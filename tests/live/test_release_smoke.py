@@ -106,6 +106,36 @@ def _evo_pypi_spec() -> str:
     return f"evo-hq-cli=={version}" if version else "evo-hq-cli"
 
 
+def _skills_repo_ref_hermes() -> str:
+    """Return the github repo reference for ``hermes skills install``,
+    tag-pinned to EVO_RELEASE_SMOKE_VERSION when set. Without the pin,
+    hermes follows the repo's default branch (main), which lags behind
+    alpha/beta tags and ships stale skill content into the smoke run.
+
+    Hermes accepts ``owner/repo@<ref>/path/to/skill`` (ref between repo
+    and path). Returns e.g. ``evo-hq/evo@v0.4.0-alpha.10`` or bare
+    ``evo-hq/evo``."""
+    version = os.environ.get("EVO_RELEASE_SMOKE_VERSION", "").strip()
+    return f"evo-hq/evo@v{version}" if version else "evo-hq/evo"
+
+
+def _skills_repo_ref_opencode(marketplace_source: str) -> str:
+    """Return the source spec for ``npx skills add`` (used by opencode).
+
+    Local-source mode passes a filesystem path through unchanged.
+    PyPI/GitHub mode uses the git-URL fragment form
+    ``https://github.com/evo-hq/evo.git#<tag>`` — npx skills's
+    ``owner/repo@<ref>`` form treats ``<ref>`` as a skill-name filter
+    after the clone, not as a git ref, so installing all skills from a
+    tag requires the URL form."""
+    if marketplace_source.startswith("/"):
+        return marketplace_source
+    version = os.environ.get("EVO_RELEASE_SMOKE_VERSION", "").strip()
+    if version:
+        return f"https://github.com/evo-hq/evo.git#v{version}"
+    return marketplace_source
+
+
 def _use_local_source() -> bool:
     """If ``EVO_RELEASE_SMOKE_SOURCE=local``, install evo from the local
     branch instead of PyPI. Use for dry-running a pre-release flow
@@ -628,9 +658,14 @@ def test_opencode(sandbox_4g):
             "curl -fsSL https://opencode.ai/install | bash > /tmp/opencode.log 2>&1",
             # Skills via the canonical cross-host CLI; opencode scans
             # ~/.agents/skills/ where this writes by default with -g.
-            # npx skills accepts both `owner/repo` and local paths.
+            # npx skills accepts local paths and git URLs with `#<ref>`
+            # fragments. Tag-pin via _skills_repo_ref_opencode() so the
+            # smoke run for v0.4.0-alpha.N pulls v0.4.0-alpha.N skills,
+            # not whatever's on main (which lags behind alpha tags).
             f"export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; "
-            f"npx -y skills add {sandbox_4g.marketplace_source} --agent opencode -g -y",
+            f"npx -y skills add "
+            f"{_skills_repo_ref_opencode(sandbox_4g.marketplace_source)} "
+            f"--agent opencode -g -y",
             "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; "
             "evo install opencode",
         ],
@@ -783,13 +818,14 @@ def test_hermes(sandbox):
     skills = ["discover", "optimize", "subagent", "infra-setup"]
     # NOTE: hermes skills install takes a github org/repo/path identifier
     # only — no local-path support documented. So in local-source mode,
-    # hermes skills come from github.com/evo-hq/evo's default branch
-    # regardless of EVO_RELEASE_SMOKE_SOURCE=local. Only the evo CLI
-    # itself is local in that mode. Worth being aware of when a hermes
-    # release-smoke pass hides a local skill change.
+    # hermes skills still come from github.com/evo-hq/evo (the CLI itself
+    # is local but skills aren't). Tag-pin via _skills_repo_ref_hermes()
+    # when EVO_RELEASE_SMOKE_VERSION is set so a v0.4.0-alpha.N smoke
+    # run pulls v0.4.0-alpha.N skills, not whatever's on main.
+    repo_ref = _skills_repo_ref_hermes()
     install_skill_steps = [
         f"export PATH=$HOME/.local/bin:$PATH; "
-        f"hermes skills install evo-hq/evo/plugins/evo/skills/{s} -y "
+        f"hermes skills install {repo_ref}/plugins/evo/skills/{s} -y "
         f"{'--force' if s == 'discover' else ''} 2>&1 | tail -3"
         for s in skills
     ]
