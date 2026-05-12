@@ -204,10 +204,30 @@ class _Harness:
         """Source for `<host> plugin marketplace add` — local path when in
         dry-run mode, GitHub repo otherwise. Resolves to a string that
         is plug-compatible with `claude plugin marketplace add` and
-        `codex plugin marketplace add`."""
+        `codex plugin marketplace add`.
+
+        Tag-pinned to ``v<EVO_RELEASE_SMOKE_VERSION>`` when that env var
+        is set so plugin-marketplace installs grab the v0.4 plugin
+        content matching the v0.4 alpha CLI being smoke-tested, not
+        whatever's on the repo's default branch (which lags behind
+        alpha tags). Claude + Codex accept ``owner/repo@<ref>``."""
         if self._evo_local_tarball is not None:
             return "/tmp/evo-local-repo"
-        return "evo-hq/evo"
+        version = os.environ.get("EVO_RELEASE_SMOKE_VERSION", "").strip()
+        return f"evo-hq/evo@v{version}" if version else "evo-hq/evo"
+
+    @property
+    def marketplace_source_url(self) -> str:
+        """Same as ``marketplace_source`` but returns a git URL form
+        with ``#<ref>`` fragment — what ``openclaw plugins install
+        --marketplace`` accepts (it doesn't recognize ``owner/repo@ref``
+        but does honor URL fragments)."""
+        if self._evo_local_tarball is not None:
+            return "/tmp/evo-local-repo"
+        version = os.environ.get("EVO_RELEASE_SMOKE_VERSION", "").strip()
+        if version:
+            return f"https://github.com/evo-hq/evo.git#v{version}"
+        return "https://github.com/evo-hq/evo"
 
     def run(self, cmd: str, *, timeout: int = 180, must_succeed: bool = True,
             background: bool = False) -> str:
@@ -378,11 +398,14 @@ def _parse_directive_id(direct_output: str) -> str:
     return m.group(1)
 
 
-def _verify_directive_consumed(h: _Harness, run_dir: str, directive_id: str) -> int:
-    """Count sessions whose offset matches the directive id."""
+def _verify_directive_consumed(h: _Harness, ws_root: str, directive_id: str) -> int:
+    """Count sessions (across ALL run_* dirs) whose offset file matches
+    the directive id. Cross-run because the agent can re-`evo init`
+    mid-session — e.g. round-1 may register a session in run_0000 and
+    then the agent re-init to run_0001 for round-2 work."""
     out = h.run(
-        f"grep -l '{directive_id}' {run_dir}/inject/offsets/*.json 2>/dev/null "
-        f"| wc -l",
+        f"grep -l '{directive_id}' {ws_root}/run_*/inject/offsets/*.json "
+        f"2>/dev/null | wc -l",
         must_succeed=False,
     ).strip()
     return int(out) if out.isdigit() else 0
@@ -397,15 +420,25 @@ def _read_graph(h: _Harness, run_dir: str) -> dict | None:
         return None
 
 
-def _read_best_score(h: _Harness, run_dir: str, metric: str = "max") -> float | None:
-    """Best committed score across all nodes. Mirrors
-    `evo.core.best_committed_score`."""
-    graph = _read_graph(h, run_dir) or {}
+def _read_best_score(h: _Harness, ws_root: str, metric: str = "max") -> float | None:
+    """Best committed score across ALL run_*/graph.json. Cross-run
+    because the agent can re-`evo init` mid-session: the highest score
+    may live in run_0001 while the harness's initial run_dir points at
+    run_0000 (now stale). Mirrors `evo.core.best_committed_score` but
+    spans every run in the workspace."""
+    # List every run_* dir; for each, parse graph.json and collect
+    # committed-with-score nodes. Doing this in Python (not jq) keeps
+    # the test self-contained.
+    listing = h.run(
+        f"ls -d {ws_root}/run_* 2>/dev/null", must_succeed=False,
+    ).strip().splitlines()
     scores: list[float] = []
-    for node in (graph.get("nodes") or {}).values():
-        if node.get("status") != "committed" or node.get("score") is None:
-            continue
-        scores.append(float(node["score"]))
+    for run_dir in listing:
+        graph = _read_graph(h, run_dir) or {}
+        for node in (graph.get("nodes") or {}).values():
+            if node.get("status") != "committed" or node.get("score") is None:
+                continue
+            scores.append(float(node["score"]))
     if not scores:
         return None
     return max(scores) if metric == "max" else min(scores)
@@ -530,7 +563,16 @@ def _drive_smoke(
     )
 
     # ---------- assertions ----------
-    n_experiments = int(h.run(f"ls {run_dir}/experiments/ | wc -l").strip())
+    # Every assertion below globs across ALL `ws_root/run_*` rather than
+    # the run_dir returned at poll time: agents like claude-code re-run
+    # `evo init` mid-session, splitting experiments / sessions / graph
+    # nodes between run_0000 and run_0001. The directive ends up wherever
+    # the agent's hook walks to find .evo/, the best score may live in a
+    # later run, etc. Pinning to one run_dir gives stale assertions.
+    n_experiments = int(h.run(
+        f"find {ws_root}/run_*/experiments -mindepth 1 -maxdepth 1 -type d "
+        f"2>/dev/null | wc -l", must_succeed=False,
+    ).strip())
     # The fixture prompt specifies 2 subagents × 2 rounds = 4 experiments.
     # >= (not ==) tolerates the rare case where a subagent's first evo run
     # fails inside budget and the same brief produces a sibling experiment.
@@ -541,17 +583,31 @@ def _drive_smoke(
         h.run("echo '--- /tmp/agent.log (last 200 lines) ---'; "
               "tail -200 /tmp/agent.log 2>&1 || echo '(no agent log)'",
               must_succeed=False, timeout=10)
-        h.run(f"echo '--- experiment outcomes ---'; "
-              f"for f in {run_dir}/experiments/exp_*/attempts/*/outcome.json; do "
+        h.run(f"echo '--- experiment outcomes (all runs) ---'; "
+              f"for f in {ws_root}/run_*/experiments/exp_*/attempts/*/outcome.json; do "
               f"  echo \"=== $f ===\"; cat \"$f\" 2>/dev/null | head -20; "
               f"done",
+              must_succeed=False, timeout=10)
+    if os.environ.get("EVO_DUMP_AGENT_LOG") == "1":
+        # Surface evidence that the directive content reached the LLM
+        # transcript (not just the inject queue). Greps + dumps the
+        # raw agent.log so we can see exactly what the host CLI
+        # streamed (vs what it received internally via hooks).
+        h.run(f"echo '--- agent.log directive matches ---'; "
+              f"grep -nE 'EVO_DIRECTIVE_|In addition to your planned|Experiment D|"
+              f"{directive_tag}' /tmp/agent.log 2>&1 | head -30 "
+              f"|| echo '(no matches in agent.log)'",
+              must_succeed=False, timeout=10)
+        h.run("echo '--- agent.log size + tail 100 ---'; "
+              "wc -l /tmp/agent.log; "
+              "echo; tail -100 /tmp/agent.log",
               must_succeed=False, timeout=10)
     assert n_experiments >= 4, (
         f"[{host}] expected ≥4 experiments (2 subagents × 2 rounds), got "
         f"{n_experiments} — round 2 likely didn't fire"
     )
 
-    consumed_by = _verify_directive_consumed(h, run_dir, directive_id)
+    consumed_by = _verify_directive_consumed(h, ws_root, directive_id)
     assert consumed_by >= 1, (
         f"[{host}] directive {directive_id} not consumed by any session; "
         f"mid-run inject did not reach the agent"
@@ -563,7 +619,7 @@ def _drive_smoke(
     # deepest signal that the directive's CONTENT (not just the event id)
     # reached the subagent's reasoning and shaped its work.
     tag_count_str = h.run(
-        f"grep -rl '{directive_tag}' {run_dir}/worktrees/*/target.py "
+        f"grep -rl '{directive_tag}' {ws_root}/run_*/worktrees/*/target.py "
         f"2>/dev/null | wc -l",
         must_succeed=False,
     ).strip()
@@ -572,8 +628,8 @@ def _drive_smoke(
         h.run("echo '--- /tmp/agent.log (last 300 lines) ---'; "
               "tail -300 /tmp/agent.log 2>&1 || echo '(no agent log)'",
               must_succeed=False, timeout=10)
-        h.run(f"echo '--- experiment briefs/outcomes ---'; "
-              f"for d in {run_dir}/experiments/exp_*; do "
+        h.run(f"echo '--- experiment briefs/outcomes (all runs) ---'; "
+              f"for d in {ws_root}/run_*/experiments/exp_*; do "
               f"  echo \"=== $d ===\"; "
               f"  cat \"$d/brief.txt\" 2>/dev/null | head -30; echo; "
               f"  for a in \"$d/attempts/\"*/outcome.json; do "
@@ -581,8 +637,8 @@ def _drive_smoke(
               f"  done; "
               f"done",
               must_succeed=False, timeout=20)
-        h.run(f"echo '--- worktree target.py heads ---'; "
-              f"for f in {run_dir}/worktrees/*/target.py; do "
+        h.run(f"echo '--- worktree target.py heads (all runs) ---'; "
+              f"for f in {ws_root}/run_*/worktrees/*/target.py; do "
               f"  echo \"=== $f ===\"; head -8 \"$f\" 2>/dev/null; "
               f"done",
               must_succeed=False, timeout=10)
@@ -593,8 +649,8 @@ def _drive_smoke(
         f"not act on its content."
     )
 
-    best = _read_best_score(h, run_dir)
-    assert best is not None, f"[{host}] no committed score in graph.json"
+    best = _read_best_score(h, ws_root)
+    assert best is not None, f"[{host}] no committed score in any run's graph.json"
     # baseline was measured above (before agent launch) by running bench.py
     # against the unmodified target.py — that's the true reference.
     ratio = best / baseline
@@ -930,10 +986,12 @@ def test_openclaw(sandbox_4g):
             "rm -rf ~/.openclaw/workspace && "
             "ln -s /tmp/ws ~/.openclaw/workspace",
             # `openclaw plugins install --marketplace` accepts local paths
-            # ("local repo/path") in addition to git URLs — see openclaw help.
+            # and git URLs with `#<ref>` fragments. marketplace_source_url
+            # tag-pins to v<EVO_RELEASE_SMOKE_VERSION> when set, so smoke
+            # for v0.4.0-alpha.N pulls v0.4.0-alpha.N plugin content,
+            # not main (which lags behind alpha tags).
             f"openclaw plugins install evo --marketplace "
-            f"{sandbox_4g.marketplace_source if sandbox_4g.marketplace_source.startswith('/') else 'https://github.com/evo-hq/evo'} "
-            "2>&1 | tail -3",
+            f"{sandbox_4g.marketplace_source_url} 2>&1 | tail -3",
             "export PATH=$HOME/.local/bin:$PATH; evo install openclaw",
         ],
         drive_cmd=(
