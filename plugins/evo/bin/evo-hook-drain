@@ -1,0 +1,88 @@
+#!/bin/bash
+# evo-hook-drain — hot-path hook invoked by host plugins (Claude Code, Codex).
+# Reads session_id from stdin's JSON payload (host hook contract), then
+# does two stat checks; exits in ~5-7ms p99 when there's nothing to deliver.
+# Hands off to `evo-drain` (Python console_script) only when the marker
+# says there's something to drain.
+#
+# See notes/cross-host-inject-design.md.
+
+set -e
+
+# 1. Read stdin into STDIN_BUF. Hosts pass a JSON payload with session_id.
+#    Bash builtin `read -d ''` slurps to EOF without forking.
+STDIN_BUF=""
+if [ ! -t 0 ]; then
+    # Stdin is a pipe; read it.
+    IFS= read -r -d '' STDIN_BUF || true
+fi
+
+# 2. Extract session_id via bash regex (no fork).
+SID=""
+if [[ "$STDIN_BUF" =~ \"session_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+    SID="${BASH_REMATCH[1]}"
+fi
+# Fallback: env var (if a host happens to export it). Empty otherwise.
+[ -z "$SID" ] && SID="${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-${HERMES_SESSION_ID:-${OPENCODE_SESSION_ID:-}}}}"
+[ -n "$SID" ] || { echo '{}'; exit 0; }
+
+# 3. Resolve the evo run directory.
+#    Prefer $EVO_RUN_DIR if set (no filesystem walk).
+#    Otherwise walk up from cwd to find .evo/run_*; pick lexicographically
+#    last run_* (run_NNNN naming sorts by creation order).
+#    All shell builtins — no extra subprocesses.
+EVO_RUN="${EVO_RUN_DIR:-}"
+if [ -z "$EVO_RUN" ]; then
+    cwd="$PWD"
+    while [ "$cwd" != "/" ]; do
+        if [ -d "$cwd/.evo" ]; then
+            for run in "$cwd"/.evo/run_*; do
+                [ -d "$run" ] && EVO_RUN="$run"
+            done
+            break
+        fi
+        cwd="${cwd%/*}"
+        [ -z "$cwd" ] && cwd="/"
+    done
+fi
+[ -z "$EVO_RUN" ] && { echo '{}'; exit 0; }
+
+# 4. Auto-register the session on SessionStart (one-time per session).
+#    Some hosts (Codex) don't expose session_id via env to Bash-tool
+#    subprocesses, so `evo X` from inside the agent can't auto-register.
+#    The SessionStart hook fires once per session with session_id in stdin
+#    — we use that fire to write the registry entry.
+HOOK_EVENT=""
+if [[ "$STDIN_BUF" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+    HOOK_EVENT="${BASH_REMATCH[1]}"
+fi
+if [ "$HOOK_EVENT" = "SessionStart" ] && [ ! -f "$EVO_RUN/inject/sessions/$SID.json" ]; then
+    # Cheap inline registry write — no fork, no python.
+    mkdir -p "$EVO_RUN/inject/sessions" 2>/dev/null
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    HOST="claude-code"
+    case "$STDIN_BUF" in
+        *.codex/*) HOST="codex" ;;
+        *.hermes/*) HOST="hermes" ;;
+        *.opencode/*) HOST="opencode" ;;
+    esac
+    cat > "$EVO_RUN/inject/sessions/$SID.json" <<JSON
+{"schema_version":1,"session_id":"$SID","host":"$HOST","pid":$$,"registered_at":"$NOW","last_seen_at":"$NOW","exp_id":null,"parent_session_id":null}
+JSON
+fi
+
+# 5. Fast exit if this session never registered with evo.
+[ -f "$EVO_RUN/inject/sessions/$SID.json" ] || { echo '{}'; exit 0; }
+
+# 6. SessionStart drains unconditionally — it fires once per session, gives
+# new/resumed sessions a chance to catch up on the workspace queue regardless
+# of whether `evo direct` was issued before they registered.
+# Other events use the marker fast-path: stat absent → exit (no work to do).
+if [ "$HOOK_EVENT" != "SessionStart" ]; then
+    [ -f "$EVO_RUN/inject/markers/$SID.flag" ] || { echo '{}'; exit 0; }
+fi
+
+# 7. There's something to deliver — hand off to evo-drain (a pip-installed
+# console_script that uses the same Python that runs `evo`). The drain
+# also re-reads stdin to detect hook_event_name; pass STDIN_BUF along.
+exec evo-drain --run-dir "$EVO_RUN" --session "$SID" <<<"$STDIN_BUF"

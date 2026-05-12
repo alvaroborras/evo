@@ -58,6 +58,10 @@ Issues = "https://github.com/evo-hq/evo/issues"
 [project.scripts]
 evo = "evo.cli:main"
 evo-dashboard = "evo.dashboard:main"
+evo-drain = "evo.inject.drain:main"
+
+[project.entry-points."hermes_agent.plugins"]
+evo = "evo.hermes_plugin"
 
 [build-system]
 requires = ["setuptools>=68.0.0"]
@@ -65,9 +69,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+script-files = ["bin/evo-hook-drain"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-evo = ["static/*"]
+evo = ["static/*", "opencode_plugin/*.js", "openclaw_plugin/*.js"]

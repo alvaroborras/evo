@@ -1191,7 +1191,12 @@ def _cmd_dispatch_wait(args: argparse.Namespace) -> int:
                 except Exception:  # noqa: BLE001
                     pass
                 if not args.quiet:
-                    print(json.dumps(row))
+                    # flush=True so each completion streams to stdout as it
+                    # happens. Without this, Python block-buffers stdout when
+                    # not a TTY (piped through tee, captured by an agent's
+                    # bash tool, etc.) and the orchestrator only sees all
+                    # rows at once when the slowest job finishes.
+                    print(json.dumps(row), flush=True)
                 if status == "error":
                     rc = 1
         if pending:
@@ -3688,6 +3693,91 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install(args: argparse.Namespace) -> int:
+    """Install the evo plugin for the named host."""
+    from . import host_install
+    try:
+        adapter = host_install.get(args.host)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    return adapter.install(args)
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """Uninstall the evo plugin for the named host."""
+    from . import host_install
+    try:
+        adapter = host_install.get(args.host)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    return adapter.uninstall(args)
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Check that evo's plugin is correctly installed for the named host."""
+    from . import host_install
+    try:
+        adapter = host_install.get(args.host)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    return adapter.doctor(args)
+
+
+def cmd_direct(args: argparse.Namespace) -> int:
+    """Send a directive to the workspace.
+
+    Forms:
+        evo direct "<text>"                     # broadcast
+        evo direct <exp_id> "<text>"            # targeted at a subagent
+    """
+    from .inject import marker, queue
+    from .inject.registry import list_active_sessions
+
+    root = repo_root()
+    if not (root / ".evo").exists():
+        print("ERROR: not in an evo workspace", file=sys.stderr)
+        return 2
+
+    parts = list(args.args)
+    if not parts:
+        print("ERROR: usage: evo direct [<exp_id>] <text>", file=sys.stderr)
+        return 2
+
+    # Detect exp_id form: first arg matches exp_NNNN pattern
+    exp_id: str | None = None
+    if len(parts) >= 2 and re.match(r"^exp_[A-Za-z0-9]+$", parts[0]):
+        exp_id = parts[0]
+        text = " ".join(parts[1:])
+    else:
+        text = " ".join(parts)
+
+    if exp_id:
+        event_id = queue.append_exp_event(root, exp_id, text)
+        # Touch only the subagent's marker. The subagent's session_id
+        # is the same as exp_id-keyed marker for routing simplicity.
+        marker.touch(root, exp_id)
+        print(f"directive queued (exp={exp_id}, id={event_id})")
+        return 0
+
+    event_id = queue.append_workspace_event(root, text)
+    sessions = list_active_sessions(root)
+    delivered = 0
+    for sess in sessions:
+        if sess.get("exp_id"):
+            # Skip subagents — workspace events go to orchestrators only
+            continue
+        sid = sess.get("session_id")
+        if not sid:
+            continue
+        marker.touch(root, sid)
+        delivered += 1
+    print(f"directive queued (id={event_id}, fanout={delivered} sessions)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="evo")
     # Format includes the distribution name so skill checks can distinguish
@@ -4254,12 +4344,96 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch_kill_p.add_argument("job_id")
     dispatch_kill_p.set_defaults(func=cmd_dispatch)
 
+    from . import host_install
+
+    install_p = sub.add_parser(
+        "install",
+        help="Install the evo plugin for a host (Hermes pip-into-venv, Opencode plugin file, etc.)",
+    )
+    install_p.add_argument("host", choices=host_install.SUPPORTED_HOSTS)
+    install_p.add_argument(
+        "--from-source",
+        action="store_true",
+        help="Install editable from this evo repo (developer mode); hermes only",
+    )
+    install_p.add_argument(
+        "--from-path",
+        default=None,
+        help="Install host plugin from a specific source dir (tarball extract, git "
+             "checkout). Used by live tests; takes precedence over --from-source. "
+             "Hermes: pip-installs from this path. Codex: symlinks skills from "
+             "<path>/skills/ into ~/.agents/skills/.",
+    )
+    install_p.add_argument(
+        "--workspace",
+        action="store_true",
+        help="Workspace-local install (opencode only — drop into ./.opencode/plugins/)",
+    )
+    install_p.add_argument(
+        "--trust-hooks",
+        action="store_true",
+        help="Trust the plugin's hooks non-interactively (codex only). "
+             "By default codex installs hooks in untrusted state — they "
+             "register but never fire until reviewed via `codex /hooks`. "
+             "This flag writes the trusted_hash entries that the TUI would "
+             "write on user approval, enabling mid-run directives. Use only "
+             "if you've reviewed plugins/evo/hooks/hooks.json and accept it.",
+    )
+    install_p.set_defaults(func=cmd_install)
+
+    uninstall_p = sub.add_parser("uninstall", help="Remove the evo plugin for a host")
+    uninstall_p.add_argument("host", choices=host_install.SUPPORTED_HOSTS)
+    uninstall_p.set_defaults(func=cmd_uninstall)
+
+    doctor_p = sub.add_parser(
+        "doctor",
+        help="Verify evo plugin install for a host (paths, configs, registration)",
+    )
+    doctor_p.add_argument("host", choices=host_install.SUPPORTED_HOSTS)
+    doctor_p.set_defaults(func=cmd_doctor)
+
+    direct_p = sub.add_parser(
+        "direct",
+        help="Send a directive to running orchestrator session(s) or a specific subagent (by exp_id)",
+        description=(
+            "Without exp_id: directive is delivered to every registered "
+            "orchestrator-class session in the workspace. With exp_id: "
+            "delivered only to that subagent's session. Sessions that "
+            "haven't registered (haven't run any `evo` command) receive "
+            "nothing."
+        ),
+    )
+    direct_p.add_argument(
+        "args",
+        nargs="+",
+        help="Either '<text>' (broadcast) or '<exp_id> <text>' (targeted)",
+    )
+    direct_p.set_defaults(func=cmd_direct)
+
     return parser
+
+
+def _maybe_auto_register() -> None:
+    """Best-effort: if running inside an evo workspace AND inside an
+    agent host session (CLAUDE_CODE_SESSION_ID etc.), record this
+    session in the inject registry. Side-effect of every `evo X` call.
+    Silent on any error so it never breaks the user's command.
+    """
+    try:
+        root = repo_root()
+        if not (root / ".evo").exists():
+            return
+        from evo.inject.registry import auto_register_from_env
+        auto_register_from_env(root)
+    except Exception:  # noqa: BLE001
+        # Best-effort; never break the user's command.
+        pass
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _maybe_auto_register()
     try:
         rc = args.func(args)
     except Exception as exc:  # noqa: BLE001
