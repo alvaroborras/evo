@@ -92,7 +92,9 @@ body {
   font-size: 15px;
   color: var(--text-4);
   min-width: 0;
+  cursor: pointer;
 }
+.target:hover strong { color: var(--purple); }
 .target:empty { display: none; }
 .target strong {
   color: var(--text-1);
@@ -1763,6 +1765,244 @@ body {
   flex: 1;
   min-height: 0;
 }
+/* Settings modal owns a footer in addition to header + body, so it
+   needs to behave like a dedicated grid: header / scrollable body /
+   sticky footer. Height is fixed (not capped) so switching tabs
+   doesn't resize the modal — content scrolls inside the panel. */
+.modal.settings-modal {
+  display: flex;
+  flex-direction: column;
+  height: min(840px, 88vh);
+  min-height: 0;
+}
+/* Workspace popover: read-only summary anchored beneath the project name
+   in the topbar. Positioning is set inline by JS. */
+.workspace-popover {
+  position: fixed;
+  z-index: 200;
+  width: 360px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  font-size: 11px;
+  color: var(--text-2);
+}
+.workspace-popover.hidden { display: none; }
+.ws-pop-head {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ws-pop-title {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.ws-pop-sub {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-5);
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.ws-pop-body {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 14px;
+}
+.ws-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+.ws-row:last-child { border-bottom: none; }
+.ws-label {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-4);
+}
+.ws-value {
+  color: var(--text-1);
+  text-align: right;
+  word-break: break-all;
+}
+.ws-value.mono { font-family: 'JetBrains Mono', monospace; }
+.ws-pop-section {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+.ws-pop-section-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-4);
+  margin-bottom: 6px;
+}
+.ws-pre {
+  margin: 0;
+  background: var(--inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-1);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* Rich select: closed-state trigger with current label + sub, expands
+   to a popover with full label + description per option. Replaces the
+   nested left-rail pattern inside the settings panels — frees the full
+   panel width for the option's config form. */
+.rich-select { position: relative; width: 100%; }
+.rich-select-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 9px 12px;
+  font: inherit;
+  color: var(--text-1);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 120ms ease;
+}
+.rich-select-trigger:hover { border-color: var(--text-5); }
+.rich-select.open .rich-select-trigger {
+  border-color: rgba(168,85,247,0.55);
+}
+.rich-select-current {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.rich-select-current-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.rich-select-current-sub {
+  font-size: 10px;
+  color: var(--text-4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rich-select-caret {
+  flex-shrink: 0;
+  color: var(--text-4);
+  transition: transform 120ms ease;
+}
+.rich-select.open .rich-select-caret { transform: rotate(180deg); }
+.rich-select-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  box-shadow: 0 14px 36px rgba(0,0,0,0.55);
+  max-height: 340px;
+  overflow-y: auto;
+}
+.rich-select-pop.hidden { display: none; }
+.rich-select-group-label {
+  padding: 8px 12px 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-5);
+}
+.rich-select-option {
+  padding: 9px 12px;
+  cursor: pointer;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.rich-select-option-icon,
+.rich-select-current-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+}
+.rich-select-option-icon img,
+.rich-select-option-icon svg,
+.rich-select-current-icon img,
+.rich-select-current-icon svg { width: 100%; height: 100%; object-fit: contain; }
+.rich-select-option:first-of-type { border-top: none; }
+.rich-select-group-label + .rich-select-option { border-top: none; }
+.rich-select-option:hover { background: var(--inset); }
+.rich-select-option.current { background: rgba(168,85,247,0.06); }
+.rich-select-option-text { min-width: 0; flex: 1; }
+.rich-select-option-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.rich-select-option-desc {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.45;
+}
+.rich-select-option-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--purple);
+  border: 1px solid rgba(168,85,247,0.4);
+  background: rgba(168,85,247,0.08);
+  padding: 2px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.modal-footer.settings-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-panel, var(--inset));
+}
+.settings-footer-status {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  transition: color 120ms ease;
+}
+.settings-footer-status[data-tone="ok"]      { color: var(--green); }
+.settings-footer-status[data-tone="error"]   { color: var(--red); }
+.settings-footer-status[data-tone="pending"] { color: var(--purple); }
 .modal-body pre {
   background: var(--inset);
   border: 1px solid var(--border-subtle);
@@ -1872,11 +2112,16 @@ body {
 }
 .strategy-row {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-4);
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-3);
+  padding: 4px 0;
 }
+.strategy-row > span { flex: 1; }
 .strategy-row small {
   color: var(--text-5);
   font-weight: normal;
@@ -1884,12 +2129,13 @@ body {
 .strategy-row select,
 .strategy-row input {
   background: var(--inset);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   color: var(--text-1);
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 6px 9px;
+  border-radius: 4px;
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
+  width: 140px;
 }
 .strategy-desc {
   font-size: 12px;
@@ -1902,11 +2148,12 @@ body {
 .strategy-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 12px;
   margin-top: 14px;
   padding-top: 14px;
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;  /* pin to bottom; don't shrink when panes overflow */
+  border-top: 1px dashed var(--border-subtle);
+  flex-shrink: 0;
 }
 .strategy-status {
   font-size: 12px;
@@ -1961,76 +2208,10 @@ body {
   margin-top: 8px;
 }
 
-/* Strategy picker: two-column master/detail with pinned footer */
-.strategy-form {
-  display: flex;
-  flex-direction: column;
-  /* Fixed internal height keeps the modal from resizing as content varies. */
-  height: 460px;
-}
-.strategy-split {
-  display: grid;
-  grid-template-columns: 200px 1fr;
-  gap: 16px;
-  flex: 1;
-  min-height: 0;  /* required so children can overflow+scroll */
-}
-.strategy-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-right: 12px;
-  border-right: 1px solid var(--border);
-  overflow-y: auto;
-  min-height: 0;
-}
-.strategy-item {
-  padding: 8px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: var(--text-3);
-  font-size: 12px;
-  font-weight: 500;
-  transition: color 0.1s, background 0.1s;
-  position: relative;
-}
-.strategy-item:hover {
-  color: var(--text-2);
-  background: var(--inset);
-}
-.strategy-item.selected {
-  color: var(--text-1);
-  background: #27272a;
-  font-weight: 600;
-}
-.strategy-item.selected::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 8px;
-  bottom: 8px;
-  width: 2px;
-  background: var(--orange);
-  border-radius: 2px;
-}
-.strategy-item-label {
-  display: block;
-}
 .strategy-detail {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 2px 8px 2px 2px;   /* room for scrollbar */
-  overflow-y: auto;
-  min-height: 0;
-}
-.strategy-detail-head {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-1);
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 .strategy-detail-desc {
   font-size: 12px;
@@ -2198,14 +2379,19 @@ body {
   margin-bottom: 12px;
 }
 .settings-section-title {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 600;
   color: var(--text-1);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border-subtle);
 }
 .settings-section-sub {
-  margin-top: 3px;
-  font-size: 12px;
+  margin-top: 4px;
+  font-size: 11px;
   color: var(--text-3);
+  font-family: 'JetBrains Mono', monospace;
 }
 .settings-summary-grid {
   display: grid;
@@ -2233,11 +2419,16 @@ body {
   color: var(--text-3);
 }
 .settings-field.checkbox {
-  justify-content: flex-end;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
+.settings-field.checkbox > span { flex: 1; }
 .settings-field.checkbox input {
   width: 16px;
   height: 16px;
+  flex-shrink: 0;
 }
 .settings-field small {
   color: var(--text-4);
@@ -2247,23 +2438,43 @@ body {
 .settings-field textarea {
   background: var(--inset);
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  padding: 9px 11px;
+  border-radius: 4px;
+  padding: 6px 9px;
   color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
   width: 100%;
+  transition: border-color 120ms ease;
+}
+.settings-field input:focus,
+.settings-field select:focus,
+.settings-field textarea:focus {
+  outline: none;
+  border-color: rgba(168,85,247,0.55);
 }
 .settings-select {
   background: var(--inset);
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  padding: 9px 11px;
+  border-radius: 4px;
+  padding: 6px 9px;
   color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
   width: 100%;
 }
+/* Inline row variant: short inputs (numbers, selects) sit to the right
+   of their label instead of below, matching the example density. */
+.settings-field.inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-field.inline > span { flex: 1; }
+.settings-field.inline input,
+.settings-field.inline select { width: 160px; }
 .settings-field textarea {
   min-height: 88px;
   resize: vertical;
@@ -2405,8 +2616,8 @@ body {
 /* Settings modal layout */
 .settings-shell {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 16px;
   min-height: 0;
   flex: 1;
   height: 100%;
@@ -2414,28 +2625,30 @@ body {
 .settings-nav {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-right: 14px;
+  gap: 2px;
+  padding-right: 12px;
   border-right: 1px solid var(--border-subtle);
   min-width: 0;
 }
 .settings-nav-item {
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 4px;
+  padding: 8px 10px;
   text-align: left;
   color: var(--text-3);
   cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
 }
 .settings-nav-item:hover {
-  background: var(--inset);
   color: var(--text-1);
+  background: var(--inset);
 }
 .settings-nav-item.selected {
-  background: var(--surface);
-  border-color: var(--border-subtle);
   color: var(--text-1);
+  background: var(--inset);
+  border-left: 2px solid var(--purple);
+  padding-left: 8px;
 }
 .settings-nav-title {
   display: block;
@@ -2444,9 +2657,11 @@ body {
 }
 .settings-nav-sub {
   display: block;
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--text-4);
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-5);
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.02em;
 }
 .settings-panel {
   min-width: 0;
@@ -2454,59 +2669,20 @@ body {
   padding-right: 4px;
   min-height: 0;
 }
-.settings-hero {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-.settings-hero-badge {
-  font-size: 11px;
-  color: var(--text-2);
-  border: 1px solid var(--border-subtle);
-  background: var(--inset);
-  border-radius: 999px;
-  padding: 5px 9px;
-}
-.settings-rows {
-  border-top: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
-}
-.settings-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 0;
-  border-top: 1px solid var(--border-subtle);
-}
-.settings-row:first-child { border-top: none; }
-.settings-row span { color: var(--text-4); }
-.settings-row strong { color: var(--text-1); font-size: 12px; text-align: right; }
 .settings-block {
-  padding-top: 16px;
-  margin-top: 16px;
-  border-top: 1px solid var(--border-subtle);
+  padding-top: 14px;
+  margin-top: 14px;
+  border-top: 1px dashed var(--border-subtle);
 }
+.settings-block:first-child { padding-top: 0; margin-top: 0; border-top: none; }
 .settings-block-label {
-  font-size: 11px;
-  letter-spacing: 0.4px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-4);
   margin-bottom: 10px;
-}
-.settings-pre {
-  background: var(--inset);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 12px;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  color: var(--text-1);
-  overflow-x: auto;
-  white-space: pre-wrap;
 }
-.settings-inline { font-size: 12px; color: var(--text-1); }
 .settings-help { margin-top: 6px; font-size: 11px; color: var(--text-4); }
 .runtime-source-row,
 .runtime-check-row {
@@ -2625,7 +2801,9 @@ body {
 .mini-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 120;
+  /* Sits ABOVE the settings modal (z-index 200) since it opens as a
+     sub-modal from within it. */
+  z-index: 240;
   background: rgba(0,0,0,0.55);
   display: flex;
   align-items: center;

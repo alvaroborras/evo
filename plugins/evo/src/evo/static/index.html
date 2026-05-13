@@ -54,7 +54,7 @@
         <div class="stat-sub">running now</div>
       </div>
     </div>
-    <span id="target-file" class="target"></span>
+    <span id="target-file" class="target" onclick="toggleWorkspacePopover(event)" title="Workspace details"></span>
     <div class="spacer"></div>
     <button id="settings-btn" class="btn-ghost" onclick="openSettings()" title="Workspace and execution settings">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -98,16 +98,24 @@
   <!-- Info popover (shared) -->
   <div id="tip-popover" class="tip-popover hidden"></div>
 
+  <!-- Workspace popover (read-only project facts; opens from the topbar). -->
+  <div id="workspace-popover" class="workspace-popover hidden"></div>
+
   <!-- Settings modal -->
   <div id="settings-overlay" class="modal-overlay hidden" onclick="closeSettings()">
-    <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal settings-modal" onclick="event.stopPropagation()">
       <div class="modal-header">
         <span class="modal-title">Settings</span>
-        <span class="modal-sub">project, execution, runtime, frontier</span>
         <div class="spacer"></div>
         <span class="close-btn" onclick="closeSettings()">&times;</span>
       </div>
       <div id="settings-body" class="modal-body settings-body"></div>
+      <div class="modal-footer settings-footer">
+        <span id="settings-footer-status" class="settings-footer-status"></span>
+        <span class="spacer"></span>
+        <button class="btn-ghost" type="button" onclick="closeSettings()">Cancel</button>
+        <button id="settings-footer-save" class="btn-spawn" type="button" onclick="submitActiveSettings()" disabled>Save</button>
+      </div>
     </div>
   </div>
 

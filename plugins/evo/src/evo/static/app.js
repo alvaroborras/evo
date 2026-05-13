@@ -11,7 +11,7 @@ const state = {
   sidebarTab: 'summary',
   expandedTasks: new Set(),
   refreshTimer: null,
-  settingsSection: 'project',
+  settingsSection: 'execution',
   // Timeline filters / view state
   statusFilters: new Set(['committed', 'evaluated', 'discarded', 'failed', 'active', 'pending', 'pruned']),
   viewMode: 'all',         // 'all' | 'lineage' | 'frontier'
@@ -2277,6 +2277,172 @@ function closeScratchpad() {
 }
 
 // ─── Settings modal ─────────────────────────────────────
+// Rich select: replaces a nested left-rail with an in-context dropdown
+// that shows label + description per option. Use this when picking from
+// a list of named options inside a tight container (e.g. settings panels).
+//
+//   options: [{ value, label, description?, group?, badge?, icon? }]
+//     icon: optional HTML string rendered as a leading slot in both the
+//     trigger (when this option is current) and the popover row.
+//   current: the option the trigger displays and the popover highlights
+//            (the user's pending pick — moves as they click rows).
+//   applied: the option to tag "active" in the popover (the saved server
+//            value — only moves once the user actually saves). Falls back
+//            to `current` if not provided.
+//   onChange: (newValue) => void; only called when value actually changes
+function renderRichSelect(host, { options, current, applied, onChange, ariaLabel }) {
+  host.classList.add('rich-select');
+  const currentOpt = options.find(o => o.value === current) || options[0];
+  const appliedVal = applied !== undefined ? applied : current;
+
+  const popParts = [];
+  let lastGroup = null;
+  for (const opt of options) {
+    if (opt.group && opt.group !== lastGroup) {
+      popParts.push(`<div class="rich-select-group-label">${esc(opt.group)}</div>`);
+      lastGroup = opt.group;
+    }
+    const isCurrent = opt.value === current;
+    const isApplied = opt.value === appliedVal;
+    const badge = isApplied ? 'active' : (opt.badge || '');
+    popParts.push(`
+      <div class="rich-select-option${isCurrent ? ' current' : ''}" data-value="${esc(opt.value)}" role="option" aria-selected="${isCurrent}">
+        ${opt.icon ? `<span class="rich-select-option-icon">${opt.icon}</span>` : ''}
+        <div class="rich-select-option-text">
+          <div class="rich-select-option-label">${esc(opt.label)}</div>
+          ${opt.description ? `<div class="rich-select-option-desc">${esc(opt.description)}</div>` : ''}
+        </div>
+        ${badge ? `<span class="rich-select-option-badge">${esc(badge)}</span>` : ''}
+      </div>
+    `);
+  }
+
+  host.innerHTML = `
+    <button type="button" class="rich-select-trigger" aria-haspopup="listbox" aria-label="${esc(ariaLabel || 'Select')}">
+      ${currentOpt.icon ? `<span class="rich-select-current-icon">${currentOpt.icon}</span>` : ''}
+      <span class="rich-select-current">
+        <span class="rich-select-current-label">${esc(currentOpt.label)}</span>
+        ${currentOpt.description ? `<span class="rich-select-current-sub">${esc(currentOpt.description)}</span>` : ''}
+      </span>
+      <svg class="rich-select-caret" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="2 4 5 7 8 4"/>
+      </svg>
+    </button>
+    <div class="rich-select-pop hidden" role="listbox">${popParts.join('')}</div>
+  `;
+
+  const trigger = host.querySelector('.rich-select-trigger');
+  const pop = host.querySelector('.rich-select-pop');
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAllRichSelectsExcept(host);
+    if (pop.classList.contains('hidden')) {
+      pop.classList.remove('hidden');
+      host.classList.add('open');
+    } else {
+      pop.classList.add('hidden');
+      host.classList.remove('open');
+    }
+  });
+  pop.addEventListener('click', (e) => {
+    const opt = e.target.closest('.rich-select-option');
+    if (!opt) return;
+    const value = opt.dataset.value;
+    pop.classList.add('hidden');
+    host.classList.remove('open');
+    if (value !== current) onChange(value);
+  });
+}
+
+function closeAllRichSelectsExcept(keep) {
+  document.querySelectorAll('.rich-select.open').forEach((rs) => {
+    if (rs === keep) return;
+    rs.querySelector('.rich-select-pop')?.classList.add('hidden');
+    rs.classList.remove('open');
+  });
+}
+
+// One document-level click handler closes any open rich-select. Uses the
+// capture phase because parent modals (.modal) stop propagation on click,
+// which would otherwise hide this listener from clicks inside the modal.
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.rich-select.open')) return;
+  closeAllRichSelectsExcept(null);
+}, true);
+
+// Workspace popover: read-only view of init-time facts (metric, host,
+// commit strategy, keyfile presence, benchmark, gate). Opens from the
+// project/target text in the topbar. The settings modal handles editable
+// settings only; this is for the things you don't change after init.
+function toggleWorkspacePopover(ev) {
+  if (ev) ev.stopPropagation();
+  const popover = document.getElementById('workspace-popover');
+  const anchor = document.getElementById('target-file');
+  if (!popover || !anchor) return;
+  if (!popover.classList.contains('hidden')) {
+    popover.classList.add('hidden');
+    return;
+  }
+  popover.innerHTML = renderWorkspacePopover(state.workspace || {}, state.stats || {});
+  popover.classList.remove('hidden');
+  const r = anchor.getBoundingClientRect();
+  const margin = 8;
+  // Position below the target-file; clamp to viewport.
+  popover.style.visibility = 'hidden';
+  popover.style.left = '0px';
+  popover.style.top = '0px';
+  const pw = popover.offsetWidth;
+  let left = r.left;
+  if (left + pw > window.innerWidth - margin) left = Math.max(margin, window.innerWidth - pw - margin);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${r.bottom + 6}px`;
+  popover.style.visibility = '';
+}
+
+function renderWorkspacePopover(ws, stats) {
+  const row = (label, value, mono) => `
+    <div class="ws-row">
+      <span class="ws-label">${esc(label)}</span>
+      <span class="ws-value${mono ? ' mono' : ''}">${esc(value || '--')}</span>
+    </div>
+  `;
+  const keyfile = ws.keyfile_present ? 'present' : 'missing';
+  return `
+    <div class="ws-pop-head">
+      <span class="ws-pop-title">${esc(ws.project_name || stats.project_name || 'workspace')}</span>
+      <span class="ws-pop-sub">read-only · set at init</span>
+    </div>
+    <div class="ws-pop-body">
+      ${row('entrypoint', ws.target, true)}
+      ${row('metric', ws.metric)}
+      ${row('host', ws.host)}
+      ${row('commit strategy', ws.commit_strategy)}
+      ${row('keyfile', keyfile)}
+    </div>
+    ${ws.benchmark ? `
+      <div class="ws-pop-section">
+        <div class="ws-pop-section-label">Benchmark</div>
+        <pre class="ws-pre">${esc(ws.benchmark)}</pre>
+      </div>
+    ` : ''}
+    ${ws.gate ? `
+      <div class="ws-pop-section">
+        <div class="ws-pop-section-label">Gate</div>
+        <pre class="ws-pre">${esc(ws.gate)}</pre>
+      </div>
+    ` : ''}
+  `;
+}
+
+// Outside-click dismiss for the workspace popover. Hooked into the same
+// document-level click that already dismisses the tip-popover.
+document.addEventListener('click', (e) => {
+  const popover = document.getElementById('workspace-popover');
+  if (!popover || popover.classList.contains('hidden')) return;
+  if (e.target.closest('#workspace-popover') || e.target.closest('#target-file')) return;
+  popover.classList.add('hidden');
+});
+
 async function openSettings() {
   const body = document.getElementById('settings-body');
   body.innerHTML = '<pre>Loading...</pre>';
@@ -2404,20 +2570,23 @@ function renderOverrideSummary(spec) {
 }
 
 function renderSettings(body, ws, frontierMeta) {
+  // Reset the footer's submit handler before each (re-)render so a stale
+  // closure from a previously-selected section can't fire.
+  state._settingsSubmit = null;
+  const saveBtn = document.getElementById('settings-footer-save');
+  if (saveBtn) saveBtn.disabled = true;
+  setSettingsStatus('');
+
   body.innerHTML = `
     <div class="settings-shell">
       <aside class="settings-nav" aria-label="Settings sections">
-        <button class="settings-nav-item ${state.settingsSection === 'project' ? 'selected' : ''}" data-section="project" type="button">
-          <span class="settings-nav-title">Project</span>
-          <span class="settings-nav-sub">workspace facts</span>
-        </button>
         <button class="settings-nav-item ${state.settingsSection === 'execution' ? 'selected' : ''}" data-section="execution" type="button">
-          <span class="settings-nav-title">Execution</span>
-          <span class="settings-nav-sub">provider + runtime</span>
+          <span class="settings-nav-title">Backend</span>
+          <span class="settings-nav-sub">worktree · pool · remote</span>
         </button>
         <button class="settings-nav-item ${state.settingsSection === 'runtime' ? 'selected' : ''}" data-section="runtime" type="button">
-          <span class="settings-nav-title">Runtime</span>
-          <span class="settings-nav-sub">env + checks</span>
+          <span class="settings-nav-title">Environment</span>
+          <span class="settings-nav-sub">commands · env vars</span>
         </button>
         <button class="settings-nav-item ${state.settingsSection === 'frontier' ? 'selected' : ''}" data-section="frontier" type="button">
           <span class="settings-nav-title">Frontier</span>
@@ -2434,9 +2603,7 @@ function renderSettings(body, ws, frontierMeta) {
     });
   });
   const panel = body.querySelector('#settings-panel');
-  if (state.settingsSection === 'project') {
-    renderProjectSettings(panel, ws);
-  } else if (state.settingsSection === 'execution') {
+  if (state.settingsSection === 'execution') {
     renderExecutionSettings(panel, ws);
   } else if (state.settingsSection === 'runtime') {
     renderRuntimeSettings(panel, ws);
@@ -2445,36 +2612,32 @@ function renderSettings(body, ws, frontierMeta) {
   }
 }
 
-function renderProjectSettings(panel, ws) {
-  panel.innerHTML = `
-    <div class="settings-hero">
-      <div>
-        <div class="settings-section-title">${esc(ws.project_name || 'Project')}</div>
-        <div class="settings-section-sub">benchmark contract and evaluation entrypoint</div>
-      </div>
-      <div class="settings-hero-badge mono">${esc(backendLabel(ws.default_backend))}</div>
-    </div>
-    <div class="settings-rows">
-      <div class="settings-row"><span>Project name</span><strong>${esc(ws.project_name || '--')}${ws.project_name_source === 'repo' ? ' · repo fallback' : ''}</strong></div>
-      <div class="settings-row"><span>Evaluation entrypoint</span><strong class="mono">${esc(ws.target || '--')}</strong></div>
-      <div class="settings-row"><span>metric</span><strong>${esc(ws.metric || '--')}</strong></div>
-      <div class="settings-row"><span>host</span><strong>${esc(ws.host || '--')}</strong></div>
-      <div class="settings-row"><span>commit strategy</span><strong>${esc(ws.commit_strategy || '--')}</strong></div>
-      <div class="settings-row"><span>keyfile</span><strong>${ws.keyfile_present ? 'present' : 'missing'}</strong></div>
-    </div>
-    <div class="settings-block">
-      <div class="settings-block-label">Benchmark</div>
-      <pre class="settings-pre">${esc(ws.benchmark || '--')}</pre>
-    </div>
-    ${ws.gate ? `<div class="settings-block">
-      <div class="settings-block-label">Gate</div>
-      <pre class="settings-pre">${esc(ws.gate)}</pre>
-    </div>` : ''}
-    <div class="settings-block">
-      <div class="settings-block-label">Default execution</div>
-      <div class="settings-inline mono">${esc(backendLabel(ws.default_backend))}</div>
-    </div>
-  `;
+// Footer status / submit plumbing. Each section's renderer assigns
+// state._settingsSubmit to its save closure (or leaves it null for
+// read-only sections), and writes user-facing status via setSettingsStatus.
+function setSettingsStatus(text, tone) {
+  const el = document.getElementById('settings-footer-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.dataset.tone = tone || '';
+}
+function registerSettingsSubmit(fn) {
+  state._settingsSubmit = fn || null;
+  const btn = document.getElementById('settings-footer-save');
+  if (btn) btn.disabled = !fn;
+}
+async function submitActiveSettings() {
+  const fn = state._settingsSubmit;
+  if (!fn) return;
+  const btn = document.getElementById('settings-footer-save');
+  if (btn) btn.disabled = true;
+  try {
+    await fn();
+  } finally {
+    // Re-enable; per-section renderers may re-register a fresh submit
+    // after a successful save (e.g. after re-fetching workspace state).
+    if (btn) btn.disabled = !state._settingsSubmit;
+  }
 }
 
 function renderRuntimeSettings(panel, ws) {
@@ -2488,7 +2651,6 @@ function renderRuntimeSettings(panel, ws) {
   const latestChecks = checked
     .sort((a, b) => ((b.checks.latest?.finished_at || '').localeCompare(a.checks.latest?.finished_at || '')))
     .slice(0, 8);
-  const inheritedCount = Math.max(0, (runtimeEnv.resolved_key_count ?? 0) - Object.keys(configuredKeyPreviews).length - Object.keys(runtimeVariablePreviews).length);
   const draft = {
     prepare: runtimeRecipe.prepare || '',
     beforeRun: runtimeRecipe.before_run || '',
@@ -2501,22 +2663,10 @@ function renderRuntimeSettings(panel, ws) {
     })),
   };
 
+  // No hero, no read-only summary. The form below reveals current values
+  // directly; the left rail already labels the section. Recent checks moved
+  // to the bottom so editable fields sit above diagnostic state.
   panel.innerHTML = `
-    <div class="settings-hero">
-      <div>
-        <div class="settings-section-title">Runtime</div>
-        <div class="settings-section-sub">setup, command prefix, and environment for benchmark/gate processes</div>
-      </div>
-      <div class="settings-hero-badge mono">${draft.prefix ? 'prefixed' : 'direct'}</div>
-    </div>
-    <div class="settings-rows">
-      <div class="settings-row"><span>Prepare</span><strong>${draft.prepare ? 'set' : 'off'}</strong></div>
-      <div class="settings-row"><span>Before run</span><strong>${draft.beforeRun ? 'set' : 'off'}</strong></div>
-      <div class="settings-row"><span>Command prefix</span><strong>${draft.prefix ? esc(draft.prefix) : 'off'}</strong></div>
-      <div class="settings-row"><span>Shell process env</span><strong>${draft.inheritShell ? `inherited · ${inheritedCount} keys` : 'off'}</strong></div>
-      <div class="settings-row"><span>Dashboard variables</span><strong>${Object.keys(runtimeVariablePreviews).length}</strong></div>
-      <div class="settings-row"><span>File sources</span><strong>${sources.length}</strong></div>
-    </div>
     <div id="runtime-env-form"></div>
     <div class="settings-block">
       <div class="settings-block-label">Recent run checks</div>
@@ -2570,11 +2720,6 @@ function renderRuntimeSettings(panel, ws) {
         <div class="settings-block-label">Keys from file sources</div>
         ${renderRuntimeKeyGrid(configuredKeyPreviews)}
       </div>` : ''}
-      <div class="settings-actions">
-        <span id="runtime-env-status" class="strategy-status"></span>
-        <span class="spacer"></span>
-        <button id="runtime-env-save" class="btn-primary" type="button">Save runtime</button>
-      </div>
     `;
 
     const inheritInput = formHost.querySelector('#runtime-inherit-shell');
@@ -2594,9 +2739,9 @@ function renderRuntimeSettings(panel, ws) {
         renderRuntimeForm();
       });
     });
-    formHost.querySelector('#runtime-env-save').addEventListener('click', async () => {
+    registerSettingsSubmit(async () => {
       collectRuntimeDraft();
-      await saveRuntimeSettings(draft, formHost.querySelector('#runtime-env-status'));
+      await saveRuntimeSettings(draft);
     });
     formHost.querySelector('#runtime-add-variable').addEventListener('click', () => {
       openRuntimeVariableModal();
@@ -2667,8 +2812,8 @@ function renderRuntimeKeyGrid(previews) {
   `).join('')}</div>`;
 }
 
-async function saveRuntimeSettings(draft, statusEl) {
-  statusEl.textContent = 'saving...';
+async function saveRuntimeSettings(draft) {
+  setSettingsStatus('saving...', 'pending');
   const runtimePayload = {
     prepare: draft.prepare,
     before_run: draft.beforeRun,
@@ -2690,7 +2835,7 @@ async function saveRuntimeSettings(draft, statusEl) {
     });
     const runtimeData = await runtimeRes.json();
     if (!runtimeRes.ok) {
-      statusEl.textContent = `error: ${runtimeData.error || runtimeRes.status}`;
+      setSettingsStatus(`error: ${runtimeData.error || runtimeRes.status}`, 'error');
       return;
     }
     const res = await fetch('/api/workspace/runtime-env', {
@@ -2700,15 +2845,15 @@ async function saveRuntimeSettings(draft, statusEl) {
     });
     const data = await res.json();
     if (!res.ok) {
-      statusEl.textContent = `error: ${data.error || res.status}`;
+      setSettingsStatus(`error: ${data.error || res.status}`, 'error');
       return;
     }
     state.workspace = data;
-    statusEl.textContent = 'saved';
+    setSettingsStatus('saved', 'ok');
     renderSettings(document.getElementById('settings-body'), state.workspace, state.frontierMeta);
     fetchAll();
   } catch (e) {
-    statusEl.textContent = 'request failed';
+    setSettingsStatus('request failed', 'error');
   }
 }
 
@@ -2890,6 +3035,52 @@ function renderCheckSummaryRow(node) {
   `;
 }
 
+// Maps every rich-select option in the Backend picker to (a) its underlying
+// backend spec for logo lookup + saving and (b) display copy.
+const BACKEND_DROPDOWN_OPTIONS = [
+  { value: 'worktree', label: 'Worktree', description: 'fresh local git worktree per experiment', group: 'LOCAL' },
+  { value: 'pool',     label: 'Pool',     description: 'reuse a fixed set of local workspaces',   group: 'LOCAL' },
+  { value: 'modal',    label: 'Modal',    description: 'Modal serverless cloud',                   group: 'REMOTE' },
+  { value: 'e2b',      label: 'E2B',      description: 'E2B cloud sandboxes',                      group: 'REMOTE' },
+  { value: 'ssh',      label: 'SSH',      description: 'your own SSH host',                        group: 'REMOTE' },
+  { value: 'daytona',  label: 'Daytona',  description: 'Daytona cloud workspaces',                 group: 'REMOTE' },
+  { value: 'aws',      label: 'AWS',      description: 'AWS EC2 sandboxes',                        group: 'REMOTE' },
+  { value: 'azure',    label: 'Azure',    description: 'Azure VM sandboxes',                       group: 'REMOTE' },
+  { value: 'manual',   label: 'Manual',   description: 'orchestrate sandboxes manually',           group: 'REMOTE' },
+  { value: 'custom',   label: 'Custom',   description: 'your own SandboxProvider class',           group: 'REMOTE' },
+];
+const KNOWN_REMOTE_PROVIDERS = new Set(['modal','e2b','ssh','daytona','aws','azure','manual']);
+
+function backendDropdownSpec(value) {
+  if (value === 'worktree' || value === 'pool') return { name: value };
+  if (value === 'custom') return { name: 'remote' };
+  return { name: 'remote', provider: value };
+}
+function dropdownValueFromDraft(draft) {
+  if (draft.backend === 'worktree' || draft.backend === 'pool') return draft.backend;
+  return draft.providerChoice === '__custom__' ? 'custom' : draft.providerChoice;
+}
+function dropdownValueFromSpec(spec) {
+  if (!spec) return 'worktree';
+  if (spec.name === 'worktree' || spec.name === 'pool') return spec.name;
+  const provider = spec.provider || (spec.config && spec.config.provider) || 'modal';
+  return KNOWN_REMOTE_PROVIDERS.has(provider) ? provider : 'custom';
+}
+function applyBackendChoice(draft, value) {
+  if (value === 'worktree' || value === 'pool') {
+    draft.backend = value;
+    return;
+  }
+  if (value === 'custom') {
+    draft.backend = 'remote';
+    draft.providerChoice = '__custom__';
+    return;
+  }
+  draft.backend = 'remote';
+  draft.providerChoice = value;
+  draft.providerName = value;
+}
+
 function renderExecutionSettings(panel, ws) {
   const defaultSpec = ws.default_backend || {name: 'worktree', config: {}};
   const config = defaultSpec.config || {};
@@ -2915,16 +3106,9 @@ function renderExecutionSettings(panel, ws) {
     extraConfigText: Object.keys(extraEntries).length ? prettyJson(extraEntries) : '',
   };
 
-  panel.innerHTML = `
-    <div class="settings-hero">
-      <div>
-        <div class="settings-section-title">Execution</div>
-        <div class="settings-section-sub">where new experiments run</div>
-      </div>
-      <div class="settings-hero-badge mono">${esc(defaultSpec.name || 'worktree')}</div>
-    </div>
-    <div id="execution-form"></div>
-  `;
+  // No hero: the left rail already names the section, and the segmented
+  // chooser below shows the current selection unambiguously.
+  panel.innerHTML = `<div id="execution-form"></div>`;
 
   const formHost = panel.querySelector('#execution-form');
 
@@ -2935,24 +3119,29 @@ function renderExecutionSettings(panel, ws) {
     const advancedFields = fields.filter(field => field.advanced);
     const defaultRuntime = (ws.backend_configs || []).find(spec => spec.is_default)?.runtime;
     formHost.innerHTML = `
-      <div class="settings-block">
-        <div class="settings-block-label">Default execution</div>
-        <div class="segmented-choice">
-          ${['worktree', 'pool', 'remote'].map(kind => `
-            <button class="segmented-choice-item ${draft.backend === kind ? 'selected' : ''}" type="button" data-backend-choice="${kind}">
-              <span>${kind}</span>
-            </button>
-          `).join('')}
-        </div>
-        <div class="settings-help">Choose the backend new experiments inherit.</div>
-      </div>
+      <div id="backend-picker"></div>
       <div id="settings-backend-detail"></div>
-      <div class="settings-actions">
-        <span id="settings-exec-status" class="strategy-status"></span>
-        <span class="spacer"></span>
-        <button id="settings-exec-save" class="btn-primary" type="button">Save execution settings</button>
-      </div>
     `;
+
+    // Single rich-select replaces both the worktree/pool/remote chooser
+    // and the inner remote-provider select. Each option carries its logo.
+    const pickerHost = formHost.querySelector('#backend-picker');
+    const options = BACKEND_DROPDOWN_OPTIONS.map(opt => ({
+      ...opt,
+      icon: backendLogoFor(backendDropdownSpec(opt.value)),
+    }));
+    renderRichSelect(pickerHost, {
+      options,
+      current: dropdownValueFromDraft(draft),
+      applied: dropdownValueFromSpec(ws.default_backend),
+      ariaLabel: 'Backend',
+      onChange: (value) => {
+        collectDraft();
+        applyBackendChoice(draft, value);
+        renderForm();
+      },
+    });
+
     const detail = formHost.querySelector('#settings-backend-detail');
     if (draft.backend === 'pool') {
       detail.innerHTML = `
@@ -2966,19 +3155,11 @@ function renderExecutionSettings(panel, ws) {
       detail.innerHTML = `
         <div class="settings-block">
           <div class="settings-block-label">Remote capacity</div>
-          <label class="settings-field">
+          <label class="settings-field inline">
             <span>Pool size</span>
             <input id="settings-pool-size" class="settings-input" type="number" step="1" min="1" value="${esc(String(draft.poolSize ?? ''))}" placeholder="unbounded">
-            <small>Leave blank for unbounded concurrent sandboxes.</small>
           </label>
-        </div>
-          <div class="settings-block">
-            <div class="settings-block-label">Remote provider</div>
-            <select id="settings-provider-choice" class="settings-select">
-            ${['modal', 'e2b', 'ssh', 'daytona', 'aws', 'azure', 'manual'].map(provider => `<option value="${provider}" ${draft.providerChoice === provider ? 'selected' : ''}>${provider}</option>`).join('')}
-            <option value="__custom__" ${draft.providerChoice === '__custom__' ? 'selected' : ''}>custom</option>
-          </select>
-          <div class="settings-help">Pick the provider to use for new remote experiments.</div>
+          <small>Leave blank for unbounded concurrent sandboxes.</small>
         </div>
         ${draft.providerChoice === '__custom__' ? `
           <div class="settings-block">
@@ -3010,7 +3191,7 @@ function renderExecutionSettings(panel, ws) {
             </label>
           </div>
         </details>
-        <details class="settings-advanced" open>
+        <details class="settings-advanced">
           <summary>Current runtime</summary>
           <div class="settings-advanced-body">
             ${defaultRuntime ? renderBackendRuntimeCard({...ws.default_backend, is_default: true, node_ids: [], active_node_ids: [], runtime: defaultRuntime}) : '<div class="config-runtime-empty">no runtime state yet for the current default backend</div>'}
@@ -3020,26 +3201,11 @@ function renderExecutionSettings(panel, ws) {
     } else {
       detail.innerHTML = `<div class="config-runtime-empty">Worktree mode creates a fresh local git worktree per experiment.</div>`;
     }
-    formHost.querySelectorAll('[data-backend-choice]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        collectDraft();
-        draft.backend = btn.dataset.backendChoice;
-        renderForm();
-      });
-    });
-    const providerChoiceSelect = formHost.querySelector('#settings-provider-choice');
-    if (providerChoiceSelect) {
-      providerChoiceSelect.addEventListener('change', () => {
-        collectDraft();
-        draft.providerChoice = providerChoiceSelect.value;
-        if (draft.providerChoice !== '__custom__') draft.providerName = draft.providerChoice;
-        renderForm();
-      });
-    }
-    const saveBtn = formHost.querySelector('#settings-exec-save');
-    saveBtn.addEventListener('click', async () => {
+
+    // Hook the footer Save into this panel's draft.
+    registerSettingsSubmit(async () => {
       collectDraft();
-      await saveExecutionSettings(draft, formHost.querySelector('#settings-exec-status'), panel);
+      await saveExecutionSettings(draft, { tone: 'ok' }, panel);
     });
   }
 
@@ -3085,7 +3251,7 @@ function renderExecutionSettings(panel, ws) {
 function renderProviderField(field, value) {
   if (field.type === 'bool') {
     return `
-      <label class="settings-field checkbox settings-row">
+      <label class="settings-field checkbox">
         <span>${esc(field.label)}</span>
         <input data-provider-key="${field.key}" type="checkbox" ${value ? 'checked' : ''}>
       </label>
@@ -3096,8 +3262,11 @@ function renderProviderField(field, value) {
   const placeholder = isSecret && value ? 'leave blank to keep current value' : '';
   const inputType = isSecret ? 'password' : (field.type === 'int' || field.type === 'float' ? 'number' : 'text');
   const step = field.type === 'float' ? 'any' : (field.type === 'int' ? '1' : null);
+  // Numbers fit comfortably to the right of the label; secrets and free
+  // text often run long, so they stay full-width with the label above.
+  const inline = field.type === 'int' || field.type === 'float';
   return `
-    <label class="settings-field">
+    <label class="settings-field${inline ? ' inline' : ''}">
       <span>${esc(field.label)}</span>
       <input
         class="settings-input"
@@ -3113,8 +3282,8 @@ function renderProviderField(field, value) {
   `;
 }
 
-async function saveExecutionSettings(draft, statusEl, panel) {
-  statusEl.textContent = 'saving...';
+async function saveExecutionSettings(draft, _opts, panel) {
+  setSettingsStatus('saving...', 'pending');
   let payload = {backend: draft.backend};
   try {
     if (draft.backend === 'pool') {
@@ -3122,7 +3291,7 @@ async function saveExecutionSettings(draft, statusEl, panel) {
     } else if (draft.backend === 'remote') {
       const resolvedProvider = draft.providerChoice === '__custom__' ? draft.providerName : draft.providerChoice;
       if (!resolvedProvider) {
-        statusEl.textContent = 'provider is required';
+        setSettingsStatus('provider is required', 'error');
         return;
       }
       let extra = {};
@@ -3138,7 +3307,7 @@ async function saveExecutionSettings(draft, statusEl, panel) {
       }
     }
   } catch (e) {
-    statusEl.textContent = 'invalid JSON in additional provider config';
+    setSettingsStatus('invalid JSON in additional provider config', 'error');
     return;
   }
 
@@ -3150,31 +3319,22 @@ async function saveExecutionSettings(draft, statusEl, panel) {
     });
     const data = await res.json();
     if (!res.ok) {
-      statusEl.textContent = `error: ${data.error || res.status}`;
+      setSettingsStatus(`error: ${data.error || res.status}`, 'error');
       return;
     }
     state.workspace = data;
-    statusEl.textContent = 'saved';
+    setSettingsStatus('saved', 'ok');
     renderSettings(document.getElementById('settings-body'), state.workspace, state.frontierMeta);
     fetchAll();
   } catch (e) {
-    statusEl.textContent = 'request failed';
+    setSettingsStatus('request failed', 'error');
   }
 }
 
 function renderFrontierSettings(panel, frontierMeta) {
-  panel.innerHTML = `
-    <div class="settings-hero">
-      <div>
-        <div class="settings-section-title">Frontier</div>
-        <div class="settings-section-sub">how evo picks the next branch to explore</div>
-      </div>
-      <div class="settings-hero-badge mono">${esc(frontierMeta.current.kind || 'default')}</div>
-    </div>
-    <div class="settings-block">
-      <div id="settings-frontier-form"></div>
-    </div>
-  `;
+  // No hero. The strategy list to the left of the detail pane shows the
+  // active strategy via its selected state; the rail labels the section.
+  panel.innerHTML = `<div class="settings-block"><div id="settings-frontier-form"></div></div>`;
   renderStrategyForm(
     panel.querySelector('#settings-frontier-form'),
     frontierMeta.registry,
@@ -3244,40 +3404,45 @@ function renderStrategyForm(body, registry, current, defaultStrategy) {
   const kinds = Object.keys(registry);
   let selectedKind = current.kind;
 
-  const html = [];
-  html.push('<div class="strategy-form">');
-  html.push('<div class="strategy-split">');
-  html.push('<div class="strategy-list">');
-  for (const k of kinds) {
-    const spec = registry[k];
-    html.push(`
-      <div class="strategy-item" data-kind="${esc(k)}">
-        <span class="strategy-item-label">${esc(spec.label)}</span>
+  body.innerHTML = `
+    <div class="strategy-form">
+      <div id="strategy-picker" class="strategy-picker"></div>
+      <div id="strategy-detail" class="strategy-detail"></div>
+      <div class="strategy-actions">
+        <button id="strategy-reset" class="btn-link" type="button">Reset to default</button>
       </div>
-    `);
-  }
-  html.push('</div>');
-  html.push('<div id="strategy-detail" class="strategy-detail"></div>');
-  html.push('</div>');  // end split
-  // Action row is a sibling of the split -- pinned at the bottom of the
-  // fixed-height form while split panes scroll independently.
-  html.push('<div class="strategy-actions">');
-  html.push('<button id="strategy-reset" class="btn-link" type="button">Reset to default</button>');
-  html.push('<span id="strategy-status" class="strategy-status"></span>');
-  html.push('<span class="spacer"></span>');
-  html.push('<button id="strategy-apply" class="btn-primary" disabled>Apply</button>');
-  html.push('</div>');
-  html.push('</div>');  // end form
-  body.innerHTML = html.join('');
+    </div>
+  `;
 
-  const listDiv = body.querySelector('.strategy-list');
-  const detailDiv = document.getElementById('strategy-detail');
+  const pickerHost = body.querySelector('#strategy-picker');
+  const detailDiv = body.querySelector('#strategy-detail');
+
+  function renderPicker() {
+    // Use the first sentence of each strategy's description as the
+    // option's one-liner — the full description still appears in the
+    // detail pane below once the option is picked.
+    const firstLine = (text) => {
+      const s = (text || '').trim();
+      const cut = s.search(/[.!?]\s/);
+      return cut > 0 ? s.slice(0, cut + 1) : s.split('\n')[0].slice(0, 140);
+    };
+    const options = kinds.map(k => ({
+      value: k,
+      label: registry[k].label,
+      description: firstLine(registry[k].description),
+    }));
+    renderRichSelect(pickerHost, {
+      options,
+      current: selectedKind,
+      applied: current.kind,    // server-saved kind; only moves after Save
+      ariaLabel: 'Frontier strategy',
+      onChange: (kind) => selectKind(kind),
+    });
+  }
 
   function selectKind(kind) {
     selectedKind = kind;
-    listDiv.querySelectorAll('.strategy-item').forEach(el => {
-      el.classList.toggle('selected', el.dataset.kind === kind);
-    });
+    renderPicker();
     renderDetail();
     hideTip();
   }
@@ -3286,9 +3451,11 @@ function renderStrategyForm(body, registry, current, defaultStrategy) {
     const spec = registry[selectedKind];
     const curParams = selectedKind === current.kind ? (current.params || {}) : {};
     const lines = [];
+    // No detail-head: the rich-select trigger above already shows the
+    // strategy name. The (?) for the more-detailed explanation anchors
+    // inline next to the description.
     const tipKind = spec.detail ? ` <span class="info-icon" data-tip-for="kind:${esc(selectedKind)}">?</span>` : '';
-    lines.push(`<div class="strategy-detail-head">${esc(spec.label)}${tipKind}</div>`);
-    lines.push(`<div class="strategy-detail-desc">${esc(spec.description)}</div>`);
+    lines.push(`<div class="strategy-detail-desc">${esc(spec.description)}${tipKind}</div>`);
 
     if (spec.params && spec.params.length) {
       lines.push('<div class="strategy-detail-params">');
@@ -3336,11 +3503,11 @@ function renderStrategyForm(body, registry, current, defaultStrategy) {
   }
 
   function updateDirtyState() {
-    const btn = document.getElementById('strategy-apply');
+    // Dirty state drives the modal footer's Save button now that Apply
+    // has been folded into the shared footer.
+    const btn = document.getElementById('settings-footer-save');
     if (!btn) return;
-    const dirty = isDirty();
-    btn.disabled = !dirty;
-    btn.classList.toggle('dirty', dirty);
+    btn.disabled = !isDirty();
   }
 
   function wireDetailInputs() {
@@ -3352,26 +3519,16 @@ function renderStrategyForm(body, registry, current, defaultStrategy) {
     });
   }
 
-  // Apply/Reset buttons live outside the split, wired once.
-  const applyBtn = document.getElementById('strategy-apply');
-  applyBtn.addEventListener('click', async () => {
-    const statusEl = document.getElementById('strategy-status');
-    await postStrategy(readFormState(), statusEl, 'applied');
+  // Footer Save submits via the shared dispatcher; Reset stays local.
+  registerSettingsSubmit(async () => {
+    await postStrategy(readFormState(), 'applied');
     updateDirtyState();
   });
   const resetBtn = document.getElementById('strategy-reset');
   resetBtn.addEventListener('click', async () => {
-    const statusEl = document.getElementById('strategy-status');
     const fallback = defaultStrategy || {kind: 'argmax', params: {}};
-    const saved = await postStrategy(fallback, statusEl, 'reset to default');
+    const saved = await postStrategy(fallback, 'reset to default');
     if (saved) selectKind(saved.kind);
-  });
-
-  // Wire item clicks.
-  listDiv.addEventListener('click', (e) => {
-    const item = e.target.closest('.strategy-item');
-    if (!item) return;
-    selectKind(item.dataset.kind);
   });
 
   selectKind(current.kind);
@@ -3402,8 +3559,8 @@ function renderStrategyForm(body, registry, current, defaultStrategy) {
     showTip(icon, text);
   });
 
-  async function postStrategy(payload, statusEl, okMessage) {
-    statusEl.textContent = 'saving...';
+  async function postStrategy(payload, okMessage) {
+    setSettingsStatus('saving...', 'pending');
     try {
       const res = await fetch('/api/frontier-strategy', {
         method: 'POST',
@@ -3412,24 +3569,22 @@ function renderStrategyForm(body, registry, current, defaultStrategy) {
       });
       const data = await res.json();
       if (!res.ok) {
-        statusEl.textContent = `error: ${data.error || res.status}`;
+        setSettingsStatus(`error: ${data.error || res.status}`, 'error');
         return null;
       }
       current = data;
       if (state.frontierMeta) state.frontierMeta.current = data;
       if (state.workspace) state.workspace.frontier_strategy = data;
-      statusEl.textContent = okMessage;
+      setSettingsStatus(okMessage, 'ok');
       fetchAll();
-      setTimeout(() => { statusEl.textContent = ''; }, 2000);
+      setTimeout(() => setSettingsStatus(''), 2000);
       return data;
     } catch (e) {
-      statusEl.textContent = 'request failed';
+      setSettingsStatus('request failed', 'error');
       return null;
     }
   }
 
-  // Apply / Reset buttons are wired inside renderDetail -> wireDetailHandlers
-  // since they're re-created each render.
 }
 
 // ─── Main render ─────────────────────────────────────────
@@ -3504,11 +3659,42 @@ function isEditableTarget(el) {
 }
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    hideTip();
-    closePruneModal();
+    // Close the topmost visible overlay only, so Esc inside a nested
+    // sub-modal (e.g., runtime Add variable inside Settings) dismisses
+    // the sub-modal first instead of collapsing everything at once.
+    // Order is innermost / highest-z first.
+    const tip = document.getElementById('tip-popover');
+    if (tip && !tip.classList.contains('hidden')) { hideTip(); return; }
+
+    const openSelect = document.querySelector('.rich-select.open');
+    if (openSelect) {
+      openSelect.querySelector('.rich-select-pop')?.classList.add('hidden');
+      openSelect.classList.remove('open');
+      return;
+    }
+
+    const wsPop = document.getElementById('workspace-popover');
+    if (wsPop && !wsPop.classList.contains('hidden')) { wsPop.classList.add('hidden'); return; }
+
+    const miniOverlay = document.getElementById('runtime-env-modal-overlay');
+    if (miniOverlay && !miniOverlay.classList.contains('hidden')) {
+      miniOverlay.classList.add('hidden');
+      return;
+    }
+
+    const spawnOverlay = document.getElementById('spawn-overlay');
+    if (spawnOverlay && !spawnOverlay.classList.contains('hidden')) { closeSpawnModal(); return; }
+
+    const pruneOverlay = document.getElementById('prune-overlay');
+    if (pruneOverlay && !pruneOverlay.classList.contains('hidden')) { closePruneModal(); return; }
+
+    const scratchOverlay = document.getElementById('scratchpad-overlay');
+    if (scratchOverlay && !scratchOverlay.classList.contains('hidden')) { closeScratchpad(); return; }
+
+    const settingsOverlay = document.getElementById('settings-overlay');
+    if (settingsOverlay && !settingsOverlay.classList.contains('hidden')) { closeSettings(); return; }
+
     closeDrawer();
-    closeSettings();
-    closeScratchpad();
   }
   if (e.key === 's' && !e.ctrlKey && !e.metaKey && !state.selectedNode && !isEditableTarget(e.target)) {
     openScratchpad();
