@@ -4,117 +4,108 @@
 
 # evo
 
-A plugin for your agentic framework that optimizes code through experiments. Currently supported on [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex), [OpenClaw](https://github.com/openclaw/openclaw), and [Hermes](https://github.com/NousResearch/hermes-agent).
+Autoresearch orchestrator for your codebase.
+*Inspired by [Karpathy's autoresearch](https://github.com/karpathy/nanochat).*
 
-You give it a codebase. It discovers metrics to optimize, sets up the evaluation, and starts running experiments in a loop -- trying things, keeping what improves the score, throwing away what doesn't.
+Runs on Claude Code, Codex, OpenClaw, Hermes, or Opencode. Experiments
+run locally or on remote sandboxes — Modal, E2B, Daytona, AWS, Azure, SSH.
 
-Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) -- where an LLM runs training experiments autonomously to beat its own best score. Autoresearch is a pure hill climb: try something, keep or revert, repeat on a single branch. Evo adds structure on top of that idea:
+Point it at a repo. evo explores the code, instruments a benchmark, and
+runs an optimization loop — spawning subagents **in parallel**, each in
+its own isolated workspace, forming a hypothesis and editing toward it.
+The orchestrator collects results, decides which branch to extend next
+via a **configurable frontier strategy** (argmax, top-K, ε-greedy,
+softmax, or GEPA-inspired Pareto-per-task), keeps what improves the
+score, discards what doesn't. Runs until you stop it.
 
-- **Tree search over greedy hill climb.** Multiple directions can fork from any committed node, so exploration doesn't collapse to one path.
-- **Configurable frontier selection.** Argmax, top-K, ε-greedy, softmax, or [GEPA](https://arxiv.org/abs/2507.19457)-inspired Pareto-per-task. Configure from the dashboard to suit your task.
-- **Parallel semi-autonomous agents.** Spawn multiple subagents and run them simultaneously, each in its own git worktree. Each subagent reads traces, formulates hypotheses, and can run multiple iterations within its branch.
-- **Cross-cutting scans.** Each round the orchestrator fans out [RLM](https://arxiv.org/abs/2512.24601)-inspired scan sub-agents to read trace batches in parallel and report compound failure patterns -- gate-failure intersections, semantic root causes -- before writing the next round of briefs.
-- **Shared state.** Failure traces, annotations, and discarded hypotheses are accessible to every agent before it decides what to try next.
-- **Gating.** Regression tests or safety checks can be wired up as a gate. Experiments that don't pass get discarded.
-- **Observability.** A dashboard to monitor your experiments.
-- **Benchmark discovery.** The `discover` skill explores the repo, figures out what to measure, and instruments the evaluation.
+## What it looks like
 
-## Install
+<p align="center">
+  <img src="assets/dashboard.png" alt="evo dashboard" width="100%" />
+</p>
 
-Common: `git`, [uv](https://docs.astral.sh/uv/), Python 3.10+.
+## Quickstart
 
-### 1. Install the evo CLI (non-Claude Code hosts)
-
-Claude Code bundles its own copy. Every other host calls `evo` as an external binary:
+**1. Install the CLI** (Claude Code bundles its own — skip unless you want
+a remote backend).
 
 ```bash
-uv tool install evo-hq-cli   # or: pipx install evo-hq-cli
+uv tool install evo-hq-cli              # or: pipx install evo-hq-cli
 evo --version
 ```
 
-### 2. Add the plugin
+For remote backends, install with the matching provider extra:
 
-**Claude Code**
+```bash
+uv tool install 'evo-hq-cli[modal]'
+# available: [modal], [e2b], [daytona], [aws], [azure], [all]
+```
+
+**2. Add the plugin to your host.**
+
+Claude Code (run inside Claude):
 
 ```
 /plugin marketplace add evo-hq/evo
 /plugin install evo@evo-hq-evo
 ```
 
-Invoke: `/evo:discover`, `/evo:optimize`.
-
-**Codex** (requires 0.122.0 or newer -- `npm install -g @openai/codex@latest`)
+Codex (requires 0.122.0+ — `npm install -g @openai/codex@latest`):
 
 ```bash
 codex plugin marketplace add evo-hq/evo
 evo install codex
 ```
 
-Then trust the evo hooks: start `codex`, run `/hooks`, trust each evo hook. Without this, `evo direct` mid-run directives won't reach the agent; skills and the rest of evo still work.
+Then trust the evo hooks: start `codex`, run `/hooks`, trust each evo
+hook. Without this, `evo direct` mid-run directives won't reach the
+agent; skills and the rest of evo still work. For non-interactive setups
+(CI, `codex exec`), add `--trust-hooks` to `evo install codex` to skip
+the manual review.
 
-For non-interactive setups (CI, scripts, `codex exec`), add `--trust-hooks` to skip the manual review:
-
-```bash
-evo install codex --trust-hooks
-```
-
-Invoke: `$evo:discover`, `$evo:optimize`.
-
-**OpenClaw**
+OpenClaw:
 
 ```bash
 openclaw plugins install evo --marketplace https://github.com/evo-hq/evo
 evo install openclaw
 ```
 
-Invoke: `/discover`, `/optimize`.
-
-**Hermes** (skills install per-skill; runtime plugin via pip entry-point)
+Hermes (skills install per-skill; runtime plugin via pip entry-point):
 
 ```bash
-# Skills
 hermes skills install evo-hq/evo/plugins/evo/skills/discover -y --force
 hermes skills install evo-hq/evo/plugins/evo/skills/optimize -y
 hermes skills install evo-hq/evo/plugins/evo/skills/subagent -y
 hermes skills install evo-hq/evo/plugins/evo/skills/infra-setup -y
-
-# Runtime plugin (for `evo direct` mid-run notifications)
 evo install hermes
 ```
 
-`--force` on `discover` bypasses the SKILL.md scanner (it flags evo's
-own install examples). Invoke: `/discover`, `/optimize`.
+`--force` on `discover` bypasses the SKILL.md scanner — it flags evo's
+own install examples.
 
-**Opencode**
+Opencode:
 
 ```bash
 npx skills add evo-hq/evo --agent opencode -g
 evo install opencode
 ```
 
-Invoke: `/discover`, `/optimize`.
+Opencode's `task` tool is batch-parallel (all subagents in one assistant
+turn return together when the slowest finishes), not background-with-
+notification like the other four hosts. evo's optimize loop works fine —
+rounds complete batch-wise — but reactive workflows that act on early
+completions before the slowest finishes aren't supported on opencode.
 
-> Note: opencode's `task` tool is batch-parallel (all subagents in one
-> assistant turn return together when the slowest finishes), not
-> background-with-notification like the other four hosts. evo's optimize
-> loop works fine — rounds complete batch-wise — but reactive workflows
-> that act on early completions before the slowest finishes aren't
-> supported on opencode.
+Verify any install: `evo doctor <host>`.
 
-**Verify any install**
+**3. Run.**
 
-```bash
-evo doctor <host>     # claude-code, codex, hermes, opencode, or openclaw
+```
+/evo:discover
+/evo:optimize
 ```
 
-## Usage
-
-Two skills:
-
-- **`discover`** -- explores the repo, instruments the benchmark, runs baseline
-- **`optimize`** -- runs the optimization loop with parallel subagents until interrupted
-
-Invocation syntax depends on the host -- see the Install section above.
+Invocation prefix varies by host — see `evo --help`.
 
 `optimize` accepts optional parameters:
 
@@ -124,56 +115,78 @@ Invocation syntax depends on the host -- see the Install section above.
 | `budget` | 5 | Max iterations each subagent can run within its branch |
 | `stall` | 5 | Consecutive rounds with no improvement before auto-stopping |
 
-Example (Claude Code): `/evo:optimize subagents=3 budget=10 stall=3`. Other hosts use their own invocation prefix.
+Example (Claude Code): `/evo:optimize subagents=3 budget=10 stall=3`.
 
-Typical flow:
+## How it works
 
-```
-you: evo:discover
-evo: explores repo, instruments benchmark, runs baseline
+### Parallel
 
-you: evo:optimize
-evo: spawns 5 subagents in parallel, each exploring a different direction
-     each subagent can run up to 5 iterations within its branch
-     orchestrator collects results, prunes dead branches, adjusts strategy
-     repeats until interrupted or stalled
-```
+The orchestrator fans subagents out simultaneously. Each runs in its own
+isolated workspace, picks up shared state (failure traces, annotations,
+discarded hypotheses), forms its own hypothesis, edits, and runs the
+benchmark. If a subagent has iteration budget left and sees a follow-up,
+it iterates on its branch within the same round.
 
-Under the hood, each experiment gets its own git worktree branching from its parent. If the score improves and the gate passes, the experiment is committed. Otherwise it's discarded and the worktree is cleaned up.
+### Frontier strategy
 
-### Architecture
+After each round, the orchestrator picks which committed branch to
+extend next. Pluggable:
 
-```
-Orchestrator (main agent)
-  - reads state, fans out scan sub-agents to find cross-cutting failure patterns
-  - writes a structured brief per subagent (objective, parent, boundaries, pointer traces)
-  - collects results, prunes dead branches, adjusts strategy for next round
+- **argmax** — always extend the best score
+- **top_k** — round-robin among the K best
+- **epsilon_greedy** — best most of the time, random sometimes
+- **softmax** — sample weighted by score
+- **pareto_per_task** — keep specialists the aggregate hides, inspired
+  by [GEPA](https://arxiv.org/abs/2507.19457)
 
-  Subagent 1 (background, budget: 5 iterations)
-    - reads traces, analyzes failures in its focus area
-    - formulates hypothesis, edits target, runs benchmark
-    - if budget remains and sees a follow-up, iterates on its branch
-    - returns: what it tried, what worked, what it learned
+Set in the dashboard's Frontier tab — strategy descriptions and params
+are shown inline.
 
-  Subagent 2 (background, budget: 5 iterations)
-    ...up to N subagents in parallel
-```
+### Cross-cutting scans
+
+Between rounds, [RLM](https://arxiv.org/abs/2512.24601)-inspired scan
+subagents read trace batches in parallel and surface compound failure
+patterns — gate-failure intersections, semantic root causes — that the
+next round's hypotheses can target directly.
+
+### Gating
+
+Regression tests or safety checks wire up as a gate. An experiment that
+doesn't pass gets discarded, even if its score improves.
+
+## Where experiments run
+
+| Backend | Where | Install |
+|---|---|---|
+| **worktree** *(default)* | local git worktree per experiment | included |
+| **pool** | reuse a fixed set of local workspaces | included |
+| **ssh** | your own SSH host | included |
+| **modal** | Modal serverless cloud | `uv tool install 'evo-hq-cli[modal]'` |
+| **e2b** | E2B cloud sandboxes | `uv tool install 'evo-hq-cli[e2b]'` |
+| **daytona** | Daytona cloud workspaces | `uv tool install 'evo-hq-cli[daytona]'` |
+| **aws** | AWS EC2 sandboxes | `uv tool install 'evo-hq-cli[aws]'` |
+| **azure** | Azure VMs | `uv tool install 'evo-hq-cli[azure]'` |
+
+Pick and configure in the dashboard's Backend tab.
 
 ## Dashboard
 
-The dashboard starts automatically when you run `evo:discover` (or `evo init`). When it comes up, the agent surfaces the URL in the chat:
+Starts automatically with `evo:discover` (or `evo init`). The agent
+surfaces the URL in chat:
 
 ```
 Dashboard live: http://127.0.0.1:8080 (pid 12345)
 ```
 
-If `8080` is busy, evo auto-increments (`8081`, `8082`, ...) and prints the actual port. You can also start it manually:
+If `8080` is busy, evo auto-increments (`8081`, `8082`, …) and prints
+the actual port. Start it manually with:
 
 ```bash
 uv run --project /path/to/evo/plugins/evo evo dashboard --port 8080
 ```
 
-The chosen port is persisted to `.evo/dashboard.port` so repeat runs re-use it.
+The chosen port is persisted to `.evo/dashboard.port` so repeat runs
+re-use it.
 
 ## Dev install
 
@@ -185,16 +198,12 @@ cd evo
 uv run --project plugins/evo evo --version
 ```
 
-`uv run` resolves dependencies on first use -- no `pip install` step.
+`uv run` resolves dependencies on first use — no `pip install` step.
 
 The SDKs live in separate packages:
 
-- `sdk/python/` -- `evo-hq-agent`, Python 3.10+, zero deps. Tests: `cd sdk/python && uv run --with pytest pytest test/`.
-- `sdk/node/` -- `@evo-hq/evo-agent`, Node 18+, zero deps. Tests: `cd sdk/node && npm test`.
-
-## TODO
-
-- [ ] Distributed evaluation via [Harbor](https://github.com/harbor-framework/harbor) -- run benchmarks in containers instead of locally, use Harbor's cloud providers to parallelize.
+- `sdk/python/` — `evo-hq-agent`, Python 3.10+, zero deps. Tests: `cd sdk/python && uv run --with pytest pytest test/`.
+- `sdk/node/` — `@evo-hq/evo-agent`, Node 18+, zero deps. Tests: `cd sdk/node && npm test`.
 
 ## License
 
