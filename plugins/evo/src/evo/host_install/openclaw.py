@@ -1,7 +1,6 @@
-"""OpenClaw install — marketplace command for the plugin (skills + repo
-files), plus a manual settings.json edit for the pi-coding-agent extension
-that powers mid-run inject. Auto-bridge between openclaw plugin install
-and pi-extension loader does not exist (verified upstream)."""
+"""OpenClaw install — marketplace command for the evo plugin (skills
+bundle), plus drop-in install of the evo-inject native plugin (mid-run
+directive delivery) and trust grants in plugins.allow."""
 
 from __future__ import annotations
 
@@ -12,16 +11,14 @@ from pathlib import Path
 
 
 _INSTALL_HINT = """\
-OpenClaw installs the plugin through its marketplace:
+OpenClaw installs evo as two parts:
 
-    openclaw plugins install evo --marketplace https://github.com/evo-hq/evo
+  1. evo skills (`/discover`, `/optimize`, etc.) via the marketplace
+     command — populates ~/.openclaw/extensions/evo/.
 
-This installs evo's skills (`/discover`, `/optimize`, etc.) into
-~/.openclaw/extensions/evo/.
-
-For mid-run inject hooks, evo's pi-extension needs to be registered
-explicitly with the pi-coding-agent runtime. This command will add it
-to your pi settings file automatically.
+  2. evo-inject native plugin — installed to ~/.openclaw/extensions/evo-inject/
+     and trusted in ~/.openclaw/openclaw.json plugins.allow. This is
+     what delivers `evo direct` directives mid-conversation.
 """
 
 
@@ -41,6 +38,29 @@ def _bundled_pi_extension_source() -> Path | None:
     here = Path(__file__).resolve().parent.parent  # evo/
     bundle = here / "openclaw_plugin" / "evo.bundle.js"
     return bundle if bundle.exists() else None
+
+
+def _openclaw_global_config() -> Path:
+    home_override = os.environ.get("OPENCLAW_HOME")
+    base = Path(home_override) if home_override else Path.home() / ".openclaw"
+    return base / "openclaw.json"
+
+
+def _native_plugin_install_dir() -> Path:
+    home_override = os.environ.get("OPENCLAW_HOME")
+    base = Path(home_override) if home_override else Path.home() / ".openclaw"
+    return base / "extensions" / "evo-inject"
+
+
+def _native_plugin_sources() -> tuple[Path, Path, Path] | None:
+    here = Path(__file__).resolve().parent.parent
+    native_dir = here / "openclaw_plugin" / "native"
+    manifest = native_dir / "openclaw.plugin.json"
+    index_js = native_dir / "index.js"
+    hook_md = native_dir / "HOOK.md"
+    if not all(p.exists() for p in (manifest, index_js, hook_md)):
+        return None
+    return manifest, index_js, hook_md
 
 
 def install(args: argparse.Namespace) -> int:
@@ -99,6 +119,71 @@ def install(args: argparse.Namespace) -> int:
         print(f"added {target} to extensions in {settings}")
     else:
         print(f"{target} already in extensions in {settings}")
+
+    # Trust the evo + evo-inject plugins in ~/.openclaw/openclaw.json.
+    # Current openclaw refuses to load discovered non-bundled plugins
+    # unless their ids are in plugins.allow.
+    global_cfg = _openclaw_global_config()
+    gdata: dict | None
+    if global_cfg.exists():
+        try:
+            gdata = json.loads(global_cfg.read_text())
+        except json.JSONDecodeError:
+            print(f"WARNING: could not parse {global_cfg}; skipping plugins.allow",
+                  file=__import__("sys").stderr)
+            gdata = None
+    else:
+        global_cfg.parent.mkdir(parents=True, exist_ok=True)
+        gdata = {}
+
+    if gdata is not None:
+        plugins = gdata.setdefault("plugins", {})
+        allow = plugins.setdefault("allow", [])
+        entries = plugins.setdefault("entries", {})
+        global_changed = False
+        for plugin_id in ("evo", "evo-inject"):
+            if plugin_id not in allow:
+                allow.append(plugin_id)
+                global_changed = True
+            entry = entries.setdefault(plugin_id, {})
+            if not entry.get("enabled"):
+                entry["enabled"] = True
+                global_changed = True
+        if global_changed:
+            global_cfg.write_text(json.dumps(gdata, indent=2) + "\n")
+            print(f"updated {global_cfg}: enabled 'evo' + 'evo-inject'")
+        else:
+            print(f"'evo' + 'evo-inject' already enabled in {global_cfg}")
+
+    # Install the openclaw-native plugin that delivers mid-run inject
+    # via the `tool_result_persist` hook. Codex bundle (extensions/evo/)
+    # takes plugin-loader precedence in its dir, so the native plugin
+    # lives at extensions/evo-inject/ where openclaw.plugin.json is the
+    # only manifest present.
+    native_sources = _native_plugin_sources()
+    if native_sources is None:
+        print(
+            "WARNING: openclaw native plugin not bundled in this evo install.\n"
+            "  Expected at evo/openclaw_plugin/native/{openclaw.plugin.json,index.js,HOOK.md}\n"
+            "  Mid-run inject will not work on openclaw.",
+            file=__import__("sys").stderr,
+        )
+    else:
+        manifest_src, index_src, hook_md_src = native_sources
+        native_dir = _native_plugin_install_dir()
+        native_dir.mkdir(parents=True, exist_ok=True)
+        import shutil as _sh
+        _sh.copyfile(manifest_src, native_dir / "openclaw.plugin.json")
+        _sh.copyfile(index_src, native_dir / "index.js")
+        _sh.copyfile(hook_md_src, native_dir / "HOOK.md")
+        print(f"installed openclaw-native inject plugin: {native_dir}/")
+
+        import shutil as _shutil2
+        if _shutil2.which("openclaw") is not None:
+            import subprocess as _sp2
+            for sub in (["plugins", "registry", "rebuild"], ["plugins", "list"]):
+                _sp2.call(["openclaw", *sub], stdout=_sp2.DEVNULL, stderr=_sp2.DEVNULL)
+
     print()
     print("Restart any running openclaw agent session to load the extension.")
     return 0

@@ -75,4 +75,4 @@ script-files = ["bin/evo-hook-drain"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-evo = ["static/*", "opencode_plugin/*.js", "openclaw_plugin/*.js"]
+evo = ["static/*", "opencode_plugin/*.js", "openclaw_plugin/*.js", "openclaw_plugin/native/*.js", "openclaw_plugin/native/*.json", "openclaw_plugin/native/*.md"]

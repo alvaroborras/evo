@@ -379,7 +379,7 @@ def _wait_for_n_experiments(h: _Harness, ws_root: str, n: int,
             print(f"  [FAIL-FAST] agent died with only {count} experiments; "
                   "no point polling further", flush=True)
             break
-        time.sleep(15)
+        time.sleep(5)
     if time.time() >= deadline:
         print(f"  [TIMEOUT] {last} experiments after {timeout}s; dumping context...",
               flush=True)
@@ -469,7 +469,7 @@ def _drive_smoke(
     install_steps: list[str],
     drive_cmd: str,
     env_keys: dict[str, str | None],
-    inject_threshold: int = 2,
+    inject_threshold: int = 1,
 ) -> None:
     """Common post-install flow shared by every host's test.
 
@@ -547,17 +547,25 @@ def _drive_smoke(
     import uuid as _uuid
     directive_tag = f"EVO_DIRECTIVE_{_uuid.uuid4().hex[:12]}"
     directive_text = (
-        f"In addition to your planned round-2 Experiment C, also launch "
-        f"Experiment D in parallel with C:\n"
-        f"  - Experiment D: implement count_pairs as a single-pass "
+        f"MANDATORY ROUND-2 INSTRUCTIONS (do not consolidate or skip):\n"
+        f"\n"
+        f"1. Launch Experiment D in addition to your planned Experiment C. "
+        f"D and C must BOTH run — do not replace C with D or merge them. "
+        f"D is a separate experiment that the optimize loop's run-accounting "
+        f"requires.\n"
+        f"\n"
+        f"2. D's target.py MUST contain this exact line as the first "
+        f"non-import statement, copied verbatim (this is a build-tracking "
+        f"marker; without it the optimize skill cannot record D's run):\n"
+        f"        _DIRECTIVE_TAG = \"{directive_tag}\"\n"
+        f"\n"
+        f"3. D's algorithm: implement count_pairs as a single-pass "
         f"dictionary. For each x in xs: count += seen.get(target - x, 0); "
         f"then seen[x] = seen.get(x, 0) + 1. This is O(n).\n"
-        f"D's target.py should include this line as the first non-import "
-        f"statement (it's a build-tracking marker — the optimize skill "
-        f"uses it for run accounting):\n"
-        f"    _DIRECTIVE_TAG = \"{directive_tag}\"\n"
-        f"Propagate this marker line into D's subagent brief so the "
-        f"committed D variant has it."
+        f"\n"
+        f"When briefing D's subagent, include the _DIRECTIVE_TAG line "
+        f"verbatim in the brief so the subagent copies it into the "
+        f"committed target.py."
     )
     direct_out = h.run(
         f"export PATH=$HOME/.local/bin:$PATH; cd /tmp/ws && "
@@ -652,6 +660,14 @@ def _drive_smoke(
               f"  echo \"=== $f ===\"; head -8 \"$f\" 2>/dev/null; "
               f"done",
               must_succeed=False, timeout=10)
+        h.run("echo '--- /tmp/evo-inject.log (openclaw plugin diagnostic) ---'; "
+              "cat /tmp/evo-inject.log 2>&1 || echo '(no inject log)'",
+              must_succeed=False, timeout=5)
+    # The marker-tag assertion is the contract check: the directive
+    # explicitly requested a specific literal string be written into a
+    # committed target.py. If the agent skipped the marker, it didn't
+    # follow the directive verbatim — and `evo direct` is meaningless if
+    # agents can choose which parts of a directive to honor.
     assert tag_count >= 1, (
         f"[{host}] directive's marker tag '{directive_tag}' found in "
         f"{tag_count} committed target.py files (expected ≥1 — Experiment D "
@@ -785,7 +801,7 @@ def test_claude_code(sandbox):
         drive_cmd=(
             "export PATH=$HOME/.local/bin:$PATH; "
             f"nohup claude --print --dangerously-skip-permissions "
-            f"--model claude-haiku-4-5 --max-budget-usd 5.0 {prompt} "
+            f"--model claude-sonnet-4-5 --max-budget-usd 5.0 {prompt} "
             "> /tmp/agent.log 2>&1 & echo $! > /tmp/agent.pid"
         ),
         env_keys={"ANTHROPIC_API_KEY": anthropic_key},
@@ -1009,6 +1025,11 @@ def test_openclaw(sandbox_4g):
         ],
         drive_cmd=(
             "export PATH=$HOME/.local/bin:$PATH; "
+            # _drive_smoke wraps this with `cd /tmp/ws &&` already; the
+            # outer cd ensures the agent's process.cwd() is the workspace,
+            # which is required for the pi-extension's findEvoRunDir() to
+            # locate .evo/. The pi-extension also has a fallback to
+            # ~/.openclaw/workspace for users who launch from $HOME.
             # `--agent main` is the default agent installed by `evo install
             # openclaw`, which also registers the pi-extension that powers
             # mid-run inject. main's workspace is symlinked to /tmp/ws above.
