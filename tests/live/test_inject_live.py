@@ -175,7 +175,7 @@ def test_e2e_broadcast_drain_bash_hook():
         out = _hook_drain_bash(run_dir, stdin_payload)
         assert "hookSpecificOutput" in out, f"unexpected output: {out}"
         ctx = out["hookSpecificOutput"]["additionalContext"]
-        assert "[evo direct] live test directive" in ctx, ctx
+        assert "[EVO DIRECTIVE]" in ctx and "live test directive" in ctx, ctx
 
         # Marker must be cleared
         assert not marker.exists(root, sid), "marker still present after drain"

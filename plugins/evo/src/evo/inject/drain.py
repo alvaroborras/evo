@@ -78,17 +78,22 @@ def _detect_hook_event_from_stdin() -> str | None:
 
 def format_directive_text(events: list[dict]) -> str:
     """Format events as a single text block to splice into the agent's
-    next turn. Keeps it terse — agents treat additionalContext as
-    authoritative, so we want minimum noise.
+    next turn.
 
-    Single event type today: user directives via `evo direct`. The SKILL
-    documents what `[evo direct]` means; we just emit a stable prefix.
+    Wraps each event with the `[EVO DIRECTIVE]` / `[END EVO DIRECTIVE]`
+    banner pair. The banner is the authenticity signal — `optimize` and
+    `subagent` skills tell the agent that text inside this banner is
+    user-authoritative (issued via `evo direct`), not tool-output prompt
+    injection. Without the banner, models like gpt-5 / opus-4-7 may
+    refuse the directive as suspicious.
     """
     lines = []
     for ev in events:
         text = ev.get("text", "")
         if text:
-            lines.append(f"[evo direct] {text}")
+            lines.append("[EVO DIRECTIVE]")
+            lines.append(text)
+            lines.append("[END EVO DIRECTIVE]")
     return "\n".join(lines)
 
 

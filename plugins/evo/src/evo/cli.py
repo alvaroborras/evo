@@ -3729,6 +3729,74 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return adapter.doctor(args)
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    """Update evo's plugin for one host or all detected hosts.
+
+    `evo update <host>`         — update that host's plugin to latest
+    `evo update`                — update every host whose doctor() passes,
+                                  plus refresh the global CLI from PyPI
+    `evo update --force`        — uninstall + cache-wipe + reinstall
+                                  (workaround for upstream cache
+                                   invalidation, anthropics/claude-code#14061)
+    """
+    from . import host_install
+
+    if args.host:
+        try:
+            return host_install.update(args.host, args)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+
+    # No host specified — refresh global CLI then iterate over hosts whose
+    # current install is healthy (doctor returns 0). Hosts the user never
+    # set up are skipped silently.
+    version = getattr(args, "version", None)
+    print(f"=== Refreshing global CLI ===")
+    if version and not host_install.claude_code._looks_like_pypi_release(version):
+        # Branch/SHA refs don't exist on PyPI — skip the CLI refresh and
+        # tell the user why. Plugin install (via git ref) will still proceed.
+        print(
+            f"(skipping global CLI refresh: --version {version!r} is not a "
+            "PyPI release; uv tool install only knows about published "
+            "versions. Plugins will install from the git ref.)"
+        )
+        rc = 0
+    else:
+        target = "evo-hq-cli"
+        if version:
+            target = f"evo-hq-cli=={version}"
+        cli_cmd = ["uv", "tool", "install", "--force", target]
+        print(f"$ {' '.join(cli_cmd)}")
+        rc = subprocess.call(cli_cmd)
+    if rc != 0:
+        print(
+            "WARNING: global CLI refresh failed. Try manually: "
+            "uv tool install --force evo-hq-cli  (or pipx install --force evo-hq-cli)",
+            file=sys.stderr,
+        )
+
+    overall_rc = 0
+    for host in host_install.SUPPORTED_HOSTS:
+        adapter = host_install.get(host)
+        doctor_args = argparse.Namespace()  # doctor takes no positional args
+        try:
+            healthy = adapter.doctor(doctor_args) == 0
+        except Exception:
+            healthy = False
+        if not healthy:
+            continue
+        print(f"\n=== Updating host: {host} ===")
+        try:
+            host_rc = host_install.update(host, args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR updating {host}: {exc}", file=sys.stderr)
+            host_rc = 1
+        if host_rc != 0:
+            overall_rc = host_rc
+    return overall_rc
+
+
 def cmd_direct(args: argparse.Namespace) -> int:
     """Send a directive to the workspace.
 
@@ -4382,6 +4450,21 @@ def build_parser() -> argparse.ArgumentParser:
              "write on user approval, enabling mid-run directives. Use only "
              "if you've reviewed plugins/evo/hooks/hooks.json and accept it.",
     )
+    install_p.add_argument(
+        "--version",
+        default=None,
+        help="Pin host-side prereq install to a specific evo-hq-cli release "
+             "(e.g. '0.4.0') or any git ref (branch/tag/sha). Without this, "
+             "the host's marketplace install pulls from the default branch.",
+    )
+    install_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run the host's marketplace install even if the install state "
+             "already exists. Without --force, the prereq is skipped when the "
+             "host plugin is already present (avoids overwriting a tag-pinned "
+             "install with default-branch content).",
+    )
     install_p.set_defaults(func=cmd_install)
 
     uninstall_p = sub.add_parser("uninstall", help="Remove the evo plugin for a host")
@@ -4394,6 +4477,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_p.add_argument("host", choices=host_install.SUPPORTED_HOSTS)
     doctor_p.set_defaults(func=cmd_doctor)
+
+    update_p = sub.add_parser(
+        "update",
+        help="Update evo's plugin for one host (or all detected hosts if no host given)",
+        description=(
+            "Refresh evo's installation. With <host>: update just that host. "
+            "Without <host>: refresh the global CLI from PyPI, then update every "
+            "host whose `evo doctor` currently passes. Use --force to wipe the "
+            "host's plugin cache and reinstall from scratch (workaround for the "
+            "upstream Claude Code cache-invalidation bug, "
+            "anthropics/claude-code#14061)."
+        ),
+    )
+    update_p.add_argument(
+        "host",
+        nargs="?",
+        default=None,
+        choices=host_install.SUPPORTED_HOSTS,
+        help="Host to update. Omit to update all detected hosts + global CLI.",
+    )
+    update_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Uninstall + wipe plugin cache + reinstall (routes around upstream "
+             "cache-invalidation bug). Use this for migrating from pre-0.4.1.",
+    )
+    update_p.add_argument(
+        "--scope",
+        default="user",
+        choices=["user", "project", "local"],
+        help="Plugin scope for hosts that support it (claude-code). Default: user.",
+    )
+    update_p.add_argument(
+        "--from-path",
+        default=None,
+        help="Update from a local marketplace dir (for testing unreleased changes).",
+    )
+    update_p.add_argument(
+        "--version",
+        default=None,
+        help="Pin to a specific evo-hq-cli release (e.g. '0.4.0', '0.4.0-alpha.5') "
+             "or any git ref ('main', 'develop', a branch name, or a commit SHA). "
+             "Release-shaped values auto-prefix with 'v' to match the repo's tag "
+             "convention (0.4.0 → v0.4.0). Branches/SHAs pass through verbatim. "
+             "When the value isn't a PyPI-published release, the global CLI "
+             "refresh is skipped (uv tool install only knows PyPI releases) — "
+             "the plugin still installs from the git ref. Without this flag, "
+             "updates to the latest published release.",
+    )
+    update_p.add_argument(
+        "--trust-hooks",
+        action="store_true",
+        help="Trust the plugin's hooks non-interactively (codex only).",
+    )
+    update_p.set_defaults(func=cmd_update)
 
     direct_p = sub.add_parser(
         "direct",
@@ -4437,6 +4575,18 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     _maybe_auto_register()
+    # Daily PyPI freshness check + legacy-install nudge. Both are silent on
+    # any failure and skipped for `update` (so the user isn't told to update
+    # right after they did) and `doctor` (read-only diagnostic should be
+    # quiet). Cached 24h, hard-skippable via EVO_SKIP_VERSION_CHECK.
+    subcmd = getattr(args, "func", None).__name__ if getattr(args, "func", None) else ""
+    if subcmd not in {"cmd_update", "cmd_doctor"}:
+        try:
+            from . import version_check
+            version_check.maybe_check_pypi(__version__)
+            version_check.maybe_detect_legacy()
+        except Exception:
+            pass  # never let the version check break a user's command
     try:
         rc = args.func(args)
     except Exception as exc:  # noqa: BLE001

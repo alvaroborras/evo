@@ -43,6 +43,9 @@ def _hermes_config_yaml() -> Path:
     return base / "config.yaml"
 
 
+_SKILLS = ("discover", "optimize", "subagent", "infra-setup")
+
+
 def install(args: argparse.Namespace) -> int:
     py = _hermes_venv_python()
     if py is None:
@@ -53,6 +56,30 @@ def install(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Install evo skills via the `hermes skills` CLI. Skipped when
+    # --from-path is set (live tests don't have github access from the
+    # sandbox, and pull skills from the uploaded source instead).
+    if not getattr(args, "from_path", None) and not getattr(args, "from_source", False):
+        if shutil.which("hermes") is not None:
+            # Pin to --version's git tag when set. hermes accepts
+            # `owner/repo@<ref>/path/to/skill` per test_release_smoke.py:115.
+            version = getattr(args, "version", None)
+            ref_suffix = ""
+            if version:
+                import re as _re
+                ref = f"v{version}" if _re.match(r"^\d+\.\d+\.\d+", version) else version
+                ref_suffix = f"@{ref}"
+            for skill in _SKILLS:
+                # `discover` needs --force to bypass the SKILL.md scanner,
+                # which flags evo's own install examples.
+                extra = ["--force"] if skill == "discover" else []
+                cmd = ["hermes", "skills", "install",
+                       f"evo-hq/evo{ref_suffix}/plugins/evo/skills/{skill}", "-y", *extra]
+                print(f"$ {' '.join(cmd)}")
+                subprocess.call(cmd)
+        else:
+            print("NOTE: `hermes` binary not on PATH; skipping skill installs.")
 
     # Bootstrap pip if missing.
     if subprocess.run([str(py), "-m", "pip", "--version"], capture_output=True).returncode != 0:
@@ -83,7 +110,7 @@ def install(args: argparse.Namespace) -> int:
         target = str(target_path)
         cmd = [str(py), "-m", "pip", "install", target]
         print(f"installing evo-hq-cli from {target}…", flush=True)
-    elif args.from_source:
+    elif getattr(args, "from_source", False):
         repo_root = Path(__file__).resolve().parents[3]
         target = str(repo_root)
         cmd = [str(py), "-m", "pip", "install", "-e", target]

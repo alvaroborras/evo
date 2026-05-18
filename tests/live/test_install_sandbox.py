@@ -194,51 +194,233 @@ def test_opencode(sandbox):
     sandbox.run(
         "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; evo doctor opencode"
     )
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; evo update opencode"
+    )
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; evo doctor opencode"
+    )
 
 
 def test_claude_code(sandbox):
-    """Claude Code: npm install + non-interactive `claude plugin install`."""
+    """Claude Code: npm install + unified `evo install claude-code`,
+    then `evo update claude-code` to verify the update path."""
     sandbox.install_node("22")
     sandbox.run(
         f"{sandbox._sudo}npm install -g @anthropic-ai/claude-code > /tmp/cc.log 2>&1",
         timeout=300,
     )
     sandbox.run("claude --version")
-    sandbox.run("claude plugin marketplace add evo-hq/evo 2>&1 | tail -5",
-                timeout=120)
-    sandbox.run("claude plugin install evo@evo-hq-evo 2>&1 | tail -5", timeout=120)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo install claude-code",
+                timeout=180)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor claude-code")
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo update claude-code",
+                timeout=180)
     sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor claude-code")
 
 
 def test_codex(sandbox):
-    """Codex: npm install + marketplace add + `evo install codex`."""
+    """Codex: npm install + unified `evo install codex`,
+    then `evo update codex` to verify the update path."""
     sandbox.install_node("22")
     sandbox.run(
         f"{sandbox._sudo}npm install -g @openai/codex > /tmp/codex.log 2>&1",
         timeout=300,
     )
     sandbox.run("codex --version")
-    sandbox.run("codex plugin marketplace add evo-hq/evo 2>&1 | tail -5",
-                timeout=120)
-    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo install codex")
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo install codex",
+                timeout=180)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor codex")
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo update codex",
+                timeout=180)
     sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor codex")
 
 
 def test_openclaw(sandbox_4g):
-    """OpenClaw: npm install (heavy) + marketplace install + pi-extension."""
+    """OpenClaw: npm install (heavy) + unified `evo install openclaw`.
+
+    Post-0.4.1: `evo install openclaw` drives `openclaw plugins install
+    evo --marketplace ...` itself before setting up the pi-extension.
+    """
     sandbox_4g.install_node("22")
     sandbox_4g.run(
         f"{sandbox_4g._sudo}npm install -g openclaw > /tmp/openclaw.log 2>&1",
         timeout=600,
     )
     sandbox_4g.run("openclaw --version")
-    sandbox_4g.run(
-        "openclaw plugins install evo --marketplace https://github.com/evo-hq/evo "
-        "2>&1 | tail -10",
+    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo install openclaw",
+                   timeout=300)
+    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo doctor openclaw")
+    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo update openclaw",
+                   timeout=300)
+    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo doctor openclaw")
+
+
+# ---------------------------------------------------------------------------
+# Upgrade verification: 0.4.0 → current release via documented migration path
+# ---------------------------------------------------------------------------
+
+# Target version for the upgrade flow. For stable releases both forms
+# below are identical; for pre-releases they diverge (PyPI normalises
+# 0.4.1-alpha.2 to 0.4.1a2 while the plugin marketplace tag stays
+# v0.4.1-alpha.2). Keep both so the test catches normalisation drift
+# whenever the target is a pre-release.
+_TARGET_PEP440 = "0.4.1"
+_TARGET_TAG = "0.4.1"
+
+
+def _install_evo_cli(sandbox, pypi_version: str):
+    """Install evo-hq-cli at the given PyPI version. Returns evo --version."""
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$PATH; uv tool uninstall evo-hq-cli",
+        timeout=60,
+    )
+    sandbox.run(
+        f"export PATH=$HOME/.local/bin:$PATH; "
+        f"uv tool install 'evo-hq-cli=={pypi_version}'",
+        timeout=300,
+    )
+    return sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo --version").strip()
+
+
+def _run_documented_upgrade(sandbox, host: str):
+    """Run the documented migration one-liner (alpha-pinned form):
+
+        uv tool install --force 'evo-hq-cli==<PEP440>' && \
+        evo update <host> --version <TAG> --force
+    """
+    sandbox.run(
+        f"export PATH=$HOME/.local/bin:$PATH; "
+        f"uv tool install --force 'evo-hq-cli=={_TARGET_PEP440}'",
+        timeout=300,
+    )
+    v_cli = sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo --version").strip()
+    assert _TARGET_TAG in v_cli, f"expected {_TARGET_TAG} in {v_cli!r}"
+
+    sandbox.run(
+        f"export PATH=$HOME/.local/bin:$PATH; "
+        f"evo update {host} --version {_TARGET_TAG} --force",
+        timeout=300,
+    )
+    sandbox.run(f"export PATH=$HOME/.local/bin:$PATH; evo doctor {host}")
+
+
+def test_upgrade_claude_code(sandbox):
+    """0.4.0 → alpha for claude-code via the documented migration one-liner.
+
+    0.4.0's `evo install claude-code` was a print-only stub, so we simulate
+    the 0.4.0 install path manually (claude plugin marketplace add +
+    plugin install), then test the upgrade lands at the alpha cache."""
+    v0 = _install_evo_cli(sandbox, "0.4.0")
+    assert "0.4.0" in v0 and "0.4.1" not in v0, f"expected 0.4.0, got {v0!r}"
+
+    sandbox.install_node("22")
+    sandbox.run(
+        f"{sandbox._sudo}npm install -g @anthropic-ai/claude-code > /tmp/cc.log 2>&1",
+        timeout=300,
+    )
+    sandbox.run("claude plugin marketplace add evo-hq/evo", timeout=120)
+    sandbox.run("claude plugin install evo@evo-hq-evo --scope user", timeout=120)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor claude-code")
+    pre = sandbox.run(
+        "grep version $HOME/.claude/plugins/cache/evo-hq-evo/evo/*/.claude-plugin/plugin.json"
+    )
+    assert "0.4.0" in pre and "0.4.1" not in pre, f"expected 0.4.0 cache, got {pre!r}"
+
+    _run_documented_upgrade(sandbox, "claude-code")
+
+    post = sandbox.run(
+        "grep version $HOME/.claude/plugins/cache/evo-hq-evo/evo/*/.claude-plugin/plugin.json"
+    )
+    assert _TARGET_TAG in post, f"expected {_TARGET_TAG} in cache, got {post!r}"
+
+
+def test_upgrade_codex(sandbox):
+    """0.4.0 → alpha for codex."""
+    v0 = _install_evo_cli(sandbox, "0.4.0")
+    assert "0.4.0" in v0 and "0.4.1" not in v0, f"expected 0.4.0, got {v0!r}"
+
+    sandbox.install_node("22")
+    sandbox.run(
+        f"{sandbox._sudo}npm install -g @openai/codex > /tmp/codex.log 2>&1",
+        timeout=300,
+    )
+    # 0.4.0's `evo install codex` printed instructions; the equivalent
+    # bootstrap is the codex marketplace add + plugin install.
+    sandbox.run("codex plugin marketplace add evo-hq/evo 2>&1 | tail -3", timeout=120)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo install codex", timeout=180)
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor codex")
+
+    _run_documented_upgrade(sandbox, "codex")
+
+
+def test_upgrade_opencode(sandbox):
+    """0.4.0 → alpha for opencode."""
+    v0 = _install_evo_cli(sandbox, "0.4.0")
+    assert "0.4.0" in v0 and "0.4.1" not in v0, f"expected 0.4.0, got {v0!r}"
+
+    sandbox.run(
+        "curl -fsSL https://opencode.ai/install | bash > /tmp/opencode.log 2>&1",
         timeout=240,
     )
-    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo install openclaw")
-    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo doctor openclaw")
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; evo install opencode"
+    )
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$HOME/.opencode/bin:$PATH; evo doctor opencode"
+    )
+
+    _run_documented_upgrade(sandbox, "opencode")
+
+
+def test_upgrade_openclaw(sandbox_4g):
+    """0.4.0 → alpha for openclaw.
+
+    0.4.0 installed a pi-extension that current openclaw no longer fires
+    (`before_provider_request` removed upstream). The upgrade replaces it
+    with the new evo-inject native plugin (`tool_result_persist`). The
+    test verifies the upgrade succeeds and doctor passes — the
+    end-to-end inject verification lives in release-smoke."""
+    v0 = _install_evo_cli(sandbox_4g, "0.4.0")
+    assert "0.4.0" in v0 and "0.4.1" not in v0, f"expected 0.4.0, got {v0!r}"
+
+    sandbox_4g.install_node("22")
+    sandbox_4g.run(
+        f"{sandbox_4g._sudo}npm install -g openclaw > /tmp/openclaw.log 2>&1",
+        timeout=600,
+    )
+    sandbox_4g.run(
+        "openclaw plugins install evo --marketplace https://github.com/evo-hq/evo "
+        "2>&1 | tail -5",
+        timeout=120,
+    )
+    sandbox_4g.run("export PATH=$HOME/.local/bin:$PATH; evo install openclaw",
+                   timeout=300)
+
+    _run_documented_upgrade(sandbox_4g, "openclaw")
+
+
+def test_upgrade_hermes(sandbox):
+    """0.4.0 → alpha for hermes.
+
+    Hermes loads evo via the `hermes_agent.plugins` entry-point, so the
+    plugin version IS the evo-hq-cli version — no separate marketplace
+    cache to invalidate. Upgrade is purely the CLI bump.
+    """
+    v0 = _install_evo_cli(sandbox, "0.4.0")
+    assert "0.4.0" in v0 and "0.4.1" not in v0, f"expected 0.4.0, got {v0!r}"
+
+    sandbox.run(
+        "curl -fsSL "
+        "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh "
+        "| bash > /tmp/hermes.log 2>&1",
+        timeout=900,
+    )
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; hermes --version")
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo install hermes")
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor hermes")
+
+    _run_documented_upgrade(sandbox, "hermes")
 
 
 def test_hermes(sandbox):
@@ -259,5 +441,10 @@ def test_hermes(sandbox):
     sandbox.run(
         "export PATH=$HOME/.local/bin:$PATH; "
         "evo install hermes --from-path /tmp/evo-plugin"
+    )
+    sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor hermes")
+    sandbox.run(
+        "export PATH=$HOME/.local/bin:$PATH; "
+        "evo update hermes --from-path /tmp/evo-plugin"
     )
     sandbox.run("export PATH=$HOME/.local/bin:$PATH; evo doctor hermes")

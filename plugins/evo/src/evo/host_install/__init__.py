@@ -34,3 +34,17 @@ def get(host: str):
         valid = ", ".join(SUPPORTED_HOSTS)
         raise ValueError(f"unknown host {host!r} — try one of: {valid}")
     return ADAPTERS[host]
+
+
+def update(host: str, args):
+    """Run `update(args)` if the adapter defines it, otherwise fall back
+    to `install(args)`. Most file-copy hosts (codex/openclaw/opencode)
+    treat install as idempotent and update-equivalent — they wipe the
+    cache and copy fresh on every install. Claude Code is the exception:
+    `claude plugin update` is a distinct subcommand from install.
+    """
+    module = get(host)
+    fn = getattr(module, "update", None)
+    if fn is None:
+        fn = module.install
+    return fn(args)

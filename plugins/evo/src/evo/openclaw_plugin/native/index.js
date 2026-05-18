@@ -1,4 +1,4 @@
-// drain.ts
+// ../../opencode_plugin/drain.ts
 import * as fs from "fs";
 import * as path from "path";
 var QUEUE_SCHEMA_VERSION = 1;
@@ -194,56 +194,128 @@ function drainSession(runDir, sessionId) {
 }
 
 // index.ts
+import * as crypto from "crypto";
 import * as fs2 from "fs";
+import * as os from "os";
 import * as path2 from "path";
-function markerExists(runDir, sid) {
-  return fs2.existsSync(path2.join(runDir, "inject", "markers", `${sid}.flag`));
+var DEBUG = process.env.EVO_DEBUG_INJECT === "1";
+var BANNER_OPEN = "[EVO DIRECTIVE]";
+function log(line) {
+  if (!DEBUG)
+    return;
+  try {
+    fs2.appendFileSync("/tmp/evo-inject.log", `[${new Date().toISOString()}] ${line}
+`);
+  } catch {}
 }
-var EvoPlugin = async ({ project }) => {
-  const ensureRegistered = (sessionID) => {
-    if (!sessionID)
-      return null;
-    const runDir = findEvoRunDir(project?.directory);
-    if (!runDir)
-      return null;
-    if (!isRegistered(runDir, sessionID)) {
-      registerSession(runDir, sessionID, "opencode");
-    }
-    return runDir;
-  };
-  return {
-    "chat.message": async (input, output) => {
-      const sessionID = input?.sessionID;
-      if (!sessionID)
-        return;
-      const runDir = ensureRegistered(sessionID);
+function findOpenclawRunDir() {
+  const cwdRun = findEvoRunDir(process.cwd());
+  if (cwdRun)
+    return cwdRun;
+  const fallback = path2.join(os.homedir(), ".openclaw", "workspace");
+  if (fs2.existsSync(fallback)) {
+    return findEvoRunDir(fallback);
+  }
+  return null;
+}
+function deriveSessionId() {
+  const runDir = findOpenclawRunDir() || process.cwd();
+  const marker = "/.evo/";
+  const idx = runDir.indexOf(marker);
+  const workspace = idx >= 0 ? runDir.slice(0, idx) : process.cwd();
+  const hash = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 12);
+  return "openclaw-" + hash;
+}
+var drainedTexts = [];
+function directiveBanner() {
+  if (drainedTexts.length === 0)
+    return "";
+  return `
+` + drainedTexts.join(`
+
+`);
+}
+var native_default = {
+  id: "evo-inject",
+  name: "Evo Mid-Run Inject",
+  description: "Delivers `evo direct` directives mid-conversation by appending them to the most recent tool-result message via tool_result_persist.",
+  register(api) {
+    log(`register() called, cwd=${process.cwd()}`);
+    const ensureRegistered = () => {
+      const runDir = findOpenclawRunDir();
       if (!runDir)
-        return;
-      const hasMarker = markerExists(runDir, sessionID);
-      if (!hasMarker) {}
-      const result = drainSession(runDir, sessionID);
-      if (result.text) {
-        if (!Array.isArray(output.parts)) {
-          output.parts = [];
-        }
-        const messageID = input?.messageID ?? output?.message?.id ?? output.parts[0]?.messageID ?? "";
-        const partID = `prt_evo_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-        output.parts.unshift({
-          type: "text",
-          id: partID,
-          sessionID,
-          messageID,
-          text: result.text
-        });
+        return null;
+      const sid = deriveSessionId();
+      if (!isRegistered(runDir, sid)) {
+        registerSession(runDir, sid, "openclaw");
+        log(`registered session ${sid} in ${runDir}`);
       }
-    },
-    "tool.execute.before": async (input, _output) => {
-      ensureRegistered(input?.sessionID);
+      return { runDir, sid };
+    };
+    const pumpDirectives = (runDir, sid) => {
+      const result = drainSession(runDir, sid);
+      if (result.text) {
+        drainedTexts.push(result.text);
+        log(`drained ${result.text.length} bytes`);
+      }
+    };
+    for (const ev of ["agent_turn_prepare", "before_prompt_build", "before_agent_run", "session_start"]) {
+      try {
+        api.on(ev, async () => {
+          ensureRegistered();
+        });
+      } catch {}
     }
-  };
+    const interval = setInterval(() => {
+      try {
+        const ctx = ensureRegistered();
+        if (ctx)
+          pumpDirectives(ctx.runDir, ctx.sid);
+      } catch {}
+    }, 1500);
+    if (typeof interval.unref === "function") {
+      interval.unref();
+    }
+    api.on("tool_result_persist", async (event) => {
+      const ctx = ensureRegistered();
+      if (ctx)
+        pumpDirectives(ctx.runDir, ctx.sid);
+      if (drainedTexts.length === 0)
+        return;
+      const msg = event?.message ?? event?.assistantMessage ?? event;
+      if (!msg || typeof msg !== "object")
+        return;
+      const banner = directiveBanner();
+      let mutated = false;
+      const tryAppendString = (obj, key) => {
+        if (typeof obj?.[key] === "string" && !obj[key].includes(BANNER_OPEN)) {
+          obj[key] = obj[key] + banner;
+          mutated = true;
+          return true;
+        }
+        return false;
+      };
+      if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if (part && typeof part === "object") {
+            if (tryAppendString(part, "text"))
+              break;
+            if (tryAppendString(part, "output"))
+              break;
+          }
+        }
+      }
+      if (!mutated)
+        tryAppendString(msg, "content");
+      if (!mutated && msg.details && typeof msg.details === "object") {
+        tryAppendString(msg.details, "text") || tryAppendString(msg.details, "output") || tryAppendString(msg.details, "stdout") || tryAppendString(msg.details, "content");
+      }
+      if (!mutated)
+        tryAppendString(msg, "text");
+      return mutated ? msg : undefined;
+    });
+  }
 };
-var opencode_plugin_default = EvoPlugin;
 export {
-  opencode_plugin_default as default,
-  EvoPlugin
+  native_default as default
 };

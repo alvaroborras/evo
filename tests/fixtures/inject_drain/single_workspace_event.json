@@ -25,7 +25,7 @@
   "offsets": {},
   "markers": ["orch1"],
   "expected": {
-    "text": "[evo direct] be bold",
+    "text": "[EVO DIRECTIVE]\nbe bold\n[END EVO DIRECTIVE]",
     "newWorkspaceOffset": "01HZA00000000000000000A001",
     "newExpOffset": null,
     "marker_after": false,

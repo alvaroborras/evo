@@ -1,0 +1,18 @@
+{
+  "id": "evo-inject",
+  "name": "Evo Mid-Run Inject",
+  "description": "Delivers `evo direct` directives mid-run by rewriting the next Bash tool call to prepend the directive text. Embedded openclaw agent runs do not fire per-turn hooks (agent_turn_prepare/before_prompt_build fire only at session start) so before_tool_call is the only per-cycle mutation surface that works.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      }
+    }
+  }
+}

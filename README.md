@@ -24,10 +24,27 @@ score, discards what doesn't. Runs until you stop it.
   <img src="assets/dashboard.png" alt="evo dashboard" width="100%" />
 </p>
 
+## Workflow
+
+Two skills, used in sequence:
+
+- **discover** — one-time setup. Explores the codebase, picks an
+  optimization target, builds a benchmark, runs the first experiment.
+- **optimize** — the search loop. Parallel subagents form hypotheses,
+  edit, get scored. Runs until you stop it or `stall` rounds produce no
+  improvement.
+
+`optimize` parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `subagents` | 5 | Parallel subagents per round |
+| `budget` | 5 | Max iterations each subagent can run within its branch |
+| `stall` | 5 | Consecutive rounds with no improvement before auto-stopping |
+
 ## Quickstart
 
-**1. Install the CLI** (Claude Code bundles its own — skip unless you want
-a remote backend).
+**1. Install the CLI.**
 
 ```bash
 uv tool install evo-hq-cli              # or: pipx install evo-hq-cli
@@ -43,79 +60,84 @@ uv tool install 'evo-hq-cli[modal]'
 
 **2. Add the plugin to your host.**
 
-Claude Code (run inside Claude):
-
-```
-/plugin marketplace add evo-hq/evo
-/plugin install evo@evo-hq-evo
-```
-
-Codex (requires 0.122.0+ — `npm install -g @openai/codex@latest`):
+Install the host's own CLI first (`claude`, `codex`, `openclaw` via
+npm; `hermes` and `opencode` per their docs), then:
 
 ```bash
-codex plugin marketplace add evo-hq/evo
-evo install codex
+evo install <host>     # claude-code | codex | hermes | opencode | openclaw
 ```
-
-Then trust the evo hooks: start `codex`, run `/hooks`, trust each evo
-hook. Without this, `evo direct` mid-run directives won't reach the
-agent; skills and the rest of evo still work. For non-interactive setups
-(CI, `codex exec`), add `--trust-hooks` to `evo install codex` to skip
-the manual review.
-
-OpenClaw:
-
-```bash
-openclaw plugins install evo --marketplace https://github.com/evo-hq/evo
-evo install openclaw
-```
-
-Hermes (skills install per-skill; runtime plugin via pip entry-point):
-
-```bash
-hermes skills install evo-hq/evo/plugins/evo/skills/discover -y --force
-hermes skills install evo-hq/evo/plugins/evo/skills/optimize -y
-hermes skills install evo-hq/evo/plugins/evo/skills/subagent -y
-hermes skills install evo-hq/evo/plugins/evo/skills/infra-setup -y
-evo install hermes
-```
-
-`--force` on `discover` bypasses the SKILL.md scanner — it flags evo's
-own install examples.
-
-Opencode:
-
-```bash
-npx skills add evo-hq/evo --agent opencode -g
-evo install opencode
-```
-
-Opencode's `task` tool is batch-parallel (all subagents in one assistant
-turn return together when the slowest finishes), not background-with-
-notification like the other four hosts. evo's optimize loop works fine —
-rounds complete batch-wise — but reactive workflows that act on early
-completions before the slowest finishes aren't supported on opencode.
 
 Verify any install: `evo doctor <host>`.
 
-**3. Run.**
+`evo install <host>` drives the host's marketplace install AND fetches
+the platform-native hot-path binary (`evo-hook-drain`) for mid-run
+inject. If you installed the plugin manually (e.g. `claude plugin
+install evo@evo-hq-evo` directly), still run `evo install claude-code`
+afterwards to stage the binary — without it, `evo direct` directives
+won't be delivered to running agents.
+
+Host-specific caveats:
+
+- **Codex** uses a hook trust model. evo's hooks (used to send
+  mid-round instructions to running subagents — e.g. "all your
+  hypotheses are converging on the same dead end — try angle X") install
+  untrusted by default. Run `/hooks` inside codex to trust them, or pass
+  `--trust-hooks` to `evo install codex` for non-interactive setups.
+- **Opencode**'s `task` tool is batch-parallel (subagents in a round
+  return together when the slowest finishes). Optimize loop works fine;
+  reactive workflows that act on early completions don't.
+
+**3. Run `discover`, then `optimize`.**
+
+| Host | discover | optimize |
+|---|---|---|
+| Claude Code | `/evo:discover` | `/evo:optimize` |
+| Codex | `$evo discover` | `$evo optimize` |
+| Others | use your host's skill-mention syntax | |
+
+Pass `optimize` parameters as `key=value` after the skill name:
 
 ```
-/evo:discover
-/evo:optimize
+/evo:optimize                                    # all defaults
+/evo:optimize subagents=3 budget=10 stall=3      # narrower fanout, deeper branches
+$evo optimize subagents=10                       # Codex: wider fanout
 ```
 
-Invocation prefix varies by host — see `evo --help`.
+## Upgrading
 
-`optimize` accepts optional parameters:
+```bash
+evo update <host>                    # host: claude-code | codex | hermes | opencode | openclaw
+evo update <host> --version 0.4.1    # pin to a release
+```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `subagents` | 5 | Number of parallel subagents per round |
-| `budget` | 5 | Max iterations each subagent can run within its branch |
-| `stall` | 5 | Consecutive rounds with no improvement before auto-stopping |
+See `evo update --help` for `--force` (cache-wipe reinstall), `--scope`,
+and other options.
 
-Example (Claude Code): `/evo:optimize subagents=3 budget=10 stall=3`.
+### Migrating from v0.4.0 or earlier
+
+```bash
+uv tool install --force evo-hq-cli && evo update --force
+```
+
+`--force` wipes the host plugin cache and reinstalls. Works around an
+upstream cache-invalidation bug in Claude Code
+([anthropics/claude-code#14061](https://github.com/anthropics/claude-code/issues/14061))
+that leaves stale files even when `/plugin update` reports success.
+
+### Testing a pre-release (alpha)
+
+`uv` and `pip` skip pre-releases by default, so the migration command
+above always lands on the latest stable. To test an alpha, pin both the
+CLI install and the host plugin update:
+
+```bash
+uv tool install --force 'evo-hq-cli==0.4.1a2' && \
+  evo update --version 0.4.1-alpha.2 --force
+```
+
+Replace `0.4.1a2` / `0.4.1-alpha.2` with whichever alpha you want. The
+two version forms differ because PyPI normalises `0.4.1-alpha.2` to
+`0.4.1a2`, while the plugin marketplace tag is `v0.4.1-alpha.2`.
 
 ## How it works
 

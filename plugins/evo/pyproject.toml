@@ -1,6 +1,6 @@
 [project]
 name = "evo-hq-cli"
-version = "0.4.0"
+version = "0.4.1"
 description = "Structured experiment-driven code optimization with git worktrees, traces, and a local dashboard. CLI for the evo plugin (Claude Code, Codex)."
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -69,10 +69,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-script-files = ["bin/evo-hook-drain"]
+# evo-hook-drain ships as a per-platform Rust binary fetched at install
+# time from the GitHub release. The CLI wheel itself doesn't carry binaries.
+script-files = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-evo = ["static/*", "opencode_plugin/*.js", "openclaw_plugin/*.js"]
+evo = ["static/*", "opencode_plugin/*.js", "openclaw_plugin/*.js", "openclaw_plugin/native/*.js", "openclaw_plugin/native/*.json", "openclaw_plugin/native/*.md"]

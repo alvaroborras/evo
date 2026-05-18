@@ -40,13 +40,14 @@ def install(args: argparse.Namespace) -> int:
         )
         return 2
 
-    target_dir = _opencode_plugins_dir(workspace=args.workspace)
+    workspace = bool(getattr(args, "workspace", False))
+    target_dir = _opencode_plugins_dir(workspace=workspace)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "evo.js"
 
     shutil.copyfile(src, target)
     print(f"installed evo plugin: {target}")
-    if args.workspace:
+    if workspace:
         print("Workspace-local install. Restart `opencode` in this directory to load it.")
     else:
         print("Global install. Any opencode session will auto-load the plugin at startup.")

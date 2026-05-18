@@ -272,20 +272,6 @@ remote containers; there is no safe default active experiment.
 For local worktree/pool backends, native file tools are fine if you use the
 actual worktree path returned by `evo new`.
 
-## Dispatch
-
-```bash
-evo dispatch run --parent <id> -m "<brief>" [--budget N] [--background]
-evo dispatch wait [job_ids...] [--quiet]
-evo dispatch list [--running] [--recent N]
-evo dispatch status <job_id>
-evo dispatch kill <job_id>
-```
-
-`dispatch` is async subagent spawning, available on `claude-code` only.
-It is not background benchmark execution — `evo run` is always a blocking
-evaluation transaction.
-
 ## Common Mistakes
 
 - Do not hand-edit config JSON; use `evo config ...`, `evo env ...`, or

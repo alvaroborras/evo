@@ -8,6 +8,8 @@ import argparse
 import os
 from pathlib import Path
 
+from ._hook_drain import ensure_hook_drain_binary
+
 
 _PLUGIN_KEY = '[plugins."evo@evo-hq"]'
 
@@ -83,11 +85,55 @@ def _enable_plugin(enable: bool) -> tuple[bool, Path]:
 
 def install(args: argparse.Namespace) -> int:
     print(_INSTALL_HINT)
+
+    import shutil as _shutil
+    if _shutil.which("codex") is None:
+        print(
+            "ERROR: `codex` binary not on PATH. Install Codex first:\n"
+            "  npm install -g @openai/codex",
+            file=__import__("sys").stderr,
+        )
+        return 2
+
+    from_path = getattr(args, "from_path", None)
+    trust_hooks = bool(getattr(args, "trust_hooks", False))
+    force = bool(getattr(args, "force", False))
+
+    # Drive `codex plugin marketplace add` automatically. Skip if:
+    #   - --from-path is set (user is testing a local marketplace)
+    #   - marketplace clone already exists and --force not set (avoids
+    #     overwriting a tag-pinned install with unpinned default-branch
+    #     content; e.g. release-smoke tests do their own tag-pinned
+    #     marketplace add and would lose the pin if we re-added unpinned)
+    mkt_cache = _marketplace_cache()
+    if from_path:
+        pass
+    elif mkt_cache.exists() and not force:
+        print(
+            f"codex marketplace cache already at {mkt_cache}; "
+            "skipping `codex plugin marketplace add` prereq (use --force to refresh)"
+        )
+    else:
+        import subprocess as _sp
+        version = getattr(args, "version", None)
+        source = "evo-hq/evo"
+        if version:
+            import re as _re
+            ref = f"v{version}" if _re.match(r"^\d+\.\d+\.\d+", version) else version
+            source = f"{source}@{ref}"
+        mkt_cmd = ["codex", "plugin", "marketplace", "add", source]
+        print(f"$ {' '.join(mkt_cmd)}")
+        _sp.call(mkt_cmd)
+
+    # Ensure config.toml exists. On freshly-npm-installed codex (never run
+    # interactively), the marketplace add above creates ~/.codex/ but may
+    # not create config.toml until the first `codex` invocation. Write a
+    # stub so the toggle/enable helpers below have something to edit.
     cfg = _codex_base() / "config.toml"
     if not cfg.exists():
-        print(f"NOTE: {cfg} not found — Codex may not be installed yet.")
-        print("After installing Codex, re-run `evo install codex`.")
-        return 0
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("# created by `evo install codex`\n")
+        print(f"created stub {cfg}")
 
     # Replicate what codex's TUI `plugin/install` RPC does: copy the plugin
     # contents into `~/.codex/plugins/cache/<marketplace>/<plugin>/<ver>/`
@@ -102,8 +148,6 @@ def install(args: argparse.Namespace) -> int:
     # because `codex app-server` exits early on missing bubblewrap inside
     # minimal containers (e2b sandboxes etc.). File-copy replicates the
     # same disk state and works anywhere.
-    from_path = getattr(args, "from_path", None)
-    trust_hooks = bool(getattr(args, "trust_hooks", False))
     return _install_via_filecopy(from_path, trust_hooks=trust_hooks)
 
 
@@ -205,6 +249,14 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
                      ignore=_shutil.ignore_patterns(
                          ".git", ".venv", "__pycache__", "build", "dist",
                          ".pytest_cache", "*.egg-info"))
+
+    # Stage the platform-native evo-hook-drain binary. hooks.json points
+    # at <PLUGIN_ROOT>/bin/evo-hook-drain; without the binary every hook
+    # fire would be a no-op. The cache_dst was just (re)created above
+    # (rmtree if existed) so a fresh fetch is always correct here —
+    # `force=False` (default) avoids re-fetch only when the file is
+    # already at dest, which never happens since we just wiped.
+    ensure_hook_drain_binary(cache_dst)
 
     # Update config.toml: ensure `[features] plugin_hooks = true`
     # (gates whether codex fires plugin hooks at all) AND

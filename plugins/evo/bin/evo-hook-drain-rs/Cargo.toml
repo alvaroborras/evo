@@ -1,0 +1,15 @@
+[package]
+name = "evo-hook-drain"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# No deps — pure stdlib for smallest binary + fastest cold-start.
+
+[profile.release]
+opt-level = "z"      # optimize for size; we don't need raw speed inside the script
+lto = true           # link-time optimisation strips dead code
+codegen-units = 1    # better optimisation, slower build
+strip = true         # strip symbols (debug info, etc.)
+panic = "abort"      # smaller binary; we don't catch panics
