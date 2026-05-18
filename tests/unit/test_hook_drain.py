@@ -16,10 +16,21 @@ from __future__ import annotations
 import os
 import statistics
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
+
+# evo-hook-drain is a bash script; it runs in the bash environment Claude
+# Code / Codex / etc. spawn hooks under (Linux, macOS, WSL2). Windows hosts
+# don't expose bash on PATH, so subprocess.run(["bash", ...]) raises
+# OSError [WinError 193] before the test can assert anything. Skip the
+# whole module on Windows — the script never runs on native Windows.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash hot-path script does not run on native Windows",
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
