@@ -330,11 +330,10 @@ jobs:
             --dist=loadgroup --maxfail=0 -ra --tb=short
 
   build-hook-drain:
-    # Cross-platform native builds of the evo-hook-drain Rust binary.
-    # Five targets: linux x64/arm64, darwin x64/arm64, windows x64. Each
-    # builds on its own native runner (no cross-compile toolchain). The
-    # binaries get attached to the GitHub release in `github-release` and
-    # `evo install <host>` fetches the right one for the user's platform.
+    # Native builds for non-darwin targets: linux x64/arm64, windows x64.
+    # Each runs on its own native runner — no cross-compile toolchain.
+    # Darwin builds as a separate job that produces a universal binary
+    # (see build-hook-drain-darwin below).
     if: startsWith(github.ref, 'refs/tags/v') ||
         (github.event_name == 'workflow_dispatch' && inputs.target == 'all')
     needs: preflight
@@ -348,14 +347,6 @@ jobs:
             ext: ""
           - runner: ubuntu-24.04-arm
             os: linux
-            arch: arm64
-            ext: ""
-          - runner: macos-13
-            os: darwin
-            arch: amd64
-            ext: ""
-          - runner: macos-14
-            os: darwin
             arch: arm64
             ext: ""
           - runner: windows-latest
@@ -384,12 +375,49 @@ jobs:
           name: evo-hook-drain-${{ matrix.os }}-${{ matrix.arch }}
           path: evo-hook-drain-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
 
+  build-hook-drain-darwin:
+    # Apple universal binary — one asset that runs natively on both
+    # Apple Silicon (arm64) and Intel (x86_64) Macs. Built on macos-14
+    # (Apple Silicon), cross-compiling to x86_64 via Apple's clang and
+    # then fusing both slices with `lipo`. This is Apple's recommended
+    # distribution pattern and avoids the macos-15-intel runner pool
+    # (which has long queue times and a 2027 sunset).
+    if: startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && inputs.target == 'all')
+    needs: preflight
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/evo/bin/evo-hook-drain-rs
+      - name: Build arm64 slice
+        working-directory: plugins/evo/bin/evo-hook-drain-rs
+        run: cargo build --release --target aarch64-apple-darwin
+      - name: Build x86_64 slice
+        working-directory: plugins/evo/bin/evo-hook-drain-rs
+        run: cargo build --release --target x86_64-apple-darwin
+      - name: Fuse into universal binary via lipo
+        run: |
+          lipo -create -output evo-hook-drain-darwin \
+            plugins/evo/bin/evo-hook-drain-rs/target/aarch64-apple-darwin/release/evo-hook-drain \
+            plugins/evo/bin/evo-hook-drain-rs/target/x86_64-apple-darwin/release/evo-hook-drain
+          file evo-hook-drain-darwin
+          ls -lh evo-hook-drain-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evo-hook-drain-darwin
+          path: evo-hook-drain-darwin
+
   github-release:
     # Only run on the unified `v*` tag form (full release of all packages).
     # Skip for per-package tags (py-v*, node-v*, cli-v*) since those aren't
     # the user-facing release surface.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [publish-python, publish-node, publish-cli, build-hook-drain]
+    needs: [publish-python, publish-node, publish-cli, build-hook-drain, build-hook-drain-darwin]
     runs-on: ubuntu-latest
     permissions:
       contents: write

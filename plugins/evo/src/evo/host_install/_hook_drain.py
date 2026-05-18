@@ -30,16 +30,22 @@ _RELEASE_URL_TEMPLATE = (
 def _target_name() -> str | None:
     """Map platform.system()/machine() to the release asset suffix.
 
-    Returns 'linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64',
-    or 'windows-amd64'. None if the platform isn't supported (e.g.
+    Returns 'linux-amd64', 'linux-arm64', 'darwin' (universal: arm64 +
+    x86_64 fused via lipo, so one asset works on both), or
+    'windows-amd64'. None if the platform isn't supported (e.g.
     windows-arm64 — we don't ship that binary yet).
     """
     system = platform.system().lower()
-    machine = platform.machine().lower()
 
-    if system not in ("linux", "darwin", "windows"):
+    if system == "darwin":
+        # Single universal binary for both Apple Silicon and Intel Macs.
+        # macOS picks the right slice at exec time. Drops the arch suffix.
+        return "darwin"
+
+    if system not in ("linux", "windows"):
         return None
 
+    machine = platform.machine().lower()
     if machine in ("x86_64", "amd64"):
         arch = "amd64"
     elif machine in ("arm64", "aarch64"):
