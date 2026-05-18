@@ -128,15 +128,14 @@ class HermesSubagentIdentityTests(unittest.TestCase):
         self.assertIsNone(queue.read_offset(self.root, "sub", "workspace"))
 
 
-@unittest.skipIf(
-    sys.platform == "win32",
-    "POSIX-only: invokes a bash hot-path script under tempdir teardown that "
-    "Windows can't reliably clean (held git/inject file handles)",
-)
 class CodexHotPathSubagentIdentityTests(unittest.TestCase):
-    """The bash hot-path script auto-registers per session_id from
-    stdin. Distinct subagent ThreadIds in two PreToolUse fires must
-    produce two registry entries."""
+    """The hot-path binary auto-registers per session_id from stdin.
+    Distinct subagent ThreadIds in two PreToolUse fires must produce two
+    registry entries.
+
+    Cross-platform — uses the Rust binary at plugins/evo/bin/evo-hook-drain
+    (or .exe on Windows). Skipped if the binary isn't staged (run
+    `cargo build --release` in plugins/evo/bin/evo-hook-drain-rs/ first)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="codex_subag_")
@@ -145,9 +144,15 @@ class CodexHotPathSubagentIdentityTests(unittest.TestCase):
 
         from evo.core import workspace_path
         self.run_dir = workspace_path(self.root)
-        self.script = REPO_ROOT / "plugins" / "evo" / "bin" / "evo-hook-drain"
-        if not self.script.exists():
-            self.skipTest(f"hook script missing: {self.script}")
+        bin_name = "evo-hook-drain.exe" if sys.platform == "win32" else "evo-hook-drain"
+        self.script = REPO_ROOT / "plugins" / "evo" / "bin" / bin_name
+        # The conftest-level fixture in test_hook_drain ensures the binary
+        # is built; this assertion catches the case where test_subagent_identity
+        # runs in isolation without that fixture firing.
+        assert self.script.exists(), (
+            f"hook binary not staged: {self.script}. "
+            f"Run `cargo build --release` in plugins/evo/bin/evo-hook-drain-rs/."
+        )
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -162,7 +167,7 @@ class CodexHotPathSubagentIdentityTests(unittest.TestCase):
             "CODEX_SESSION_ID": "",
         }
         proc = subprocess.run(
-            ["bash", str(self.script)],
+            [str(self.script)],
             input=payload,
             cwd=self.root,
             env=env,

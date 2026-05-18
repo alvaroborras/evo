@@ -69,7 +69,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-script-files = ["bin/evo-hook-drain.js"]
+# evo-hook-drain ships as a per-platform Rust binary fetched at install
+# time from the GitHub release. The CLI wheel itself doesn't carry binaries.
+script-files = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
