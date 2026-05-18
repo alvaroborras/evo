@@ -22,14 +22,33 @@ from pathlib import Path
 
 import pytest
 
-# evo-hook-drain is a bash script; it runs in the bash environment Claude
-# Code / Codex / etc. spawn hooks under (Linux, macOS, WSL2). Windows hosts
-# don't expose bash on PATH, so subprocess.run(["bash", ...]) raises
-# OSError [WinError 193] before the test can assert anything. Skip the
-# whole module on Windows — the script never runs on native Windows.
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="bash hot-path script does not run on native Windows",
+IS_WINDOWS = sys.platform == "win32"
+
+# Cross-platform invocation: spawn the script through `bash` explicitly
+# instead of relying on the shebang. Native Windows doesn't honor shebangs
+# and raises OSError [WinError 193] on direct exec, but GitHub's
+# windows-latest ships Git Bash on PATH (the workflow already sets
+# `shell: bash` by default), so `bash <script>` runs the real script on
+# every CI platform — the tests stay honest on Windows.
+BASH = "bash"
+
+# Two tests can't run meaningfully on Git Bash for Windows:
+#   - the 5ms latency budget is a POSIX-bash contract; Git Bash cold
+#     startup on Windows is ~50-150ms, so the budget assertion would only
+#     measure shell overhead, not the hot path.
+#   - tests that construct a custom PATH (Branch 1 / Branch 3 fallbacks,
+#     SessionStart drain-present / drain-missing variants) depend on
+#     POSIX PATH semantics: `:` as separator and absolute paths like
+#     /usr/bin:/bin. On Windows, `:` collides with drive letters and the
+#     POSIX paths don't exist as written, so the tests would assert on
+#     MSYS translation quirks rather than hook behavior.
+skip_on_windows_latency = pytest.mark.skipif(
+    IS_WINDOWS,
+    reason="5ms budget is a POSIX-bash contract; Git Bash startup on Windows is ~50-150ms",
+)
+skip_on_windows_posix_path = pytest.mark.skipif(
+    IS_WINDOWS,
+    reason="test constructs POSIX PATH (`:` separator, /usr/bin) that doesn't translate to MSYS on Windows",
 )
 
 
@@ -57,7 +76,7 @@ def _run_hook(cwd: Path, payload: bytes, path_env: str | None = None) -> subproc
     if path_env is not None:
         env["PATH"] = path_env
     return subprocess.run(
-        [str(HOOK_PATH)],
+        [BASH, str(HOOK_PATH)],
         input=payload,
         cwd=str(cwd),
         env=env,
@@ -91,13 +110,14 @@ def test_fast_path_no_session_id_exits_clean(tmp_path):
                   if k not in {"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
                                "HERMES_SESSION_ID", "OPENCODE_SESSION_ID"}}
     r = subprocess.run(
-        [str(HOOK_PATH)], input=b'{"hook_event_name":"PreToolUse"}',
+        [BASH, str(HOOK_PATH)], input=b'{"hook_event_name":"PreToolUse"}',
         cwd=str(tmp_path), env=env_no_sid, capture_output=True, timeout=10,
     )
     assert r.returncode == 0
     assert r.stdout.strip() == b"{}"
 
 
+@skip_on_windows_latency
 def test_fast_path_latency_under_5ms_median(tmp_path):
     """Regression guard: fast-path median must stay under design budget.
 
@@ -109,7 +129,7 @@ def test_fast_path_latency_under_5ms_median(tmp_path):
     for _ in range(30):
         t0 = time.perf_counter()
         r = subprocess.run(
-            [str(HOOK_PATH)], input=PAYLOAD_PRETOOL,
+            [BASH, str(HOOK_PATH)], input=PAYLOAD_PRETOOL,
             cwd=str(tmp_path), capture_output=True, timeout=5,
         )
         times_ms.append((time.perf_counter() - t0) * 1000)
@@ -121,6 +141,7 @@ def test_fast_path_latency_under_5ms_median(tmp_path):
     )
 
 
+@skip_on_windows_posix_path
 def test_branch_1_bare_evo_drain_exec(tmp_path, monkeypatch):
     """When evo-drain is on PATH, hook execs it (exit 0 from fake)."""
     _scaffold_evo_run(tmp_path)
@@ -136,6 +157,7 @@ def test_branch_1_bare_evo_drain_exec(tmp_path, monkeypatch):
     assert r.stdout.strip() == b"{}"
 
 
+@skip_on_windows_posix_path
 def test_branch_3_no_drain_no_uv_emits_actionable_error(tmp_path):
     """Neither evo-drain nor uv → exit 1 with install hint on stderr."""
     _scaffold_evo_run(tmp_path)
@@ -147,6 +169,7 @@ def test_branch_3_no_drain_no_uv_emits_actionable_error(tmp_path):
     assert r.stdout.strip() == b"{}"  # still emit valid JSON for hook contract
 
 
+@skip_on_windows_posix_path
 def test_session_start_warns_when_drain_missing(tmp_path):
     """SessionStart fires → proactive warning that evo-drain isn't on PATH."""
     _scaffold_evo_run(tmp_path)
@@ -156,6 +179,7 @@ def test_session_start_warns_when_drain_missing(tmp_path):
     assert b"install evo-hq-cli to enable mid-run inject" in r.stderr
 
 
+@skip_on_windows_posix_path
 def test_session_start_emits_cache_stale_warning(tmp_path, monkeypatch):
     """Stage marketplace clone with newer version than 'cache' → warning."""
     # Build a fake Claude Code layout: cache at 0.4.0, marketplace at 0.4.1.
@@ -181,7 +205,7 @@ def test_session_start_emits_cache_stale_warning(tmp_path, monkeypatch):
     _scaffold_evo_run(tmp_path)
     env = {**os.environ, "HOME": str(fake_home), "PATH": "/usr/bin:/bin"}
     r = subprocess.run(
-        [str(fake_hook)], input=PAYLOAD_SESSION_START,
+        [BASH, str(fake_hook)], input=PAYLOAD_SESSION_START,
         cwd=str(tmp_path), env=env, capture_output=True, timeout=10,
     )
     assert b"plugin cache is stale" in r.stderr
@@ -190,6 +214,7 @@ def test_session_start_emits_cache_stale_warning(tmp_path, monkeypatch):
     assert b"evo update --force" in r.stderr
 
 
+@skip_on_windows_posix_path
 def test_session_start_silent_when_drain_present(tmp_path):
     """SessionStart with evo-drain on PATH → no nudge, drain runs."""
     _scaffold_evo_run(tmp_path)
