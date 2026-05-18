@@ -75,14 +75,13 @@ const drainedTexts: string[] = []
 
 function directiveBanner(): string {
   if (drainedTexts.length === 0) return ""
-  // Same banner shape every transport emits — `optimize` and `subagent`
-  // skills document it as the authenticity signal for user directives.
-  return [
-    ``,
-    BANNER_OPEN,
-    drainedTexts.join("\n\n"),
-    BANNER_CLOSE,
-  ].join("\n")
+  // drainedTexts entries are already wrapped with
+  // [EVO DIRECTIVE]...[END EVO DIRECTIVE] by formatDirectiveText()
+  // inside drainSession() (shared with opencode plugin). Don't
+  // double-wrap — produces nested banners that violate the documented
+  // contract in optimize/subagent skills and that stricter models
+  // (opus-4-7) refuse outright.
+  return "\n" + drainedTexts.join("\n\n")
 }
 
 export default {
@@ -172,10 +171,12 @@ export default {
       }
       if (!mutated) tryAppendString(msg, "content")
       if (!mutated && msg.details && typeof msg.details === "object") {
-        tryAppendString(msg.details, "text")
-        tryAppendString(msg.details, "output")
-        tryAppendString(msg.details, "stdout")
-        tryAppendString(msg.details, "content")
+        // Short-circuit: stop at first successful append so we don't
+        // shove the banner into every text-shaped field on the message.
+        tryAppendString(msg.details, "text") ||
+          tryAppendString(msg.details, "output") ||
+          tryAppendString(msg.details, "stdout") ||
+          tryAppendString(msg.details, "content")
       }
       if (!mutated) tryAppendString(msg, "text")
 

@@ -200,7 +200,6 @@ import * as os from "os";
 import * as path2 from "path";
 var DEBUG = process.env.EVO_DEBUG_INJECT === "1";
 var BANNER_OPEN = "[EVO DIRECTIVE]";
-var BANNER_CLOSE = "[END EVO DIRECTIVE]";
 function log(line) {
   if (!DEBUG)
     return;
@@ -231,14 +230,9 @@ var drainedTexts = [];
 function directiveBanner() {
   if (drainedTexts.length === 0)
     return "";
-  return [
-    ``,
-    BANNER_OPEN,
-    drainedTexts.join(`
+  return `
+` + drainedTexts.join(`
 
-`),
-    BANNER_CLOSE
-  ].join(`
 `);
 }
 var native_default = {
@@ -314,10 +308,7 @@ var native_default = {
       if (!mutated)
         tryAppendString(msg, "content");
       if (!mutated && msg.details && typeof msg.details === "object") {
-        tryAppendString(msg.details, "text");
-        tryAppendString(msg.details, "output");
-        tryAppendString(msg.details, "stdout");
-        tryAppendString(msg.details, "content");
+        tryAppendString(msg.details, "text") || tryAppendString(msg.details, "output") || tryAppendString(msg.details, "stdout") || tryAppendString(msg.details, "content");
       }
       if (!mutated)
         tryAppendString(msg, "text");
