@@ -30,7 +30,7 @@
   },
   "markers": ["orch2"],
   "expected": {
-    "text": "[evo direct] third\n[evo direct] fourth",
+    "text": "[EVO DIRECTIVE]\nthird\n[END EVO DIRECTIVE]\n[EVO DIRECTIVE]\nfourth\n[END EVO DIRECTIVE]",
     "newWorkspaceOffset": "01EVENT0000000000000000D",
     "newExpOffset": null,
     "marker_after": false,

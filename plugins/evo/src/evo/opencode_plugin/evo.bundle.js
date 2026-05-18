@@ -1,4 +1,3 @@
-// @bun
 // drain.ts
 import * as fs from "fs";
 import * as path from "path";
@@ -99,8 +98,11 @@ function writeOffset(runDir, sid, opts) {
 function formatDirectiveText(events) {
   const lines = [];
   for (const ev of events) {
-    if (ev.text)
-      lines.push(`[evo direct] ${ev.text}`);
+    if (ev.text) {
+      lines.push("[EVO DIRECTIVE]");
+      lines.push(ev.text);
+      lines.push("[END EVO DIRECTIVE]");
+    }
   }
   return lines.join(`
 `);

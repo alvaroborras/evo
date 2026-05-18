@@ -159,7 +159,11 @@ export function writeOffset(
 export function formatDirectiveText(events: QueueEvent[]): string {
   const lines: string[] = []
   for (const ev of events) {
-    if (ev.text) lines.push(`[evo direct] ${ev.text}`)
+    if (ev.text) {
+      lines.push("[EVO DIRECTIVE]")
+      lines.push(ev.text)
+      lines.push("[END EVO DIRECTIVE]")
+    }
   }
   return lines.join("\n")
 }

@@ -24,7 +24,7 @@
   "offsets": {},
   "markers": ["sub1"],
   "expected": {
-    "text": "[evo direct] subagent focus",
+    "text": "[EVO DIRECTIVE]\nsubagent focus\n[END EVO DIRECTIVE]",
     "newWorkspaceOffset": null,
     "newExpOffset": "01EXP00000000000000000001",
     "marker_after": false,

@@ -475,12 +475,15 @@ class TestFormatDirectiveText(unittest.TestCase):
     def test_single_event(self):
         events = [{"text": "do the thing"}]
         out = format_directive_text(events)
-        assert out == "[evo direct] do the thing"
+        assert out == "[EVO DIRECTIVE]\ndo the thing\n[END EVO DIRECTIVE]"
 
     def test_multiple_events_joined_by_newline(self):
         events = [{"text": "first"}, {"text": "second"}]
         out = format_directive_text(events)
-        assert out == "[evo direct] first\n[evo direct] second"
+        assert out == (
+            "[EVO DIRECTIVE]\nfirst\n[END EVO DIRECTIVE]\n"
+            "[EVO DIRECTIVE]\nsecond\n[END EVO DIRECTIVE]"
+        )
 
     def test_empty_events_returns_empty_string(self):
         assert format_directive_text([]) == ""
@@ -488,12 +491,12 @@ class TestFormatDirectiveText(unittest.TestCase):
     def test_event_with_empty_text_skipped(self):
         events = [{"text": ""}, {"text": "real"}]
         out = format_directive_text(events)
-        assert out == "[evo direct] real"
+        assert out == "[EVO DIRECTIVE]\nreal\n[END EVO DIRECTIVE]"
 
     def test_event_missing_text_key_skipped(self):
         events = [{"id": "abc"}, {"text": "hello"}]
         out = format_directive_text(events)
-        assert out == "[evo direct] hello"
+        assert out == "[EVO DIRECTIVE]\nhello\n[END EVO DIRECTIVE]"
 
 
 class TestEmitForHost(unittest.TestCase):
