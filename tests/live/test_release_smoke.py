@@ -791,12 +791,26 @@ def test_claude_code(sandbox):
     )
 
     prompt = _shell_quote(_read_prompt())
+    # `evo install claude-code` is required (not optional) post-0.4.1: it
+    # fetches the platform-native evo-hook-drain binary from the release's
+    # uploaded assets (or via --from-path in local-source mode). Without
+    # it, hooks fire but the binary is absent → mid-run inject silently
+    # drops. The leading `claude plugin marketplace add` + `plugin install`
+    # are kept as a redundant-but-still-valid manual path that we want to
+    # keep working alongside `evo install`.
+    evo_install_cc_args = (
+        "--from-path /tmp/evo-local-repo"
+        if sandbox.marketplace_source.startswith("/")
+        else ""
+    )
     _drive_smoke(
         sandbox,
         host="claude-code",
         install_steps=[
             f"claude plugin marketplace add {sandbox.marketplace_source} 2>&1 | tail -3",
             "claude plugin install evo@evo-hq-evo 2>&1 | tail -3",
+            f"export PATH=$HOME/.local/bin:$PATH; evo install claude-code "
+            f"{evo_install_cc_args}",
         ],
         drive_cmd=(
             "export PATH=$HOME/.local/bin:$PATH; "
