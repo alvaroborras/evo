@@ -118,6 +118,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v3
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/evo/bin/evo-hook-drain-rs
+      - name: Build evo-hook-drain binary
+        working-directory: plugins/evo/bin/evo-hook-drain-rs
+        run: cargo build --release
+      - name: Stage binary at plugin bin/ path
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp plugins/evo/bin/evo-hook-drain-rs/target/release/evo-hook-drain.exe plugins/evo/bin/
+          else
+            cp plugins/evo/bin/evo-hook-drain-rs/target/release/evo-hook-drain plugins/evo/bin/
+          fi
       - name: Configure git for tests (author + default branch)
         run: |
           git config --global user.email "ci@evo.test"

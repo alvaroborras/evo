@@ -323,12 +323,67 @@ jobs:
           pytest tests/live/test_release_smoke.py -v -s -n 5 \
             --dist=loadgroup --maxfail=0 -ra --tb=short
 
+  build-hook-drain:
+    # Cross-platform native builds of the evo-hook-drain Rust binary.
+    # Five targets: linux x64/arm64, darwin x64/arm64, windows x64. Each
+    # builds on its own native runner (no cross-compile toolchain). The
+    # binaries get attached to the GitHub release in `github-release` and
+    # `evo install <host>` fetches the right one for the user's platform.
+    if: startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && inputs.target == 'all')
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: linux
+            arch: amd64
+            ext: ""
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            ext: ""
+          - runner: macos-13
+            os: darwin
+            arch: amd64
+            ext: ""
+          - runner: macos-14
+            os: darwin
+            arch: arm64
+            ext: ""
+          - runner: windows-latest
+            os: windows
+            arch: amd64
+            ext: ".exe"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/evo/bin/evo-hook-drain-rs
+      - name: Build release binary
+        working-directory: plugins/evo/bin/evo-hook-drain-rs
+        run: cargo build --release
+      - name: Rename for distribution
+        shell: bash
+        run: |
+          src="plugins/evo/bin/evo-hook-drain-rs/target/release/evo-hook-drain${{ matrix.ext }}"
+          dst="evo-hook-drain-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          cp "$src" "$dst"
+          ls -lh "$dst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evo-hook-drain-${{ matrix.os }}-${{ matrix.arch }}
+          path: evo-hook-drain-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+
   github-release:
     # Only run on the unified `v*` tag form (full release of all packages).
     # Skip for per-package tags (py-v*, node-v*, cli-v*) since those aren't
     # the user-facing release surface.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [publish-python, publish-node, publish-cli]
+    needs: [publish-python, publish-node, publish-cli, build-hook-drain]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -373,6 +428,14 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Download evo-hook-drain binaries (all 5 platforms)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: evo-hook-drain-*
+          path: /tmp/hook-drain-bins
+          merge-multiple: true
+      - name: List binaries staged for release
+        run: ls -lh /tmp/hook-drain-bins/
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -383,9 +446,13 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
           # If a release for this tag already exists (manual creation), update its
-          # body in place; otherwise create it.
+          # body in place; otherwise create it. Attach the hook-drain binaries
+          # so `evo install <host>` can fetch them by URL at install time.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file /tmp/release-notes.md
+            gh release upload "$TAG" /tmp/hook-drain-bins/* --clobber
           else
-            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md $PRERELEASE_FLAG
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md \
+              $PRERELEASE_FLAG \
+              /tmp/hook-drain-bins/*
           fi
