@@ -103,42 +103,6 @@ Pass `optimize` parameters as `key=value` after the skill name:
 $evo optimize subagents=10                       # Codex: wider fanout
 ```
 
-You can also drive the skills with plain English instead of the slash form — the host's mention syntax works either way:
-
-```
-Use /evo:optimize on the indexer's pipeline. Optimize for speed while staying memory-efficient.
-
-$evo optimize my JSON parser. Keep reducing latency in the hot path; stop once the stall counter hits 5 rounds with no improvement.
-
-Use /evo:discover on this repo. The eval is npm test; lower seconds is better.
-```
-
-## Driving a run
-
-Once optimize is running, you don't need to wait for it to finish before steering it. Open another terminal in the same workspace and send mid-run instructions:
-
-```bash
-evo direct "Try a single-pass dict approach next — the sort+bisect path has saturated."
-evo direct "Stop spawning subagents that touch the I/O layer; focus on the inner loop."
-```
-
-The text shows up in the running agent's context as user-authoritative before its next reasoning step. Skills are documented to honor it like a new user turn — supersede earlier constraints, propagate verbatim into subagent briefs. Works on any host where the plugin is installed.
-
-Other useful commands while a run is live:
-
-```bash
-evo scratchpad                  # bounded state summary (tree, frontier, awaiting decision, gates, notes)
-evo status                      # one-line: metric, best score, experiment counts
-evo show <exp_id>               # full state of one experiment (attempts, diffs, annotations)
-evo diff <exp_id> [<other>]     # diff vs parent (or between two experiments)
-evo path <exp_id>               # root-to-node chain with scores
-evo traces <exp_id> <task>      # per-task trace detail
-evo discards [--like <text>]    # discarded nodes (optional substring filter on hypothesis)
-evo doctor <host>               # verify the host's install + hook plumbing
-```
-
-The dashboard (printed at `evo init` time, default <http://127.0.0.1:8080>) covers the same data visually.
-
 ## Upgrading
 
 ```bash
