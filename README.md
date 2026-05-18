@@ -117,6 +117,21 @@ upstream cache-invalidation bug in Claude Code
 ([anthropics/claude-code#14061](https://github.com/anthropics/claude-code/issues/14061))
 that leaves stale files even when `/plugin update` reports success.
 
+### Testing a pre-release (alpha)
+
+`uv` and `pip` skip pre-releases by default, so the migration command
+above always lands on the latest stable. To test an alpha, pin both the
+CLI install and the host plugin update:
+
+```bash
+uv tool install --force 'evo-hq-cli==0.4.1a2' && \
+  evo update --version 0.4.1-alpha.2 --force
+```
+
+Replace `0.4.1a2` / `0.4.1-alpha.2` with whichever alpha you want. The
+two version forms differ because PyPI normalises `0.4.1-alpha.2` to
+`0.4.1a2`, while the plugin marketplace tag is `v0.4.1-alpha.2`.
+
 ## How it works
 
 ### Parallel
