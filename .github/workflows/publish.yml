@@ -165,6 +165,52 @@ jobs:
             npm publish
           fi
 
+  publish-node-pi:
+    needs: preflight
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/tags/pi-evo-v') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'node'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Sync bundle + skills from plugins/evo/
+        run: bash plugins/evo/npm/scripts/sync-from-source.sh
+      - name: Verify tag matches package version
+        working-directory: plugins/evo/npm
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION=$(node -p "require('./package.json').version")
+          case "$TAG" in
+            v*)         EXPECTED="v${VERSION}" ;;
+            pi-evo-v*)  EXPECTED="pi-evo-v${VERSION}" ;;
+            *)          EXPECTED="" ;;
+          esac
+          if [ -n "$EXPECTED" ] && [ "$TAG" != "$EXPECTED" ]; then
+            echo "Tag $TAG does not match package.json version $VERSION (expected $EXPECTED)"
+            exit 1
+          fi
+      - name: Publish to npm
+        working-directory: plugins/evo/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # Pre-release semver (e.g. 0.4.2-alpha.2) ships under the
+          # `alpha` dist-tag so stable users running `pi install
+          # npm:@evo-hq/pi-evo` don't silently get the pre-release.
+          VERSION=$(node -p "require('./package.json').version")
+          if echo "$VERSION" | grep -q '-'; then
+            npm publish --tag alpha
+          else
+            npm publish
+          fi
+
   publish-cli:
     needs: preflight
     if: |
