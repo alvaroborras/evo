@@ -1,18 +1,18 @@
+# evo
+
 <p align="center">
-  <img src="assets/banner.png" alt="evo banner" width="100%" />
+  <img src="assets/banner.png" alt="evo — autoresearch orchestrator for your codebase" width="100%" />
 </p>
 
 <div align="center">
 
-# evo
-
-### Autoresearch orchestrator for your codebase
-
-**[Try it](#try-it)** · **[Install](#install)** · **[How it works](#how-it-works)** · **[Dashboard](#dashboard)** · **[Upgrading](#upgrading)**
-
 [![PyPI](https://img.shields.io/pypi/v/evo-hq-cli)](https://pypi.org/project/evo-hq-cli/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Tests](https://github.com/evo-hq/evo/actions/workflows/ci.yml/badge.svg)](https://github.com/evo-hq/evo/actions/workflows/ci.yml)
+
+**Get started with autoresearch on any codebase — two commands.**
+
+**[Try it](#try-it)** · **[Install](#install)** · **[How it works](#how-it-works)** · **[Dashboard](#dashboard)** · **[Upgrading](#upgrading)**
 
 </div>
 
@@ -20,9 +20,9 @@
 
 Runs on Claude Code, Codex, OpenClaw, Hermes, or Opencode. Experiments run locally or on remote sandboxes — Modal, E2B, Daytona, AWS, Azure, SSH.
 
-Point it at a repo. evo runs experiments in parallel — each subagent edits the code in its own workspace and runs your benchmark. The orchestrator keeps wins, discards losses, and explores multiple directions at once instead of one greedy path.
+Point it at a repo. evo runs experiments in **parallel** — each subagent edits the code in its own workspace and runs your benchmark. The orchestrator keeps wins, discards losses, and explores multiple directions at once instead of one greedy path.
 
-**Gates** are pass/fail checks (your tests, or any custom invariant) that protect against unintended changes — an experiment that breaks a gate is discarded even if its score went up. The search can't trade correctness for speed or game the metric.
+evo also sets up **gates** — pass/fail checks (your tests, or any custom invariant) that protect against unintended changes. An experiment that breaks a gate is discarded even if its score went up, so the search can't trade correctness for speed or game the metric.
 
 Runs until you stop it.
 
@@ -68,13 +68,11 @@ uv tool install evo-hq-cli
 # 2. Host CLI (if you don't already have it)
 npm install -g @anthropic-ai/claude-code     # or @openai/codex, openclaw
 
-# 3. Plugin + `evo-hook-drain` native binary
+# 3. Plugin + host hooks
 evo install <host>     # claude-code | codex | hermes | opencode | openclaw
 ```
 
-`evo install <host>` runs the host's marketplace install and fetches `evo-hook-drain`, the binary that delivers `evo direct` directives to in-flight subagents. If you installed the plugin manually (e.g. `claude plugin install evo@evo-hq-evo`), run `evo install claude-code` afterwards to stage the binary.
-
-Verify the install with `evo doctor <host>`.
+`evo install <host>` installs the plugin into the host's marketplace and stages the hooks evo needs to talk to in-flight subagents. Verify with `evo doctor <host>`.
 
 For remote backends, install with the matching provider extra: `uv tool install 'evo-hq-cli[modal]'` (or `[e2b]`, `[daytona]`, `[aws]`, `[azure]`, `[all]`).
 
