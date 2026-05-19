@@ -1,0 +1,41 @@
+{
+  "name": "@evo-hq/pi-evo",
+  "version": "0.4.2-alpha.2",
+  "description": "Evo plugin for pi-coding-agent: optimize/discover/subagent skills + mid-run inject extension.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "evo",
+    "evo-hq",
+    "coding-agent",
+    "optimization"
+  ],
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "dependencies": {
+    "pi-subagents": "*"
+  },
+  "bundledDependencies": ["pi-subagents"],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "pi-agent-core": "*",
+    "pi-coding-agent": "*",
+    "pi-tui": "*",
+    "typebox": "*"
+  },
+  "files": ["extensions", "skills", "README.md", "LICENSE"],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/evo-hq/evo.git",
+    "directory": "plugins/evo/npm"
+  },
+  "homepage": "https://github.com/evo-hq/evo#readme",
+  "bugs": "https://github.com/evo-hq/evo/issues"
+}

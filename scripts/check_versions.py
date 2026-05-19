@@ -27,6 +27,7 @@ SOURCES = [
     ("sdk/python/pyproject.toml", "pyproject.toml (evo-hq-agent)"),
     ("sdk/python/src/evo_agent/__init__.py", "evo_agent/__init__.__version__"),
     ("sdk/node/package.json", "package.json (@evo-hq/evo-agent)"),
+    ("plugins/evo/npm/package.json", "package.json (@evo-hq/pi-evo)"),
 ]
 
 

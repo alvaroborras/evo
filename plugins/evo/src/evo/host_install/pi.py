@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -33,6 +34,19 @@ from pathlib import Path
 
 
 _SKILLS = ("discover", "optimize", "subagent", "infra-setup")
+
+# Pi extensions that register a parallel-subagent tool. Detected via the
+# substring appearing in ``pi list`` output OR in settings.json's
+# extensions[] paths. If none of these is present, `evo install pi`
+# auto-installs ``pi-subagents`` (the highest-traffic option) so the
+# optimize skill's parallel-fanout step works on pi out of the box.
+_KNOWN_SUBAGENT_PROVIDERS = (
+    "pi-subagents",
+    "pi-crew",
+    "taskplane",
+    "pi-collaborating-agents",
+)
+_DEFAULT_SUBAGENT_PROVIDER = "pi-subagents"
 
 # Same shape claude_code._RELEASE_VERSION_RE uses to decide whether to
 # auto-prefix with `v` for the GitHub tag URL. Branches/SHAs pass through.
@@ -161,6 +175,80 @@ def _fetch_skills_from_github(version: str | None) -> Path | None:
     return skills
 
 
+def _find_subagent_provider() -> str | None:
+    """Detect an installed pi extension that registers a parallel-subagent
+    tool. Returns the matched provider name or None.
+
+    Checks two sources:
+      1. ``pi list`` output (the canonical "what's installed" view).
+      2. settings.json#extensions[] paths (fallback when `pi` isn't on
+         PATH yet or `pi list` fails).
+    """
+    # Source 1: pi list.
+    pi_bin = shutil.which("pi")
+    if pi_bin is not None:
+        try:
+            result = subprocess.run(
+                [pi_bin, "list"],
+                capture_output=True, text=True, timeout=15, check=False,
+            )
+            haystack = (result.stdout or "") + (result.stderr or "")
+            for name in _KNOWN_SUBAGENT_PROVIDERS:
+                if name in haystack:
+                    return name
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Source 2: settings.json#extensions[] paths.
+    settings = _pi_settings_file()
+    if settings.exists():
+        try:
+            data = json.loads(settings.read_text())
+            paths_blob = " ".join(str(p) for p in data.get("extensions", []) or [])
+            for name in _KNOWN_SUBAGENT_PROVIDERS:
+                if name in paths_blob:
+                    return name
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _ensure_subagent_provider() -> None:
+    """If no parallel-subagent extension is installed, install
+    ``pi-subagents`` (the default). Idempotent — no-ops when any known
+    provider (pi-subagents, pi-crew, taskplane, etc.) is already present.
+
+    The optimize skill needs a subagent tool to fan out round experiments
+    in parallel. Pi's default toolkit doesn't include one. We auto-install
+    so users don't have to do a second command.
+    """
+    existing = _find_subagent_provider()
+    if existing:
+        print(f"✓ subagent provider already installed: {existing}")
+        return
+
+    pi_bin = shutil.which("pi")
+    if pi_bin is None:
+        print(
+            "NOTE: `pi` binary not on PATH; skipping pi-subagents install.\n"
+            "  Install pi first (npm install -g @earendil-works/pi-coding-agent),\n"
+            "  then re-run `evo install pi` to get the parallel-subagent tool.",
+            file=sys.stderr,
+        )
+        return
+
+    print(f"installing {_DEFAULT_SUBAGENT_PROVIDER} (registers the `subagent` "
+          f"tool for parallel rounds)...")
+    cmd = [pi_bin, "install", f"npm:{_DEFAULT_SUBAGENT_PROVIDER}"]
+    print(f"$ {' '.join(cmd)}")
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        print(f"WARNING: `pi install npm:{_DEFAULT_SUBAGENT_PROVIDER}` failed "
+              f"(rc={rc}); optimize will degrade to sequential execution.\n"
+              f"  Retry manually: pi install npm:{_DEFAULT_SUBAGENT_PROVIDER}",
+              file=sys.stderr)
+
+
 def _update_settings_extensions(settings: Path, target: str) -> bool:
     """Idempotent register: add `target` to settings.json#extensions[] if
     not already present. Returns True if file was modified.
@@ -249,6 +337,9 @@ def install(args: argparse.Namespace) -> int:
         getattr(args, "version", None),
     )
 
+    print("\nEnsuring a parallel-subagent provider is installed ...")
+    _ensure_subagent_provider()
+
     print("\nRestart any running pi session to load the extension and skills.")
     return 0
 
@@ -326,4 +417,12 @@ def doctor(args: argparse.Namespace) -> int:
 
     if shutil.which("pi") is None:
         print("? `pi` binary not on PATH (run `npm install -g @earendil-works/pi-coding-agent`)")
+
+    provider = _find_subagent_provider()
+    if provider:
+        print(f"✓ subagent provider present: {provider}")
+    else:
+        print("✗ no parallel-subagent provider installed")
+        print(f"  Run: pi install npm:{_DEFAULT_SUBAGENT_PROVIDER}")
+        rc = 1
     return rc
