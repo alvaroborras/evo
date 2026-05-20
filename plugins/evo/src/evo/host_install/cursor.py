@@ -6,11 +6,13 @@
 
   2. Mid-run inject (``evo direct``) via Cursor-native hooks. We write
      ``~/.cursor/hooks.json`` entries that run ``evo-drain --host cursor`` on
-     ``sessionStart`` and ``postToolUse`` — the two events whose output
-     Cursor honors as ``additional_context``. Unlike Claude Code / Codex,
-     Cursor needs no ``evo-hook-drain`` binary in front: its hooks.json
-     command talks to ``evo-drain`` directly, which resolves the run dir and
-     session from the hook stdin payload.
+     ``sessionStart`` (registers the session) and ``stop`` (delivers the
+     directive as a ``followup_message`` that the IDE auto-submits as a
+     visible message). The IDE silently drops ``additional_context``, so
+     postToolUse/sessionStart context injection is not used. Unlike Claude
+     Code / Codex, Cursor needs no ``evo-hook-drain`` binary in front: its
+     hooks.json command talks to ``evo-drain`` directly, which resolves the
+     run dir and session from the hook stdin payload.
 
 Why not reuse the Claude Code compat layer (`.claude/settings.json`)?
 Cursor can load Claude Code hooks, but ``UserPromptSubmit`` maps to
@@ -35,9 +37,15 @@ from pathlib import Path
 # auto-prefix with `v` for the GitHub tag URL.
 _RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([.\-+a-zA-Z0-9]*)$")
 
-# Events whose stdout Cursor honors as injected context. beforeSubmitPrompt
-# is deliberately excluded — it's informational-only.
-_INJECT_EVENTS = ("sessionStart", "postToolUse")
+# Events evo wires in the IDE:
+#   - sessionStart: registers the session (no delivery — the IDE drops
+#     additional_context, so there's no point draining here).
+#   - stop: fires at the end of each agent turn and returns followup_message,
+#     which the IDE auto-submits as a visible new message. This is the only
+#     channel that actually reaches the chat.
+# postToolUse/beforeSubmitPrompt are not wired: their only output
+# (additional_context) is silently dropped by Cursor's IDE agent.
+_INJECT_EVENTS = ("sessionStart", "stop")
 
 
 def _cursor_base() -> Path:
@@ -131,7 +139,7 @@ def _write_inject_hooks() -> Path:
         arr.append({"command": command})
 
     hooks_file.write_text(json.dumps(data, indent=2) + "\n")
-    print(f"wired inject hooks in {hooks_file} (sessionStart, postToolUse -> {command})")
+    print(f"wired inject hooks in {hooks_file} ({', '.join(_INJECT_EVENTS)} -> {command})")
     return hooks_file
 
 
@@ -176,7 +184,9 @@ def uninstall(args: argparse.Namespace) -> int:
             data = None
         if isinstance(data, dict) and isinstance(data.get("hooks"), dict):
             removed = False
-            for event in _INJECT_EVENTS:
+            # Scan ALL events, not just current _INJECT_EVENTS, so evo entries
+            # left under a previously-wired event (e.g. postToolUse) are cleaned.
+            for event in list(data["hooks"].keys()):
                 arr = data["hooks"].get(event)
                 if isinstance(arr, list):
                     kept = [e for e in arr if not _is_evo_entry(e)]

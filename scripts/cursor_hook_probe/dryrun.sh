@@ -2,17 +2,19 @@
 # Hermetic dry run for the Cursor host integration. No network, no
 # cursor-agent binary. Validates everything on evo's side of the contract:
 #
-#   1. `evo install cursor` writes ~/.cursor/hooks.json (sessionStart +
-#      postToolUse -> evo-drain --host cursor) without clobbering existing
-#      hooks, and `evo doctor cursor` agrees.
-#   2. The drain round-trip: a queued directive, fed a simulated Cursor
-#      postToolUse stdin payload, comes back out of `evo-drain --host cursor`
-#      as {"additional_context": "...[EVO DIRECTIVE]..."}.
-#   3. sessionStart self-registers + drains; empty queue yields {}.
+#   1. `evo install cursor` writes ~/.cursor/hooks.json (sessionStart + stop
+#      -> evo-drain --host cursor) without clobbering existing hooks, and
+#      `evo doctor cursor` agrees.
+#   2. The drain round-trip:
+#        - sessionStart registers the session and emits {} (no delivery — the
+#          IDE drops additional_context, so we don't inject there).
+#        - a queued + marked directive, fed a simulated `stop` payload, comes
+#          back as {"followup_message": "...[EVO DIRECTIVE]..."} (the channel
+#          the IDE auto-submits as a visible message).
+#        - empty queue yields {}.
 #
-# The only thing this CANNOT check is whether Cursor itself honors the
-# returned additional_context — that's what probe.sh (needs cursor-agent) is
-# for.
+# The only thing this CANNOT check is whether Cursor itself auto-submits the
+# returned followup_message — that's what probe.sh (needs cursor-agent) is for.
 #
 # Usage:  bash scripts/cursor_hook_probe/dryrun.sh
 
@@ -47,9 +49,9 @@ PY
 HOOKS="$CURSOR_HOME/hooks.json"
 grep -q '"afterFileEdit"' "$HOOKS" || die "clobbered the user's existing hook"
 pass "preserved user's afterFileEdit hook"
-grep -q '"sessionStart"' "$HOOKS" && grep -q '"postToolUse"' "$HOOKS" || die "did not wire inject events"
+grep -q '"sessionStart"' "$HOOKS" && grep -q '"stop"' "$HOOKS" || die "did not wire inject events"
 grep -q 'evo-drain --host cursor' "$HOOKS" || die "drain command not written"
-pass "wired sessionStart + postToolUse -> evo-drain --host cursor"
+pass "wired sessionStart + stop -> evo-drain --host cursor"
 
 # Idempotence: writing twice must not duplicate evo entries.
 $PY - <<PY
@@ -59,15 +61,13 @@ PY
 COUNT=$($PY - <<PY
 import json,os
 d=json.load(open(os.path.join(os.environ["CURSOR_HOME"],"hooks.json")))
-n=sum("evo-drain" in str(e.get("command","")) for ev in ("sessionStart","postToolUse") for e in d["hooks"].get(ev,[]))
+n=sum("evo-drain" in str(e.get("command","")) for ev in ("sessionStart","stop") for e in d["hooks"].get(ev,[]))
 print(n)
 PY
 )
 [ "$COUNT" = "2" ] || die "expected 2 evo entries after re-run, got $COUNT (not idempotent)"
 pass "idempotent re-run (2 evo entries, no dupes)"
 
-# doctor: evo-drain isn't on PATH in this shell, so expect rc=1 but the
-# hooks-wired line should be a ✓. Capture and assert on the hooks line.
 DOC_OUT="$($EVO doctor cursor 2>&1 || true)"
 echo "$DOC_OUT" | grep -q "inject hooks wired" || die "doctor did not confirm wired hooks"
 pass "doctor confirms inject hooks wired"
@@ -79,52 +79,45 @@ if grep -q 'evo-drain' "$HOOKS"; then die "uninstall left evo entries behind"; f
 pass "uninstall removed evo entries, preserved user's afterFileEdit"
 
 # ---------------------------------------------------------------------------
-echo "[2] drain round-trip with a simulated Cursor postToolUse payload"
+echo "[2] drain round-trip: sessionStart registers, stop delivers"
 WORK="$TMP/repo"
 mkdir -p "$WORK"; cd "$WORK"
 git init -q; git config user.email d@e.x; git config user.name d
 printf 'x=1\n' > main.py; git add -A; git commit -q -m init
 $EVO init --target main.py --benchmark "true" --metric max --host cursor --port 0 >/dev/null
 
-TOKEN="DRYRUN_TOK_$RANDOM"
-$EVO direct "PROBE follow this: emit $TOKEN" >/dev/null 2>&1 || \
-  $PY - <<PY
-from pathlib import Path
-from evo.inject import queue
-queue.append_workspace_event(Path("$WORK"), "PROBE follow this: emit $TOKEN")
-PY
-
 SID="conv-$RANDOM"
-# sessionStart: self-registers the session and drains the workspace queue.
+# sessionStart: registers the session, seeds the offset, emits {} (no consume).
 SS_OUT=$(printf '{"hook_event_name":"sessionStart","conversation_id":"%s","workspace_roots":["%s"]}' "$SID" "$WORK" | $DRAIN --host cursor)
 echo "    sessionStart -> $SS_OUT"
-echo "$SS_OUT" | grep -q '"additional_context"' || die "sessionStart did not emit additional_context"
-echo "$SS_OUT" | grep -q "$TOKEN" || die "sessionStart additional_context missing the token"
-echo "$SS_OUT" | grep -q 'EVO DIRECTIVE' || die "sessionStart missing the authenticity banner"
-pass "sessionStart emitted additional_context with banner + token"
+[ "$SS_OUT" = "{}" ] || die "sessionStart should emit {} (register-only), got $SS_OUT"
+ls "$WORK"/.evo/run_*/inject/sessions/"$SID".json >/dev/null 2>&1 || die "sessionStart did not register the session"
+pass "sessionStart registered the session and emitted {} (no consume)"
 
-# A second directive + marker -> postToolUse delivers it.
-TOKEN2="DRYRUN_TOK2_$RANDOM"
+# A directive queued AFTER session start, with the session marked.
+TOKEN="DRYRUN_TOK_$RANDOM"
 $PY - <<PY
 from pathlib import Path
 from evo.inject import queue, marker
-root=Path("$WORK")
-queue.append_workspace_event(root, "second: emit $TOKEN2")
+root = Path("$WORK")
+queue.append_workspace_event(root, "follow this: emit $TOKEN")
 marker.touch(root, "$SID")
 PY
-PT_OUT=$(printf '{"hook_event_name":"postToolUse","conversation_id":"%s","workspace_roots":["%s"]}' "$SID" "$WORK" | $DRAIN --host cursor)
-echo "    postToolUse -> $PT_OUT"
-echo "$PT_OUT" | grep -q '"additional_context"' || die "postToolUse did not emit additional_context"
-echo "$PT_OUT" | grep -q "$TOKEN2" || die "postToolUse missing second token"
-pass "postToolUse delivered queued directive as additional_context"
+# stop: delivers the directive as followup_message (the IDE auto-submits it).
+ST_OUT=$(printf '{"hook_event_name":"stop","conversation_id":"%s","workspace_roots":["%s"]}' "$SID" "$WORK" | $DRAIN --host cursor)
+echo "    stop -> $ST_OUT"
+echo "$ST_OUT" | grep -q '"followup_message"' || die "stop did not emit followup_message"
+echo "$ST_OUT" | grep -q "$TOKEN" || die "stop followup_message missing the token"
+echo "$ST_OUT" | grep -q 'EVO DIRECTIVE' || die "stop missing the authenticity banner"
+pass "stop delivered the directive as followup_message with banner + token"
 
-# Empty queue (offset now caught up, no marker) -> {}.
-EMPTY_OUT=$(printf '{"hook_event_name":"postToolUse","conversation_id":"%s","workspace_roots":["%s"]}' "$SID" "$WORK" | $DRAIN --host cursor)
-echo "    postToolUse (drained) -> $EMPTY_OUT"
+# Empty queue (offset caught up, marker cleared) -> {}.
+EMPTY_OUT=$(printf '{"hook_event_name":"stop","conversation_id":"%s","workspace_roots":["%s"]}' "$SID" "$WORK" | $DRAIN --host cursor)
+echo "    stop (drained) -> $EMPTY_OUT"
 [ "$EMPTY_OUT" = "{}" ] || die "expected {} when nothing queued, got $EMPTY_OUT"
-pass "empty queue yields {} (no spurious injection)"
+pass "empty queue yields {} (no spurious followup / no loop)"
 
 echo
 echo "DRY RUN PASSED — evo-side Cursor inject contract verified."
-echo "Remaining unknown (needs cursor-agent): does Cursor splice the returned"
-echo "additional_context into the agent turn / fire hooks headless. Run probe.sh."
+echo "Remaining unknown (needs cursor-agent / IDE): does Cursor auto-submit the"
+echo "returned followup_message. Reproduce in the IDE with the debug log on."

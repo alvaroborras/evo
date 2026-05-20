@@ -63,9 +63,10 @@ def _drain_debug(**fields) -> None:
 HOST_HOOK_EVENT_NAMES = {
     "claude-code": ("PreToolUse", "UserPromptSubmit", "SessionStart", "PostToolUse"),
     "codex": ("PreToolUse", "UserPromptSubmit", "SessionStart", "PostToolUse"),
-    # Cursor injects via additional_context, which only sessionStart and
-    # postToolUse honor (beforeSubmitPrompt is informational-only).
-    "cursor": ("sessionStart", "postToolUse"),
+    # Cursor: sessionStart only registers; the IDE drops additional_context,
+    # so directives are delivered on stop via followup_message (auto-submitted
+    # as a visible message).
+    "cursor": ("sessionStart", "stop"),
 }
 
 
@@ -141,14 +142,21 @@ def _self_contained_gate(
     `evo-drain` (no `evo-hook-drain` binary in front). Returns True when the
     caller should proceed to drain.
 
-    On a session-start event: register the session if new, then always
-    drain (catches directives queued before the session existed). Otherwise
-    require both a registered session and a marker file.
+    On a session-start event: register the session and seed its offset to the
+    current queue tail, then return False — DON'T drain. On Cursor the only
+    output sessionStart can return (additional_context) is silently dropped by
+    the IDE, so draining here would just consume directives (advance the
+    offset, clear the marker) before the stop hook could deliver them. Seeding
+    the offset also avoids replaying directives queued before this session.
+
+    For other events (e.g. stop): require both a registered session and a
+    marker file, then drain.
     """
     if hook_event in _SESSION_START_EVENTS:
         if not session_file(root, session_id).exists():
             register_session(root, session_id, host)
-        return True
+            queue.init_offset_to_latest(root, session_id)
+        return False
     if not session_file(root, session_id).exists():
         return False
     return marker.exists(root, session_id)
