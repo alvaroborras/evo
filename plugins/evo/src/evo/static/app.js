@@ -8,6 +8,11 @@ const state = {
   frontier: null,        // backend-authoritative {strategy, picks, all_ids}
   frontierMeta: null,
   selectedNode: null,
+  // Detail-view presentation: 'side' (right-rail peek) or 'center'
+  // (centered modal over a backdrop), Notion-style. Persisted across loads.
+  detailMode: (() => { try { return localStorage.getItem('evo.detailMode') || 'side'; } catch (_) { return 'side'; } })(),
+  // Diff layout: 'split' (side-by-side, GitHub-style) or 'unified'. Persisted.
+  diffView: (() => { try { return localStorage.getItem('evo.diffView') || 'split'; } catch (_) { return 'split'; } })(),
   sidebarTab: 'summary',
   expandedTasks: new Set(),
   refreshTimer: null,
@@ -187,6 +192,25 @@ function scoreDelta(node) {
   const d = node.score - parent.score;
   const sign = d >= 0 ? '+' : '';
   return sign + d.toFixed(2);
+}
+
+// Color for a score-delta string from scoreDelta(), honoring metric
+// direction. For a 'max' metric an increase (+) is the improvement (green);
+// for 'min' (less is better) a decrease (-) is. No change / no parent is
+// neutral.
+function deltaColorFor(delta) {
+  if (!delta || delta === '+0.00' || delta === '-0.00') return 'var(--text-4)';
+  const isMax = (state.stats?.metric || 'max') === 'max';
+  const improved = delta.startsWith('+') ? isMax : !isMax;
+  return improved ? 'var(--green)' : 'var(--red)';
+}
+
+// Improvement class ('up'/'down'/'neutral') for a delta string — same
+// metric-direction logic as deltaColorFor. 'up' (green) means improved.
+function deltaClassFor(delta) {
+  if (!delta || delta === '+0.00' || delta === '-0.00') return 'neutral';
+  const isMax = (state.stats?.metric || 'max') === 'max';
+  return (delta.startsWith('+') ? isMax : !isMax) ? 'up' : 'down';
 }
 
 function getExperiments() {
@@ -1266,8 +1290,7 @@ function renderTimeline(opts) {
       barInner = `<span class="exp-status pruned"></span><span class="exp-id">root</span><span class="exp-hyp">baseline</span>`;
     } else {
       const delta = scoreDelta(r.node);
-      const deltaColor = delta.startsWith('+') && delta !== '+0.00' ? 'var(--green)'
-        : delta.startsWith('-') ? 'var(--red)' : 'var(--text-4)';
+      const deltaColor = deltaColorFor(delta);
       const hyp = r.node.hypothesis || (r.node.status === 'failed' ? (r.node.error || 'failed') : '(no hypothesis)');
       const scoreText = r.node.score != null ? r.node.score.toFixed(2) : (r.node.status === 'failed' ? 'err' : '—');
       const dotCls = r.node.status || 'pending';
@@ -1756,8 +1779,7 @@ function renderChildrenSection(node) {
                     : c.status === 'failed' ? 'err'
                     : c.status === 'active' ? 'run' : '—';
     const delta = scoreDelta(c);
-    const deltaColor = delta.startsWith('+') && delta !== '+0.00' ? 'var(--green)'
-                     : delta.startsWith('-') ? 'var(--red)' : 'var(--text-4)';
+    const deltaColor = deltaColorFor(delta);
     const hyp = c.hypothesis || (c.status === 'failed' ? (c.error || 'failed') : '');
     return `<div class="drawer-child" onclick="openDrawer('${esc(c.id)}')" title="${esc(c.hypothesis || c.id)}">
       <span class="drawer-child-dot ${dot}"></span>
@@ -1776,6 +1798,231 @@ function renderChildrenSection(node) {
 // ─── Sidebar (detail panel) ──────────────────────────────
 // opts.fromHistory: skip pushing to drawerHistory (the back/forward
 // buttons already moved the index themselves).
+// ─── Diff rendering (GitHub-style: per-file, split or unified) ───────────
+
+function setDiffView(mode) {
+  state.diffView = mode === 'unified' ? 'unified' : 'split';
+  try { localStorage.setItem('evo.diffView', state.diffView); } catch (_) { /* ignore */ }
+  if (state.selectedNode) openDrawer(state.selectedNode, { fromHistory: true });
+}
+
+// File extension → highlight.js language id. Unknown extensions skip
+// highlighting (rendered as plain escaped text).
+const EXT_LANG = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
+  cs: 'csharp', php: 'php', swift: 'swift', kt: 'kotlin', scala: 'scala',
+  sh: 'bash', bash: 'bash', zsh: 'bash',
+  html: 'xml', htm: 'xml', xml: 'xml', vue: 'xml', svg: 'xml',
+  css: 'css', scss: 'scss', less: 'less',
+  json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini',
+  md: 'markdown', sql: 'sql', r: 'r', lua: 'lua', pl: 'perl',
+  // Loaded from highlight-langs-extra.min.js:
+  dockerfile: 'dockerfile', dart: 'dart', ex: 'elixir', exs: 'elixir',
+  erl: 'erlang', hrl: 'erlang', hs: 'haskell',
+  clj: 'clojure', cljs: 'clojure', cljc: 'clojure', edn: 'clojure',
+  jl: 'julia', ps1: 'powershell', psm1: 'powershell',
+  groovy: 'groovy', gradle: 'groovy', cmake: 'cmake', proto: 'protobuf',
+  nim: 'nim', ml: 'ocaml', mli: 'ocaml', fs: 'fsharp', fsx: 'fsharp', fsi: 'fsharp',
+  // Not vendored — fetched on demand via ensureLanguage() the first time a
+  // file of this type appears (graceful no-op if the grammar isn't published).
+  d: 'd', cr: 'crystal', nix: 'nix', vala: 'vala', tcl: 'tcl',
+  f90: 'fortran', f95: 'fortran', f03: 'fortran', for: 'fortran',
+  pas: 'delphi', dpr: 'delphi', vhd: 'vhdl', vhdl: 'vhdl', sv: 'verilog', svh: 'verilog',
+  scm: 'scheme', ss: 'scheme', lisp: 'lisp', cl: 'lisp', el: 'lisp',
+  adb: 'ada', ads: 'ada', tex: 'latex', sty: 'latex',
+  awk: 'awk', vim: 'vim', coffee: 'coffeescript', styl: 'stylus',
+  pug: 'pug', jade: 'pug', hbs: 'handlebars', twig: 'twig',
+  properties: 'properties', pgsql: 'pgsql', asm: 'x86asm',
+  nginx: 'nginx', prolog: 'prolog', hx: 'haxe', elm: 'elm', purs: 'purescript',
+};
+
+// Some languages key off the filename, not an extension.
+const NAME_LANG = {
+  dockerfile: 'dockerfile', 'cmakelists.txt': 'cmake',
+};
+
+function langForPath(path) {
+  if (!path) return null;
+  const base = path.split('/').pop();
+  const lower = base.toLowerCase();
+  if (NAME_LANG[lower]) return NAME_LANG[lower];
+  const ext = base.includes('.') ? base.split('.').pop().toLowerCase() : '';
+  return EXT_LANG[ext] || null;
+}
+
+// Highlight one line of code, returning HTML. Falls back to escaped plain
+// text when highlight.js is unavailable or the language is unknown.
+// (Per-line highlighting — multi-line tokens like block comments may render
+// imperfectly, same trade-off most diff viewers make.)
+function highlightCode(code, lang) {
+  if (!code) return '';
+  if (window.hljs && lang && window.hljs.getLanguage(lang)) {
+    try { return window.hljs.highlight(code, { language: lang, ignoreIllegals: true }).value; }
+    catch (_) { /* fall through to plain */ }
+  }
+  return esc(code);
+}
+
+// Grammars not in the vendored bundles are fetched on demand from the
+// highlight.js CDN (pinned to the core's version). Common languages stay
+// offline; only the long tail needs the network, and a failed/blocked fetch
+// degrades to plain text. State: 'loading' | 'done' | 'failed'.
+const HLJS_VERSION = '11.9.0';
+const HLJS_LANG_BASE = `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/${HLJS_VERSION}/languages/`;
+const _grammarState = {};
+
+function ensureLanguage(lang, onReady) {
+  if (!window.hljs || !lang || window.hljs.getLanguage(lang)) return;
+  if (_grammarState[lang]) return; // loading / done / failed — don't refetch
+  _grammarState[lang] = 'loading';
+  const s = document.createElement('script');
+  s.src = HLJS_LANG_BASE + lang + '.min.js';
+  s.async = true;
+  s.onload = () => {
+    _grammarState[lang] = window.hljs.getLanguage(lang) ? 'done' : 'failed';
+    if (_grammarState[lang] === 'done' && onReady) onReady();
+  };
+  s.onerror = () => { _grammarState[lang] = 'failed'; };
+  document.head.appendChild(s);
+}
+
+// Coalesce re-renders when several grammars finish loading at once.
+let _diffRerenderTimer = null;
+function scheduleDiffRerender() {
+  if (state.sidebarTab !== 'diff' || !state.selectedNode) return;
+  clearTimeout(_diffRerenderTimer);
+  _diffRerenderTimer = setTimeout(() => {
+    if (state.sidebarTab === 'diff' && state.selectedNode) {
+      openDrawer(state.selectedNode, { fromHistory: true });
+    }
+  }, 80);
+}
+
+// Parse a unified git diff into per-file structures.
+function parseUnifiedDiff(text) {
+  const files = [];
+  let file = null, hunk = null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('diff --git')) {
+      const m = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+      file = { path: m ? m[2] : '', oldPath: m ? m[1] : '', newPath: m ? m[2] : '', hunks: [], adds: 0, dels: 0 };
+      files.push(file);
+      hunk = null;
+      continue;
+    }
+    if (!file) continue;
+    if (line.startsWith('--- ')) { file.oldPath = line.slice(4).replace(/^a\//, ''); continue; }
+    if (line.startsWith('+++ ')) {
+      const p = line.slice(4).replace(/^b\//, '');
+      file.newPath = p;
+      if (p && p !== '/dev/null') file.path = p;
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      hunk = { header: line, oldNo: m ? +m[1] : 0, newNo: m ? +m[2] : 0, lines: [] };
+      file.hunks.push(hunk);
+      continue;
+    }
+    if (hunk) {
+      if (line.startsWith('+')) file.adds++;
+      else if (line.startsWith('-')) file.dels++;
+      hunk.lines.push(line);
+    }
+  }
+  return files;
+}
+
+// Pair deletions with additions into side-by-side rows, tracking line numbers.
+function hunkSplitRows(hunk) {
+  const rows = [];
+  let oldNo = hunk.oldNo, newNo = hunk.newNo;
+  const ls = hunk.lines;
+  let i = 0;
+  while (i < ls.length) {
+    const tag = ls[i][0];
+    if (tag === '\\') { i++; continue; } // "\ No newline at end of file"
+    if (tag === '+' || tag === '-') {
+      const dels = [], adds = [];
+      while (i < ls.length && ls[i][0] === '-') { dels.push(ls[i].slice(1)); i++; }
+      while (i < ls.length && ls[i][0] === '+') { adds.push(ls[i].slice(1)); i++; }
+      const n = Math.max(dels.length, adds.length);
+      for (let k = 0; k < n; k++) {
+        const hasL = k < dels.length, hasR = k < adds.length;
+        rows.push({
+          leftNo: hasL ? oldNo++ : null, left: hasL ? dels[k] : '', leftType: hasL ? 'del' : 'empty',
+          rightNo: hasR ? newNo++ : null, right: hasR ? adds[k] : '', rightType: hasR ? 'add' : 'empty',
+        });
+      }
+    } else {
+      const txt = ls[i].slice(1);
+      rows.push({ leftNo: oldNo++, left: txt, leftType: 'ctx', rightNo: newNo++, right: txt, rightType: 'ctx' });
+      i++;
+    }
+  }
+  return rows;
+}
+
+function hunkUnifiedRows(hunk) {
+  const rows = [];
+  let oldNo = hunk.oldNo, newNo = hunk.newNo;
+  for (const l of hunk.lines) {
+    const tag = l[0], code = l.slice(1);
+    if (tag === '\\') continue;
+    if (tag === '+') rows.push({ type: 'add', sign: '+', oldNo: '', newNo: newNo++, code });
+    else if (tag === '-') rows.push({ type: 'del', sign: '-', oldNo: oldNo++, newNo: '', code });
+    else rows.push({ type: 'ctx', sign: ' ', oldNo: oldNo++, newNo: newNo++, code });
+  }
+  return rows;
+}
+
+function renderDiffFiles(text, mode) {
+  const files = parseUnifiedDiff(text);
+  // Not a recognizable git diff — fall back to the old single-block view.
+  if (!files.length) {
+    const raw = text.split('\n').map((line) => {
+      if (line.startsWith('@@')) return `<span class="diff-hunk">${esc(line)}</span>`;
+      if (line.startsWith('+')) return `<span class="diff-add">${esc(line)}</span>`;
+      if (line.startsWith('-')) return `<span class="diff-del">${esc(line)}</span>`;
+      return `<span class="diff-ctx">${esc(line)}</span>`;
+    }).join('');
+    return `<div class="diff-block">${raw}</div>`;
+  }
+  return files.map((f) => {
+    const lang = langForPath(f.path);
+    // Lazy-load the grammar if it's mapped but not yet registered; re-render
+    // the diff once it arrives so highlighting applies.
+    if (lang && window.hljs && !window.hljs.getLanguage(lang)) {
+      ensureLanguage(lang, scheduleDiffRerender);
+    }
+    const stat = `<span class="diff-stat"><span class="diff-stat-add">+${f.adds}</span> <span class="diff-stat-del">−${f.dels}</span></span>`;
+    const body = f.hunks.map((h) => {
+      if (mode === 'split') {
+        const rows = hunkSplitRows(h).map((r) => `<tr>
+            <td class="diff-gutter">${r.leftNo ?? ''}</td>
+            <td class="diff-cell ${r.leftType}">${highlightCode(r.left, lang)}</td>
+            <td class="diff-gutter diff-gutter-r">${r.rightNo ?? ''}</td>
+            <td class="diff-cell ${r.rightType}">${highlightCode(r.right, lang)}</td>
+          </tr>`).join('');
+        return `<div class="diff-hunk-head">${esc(h.header)}</div><table class="diff-table split"><tbody>${rows}</tbody></table>`;
+      }
+      const rows = hunkUnifiedRows(h).map((r) => `<tr>
+          <td class="diff-gutter">${r.oldNo}</td>
+          <td class="diff-gutter">${r.newNo}</td>
+          <td class="diff-cell ${r.type}"><span class="diff-sign">${r.sign}</span>${highlightCode(r.code, lang)}</td>
+        </tr>`).join('');
+      return `<div class="diff-hunk-head">${esc(h.header)}</div><table class="diff-table unified"><tbody>${rows}</tbody></table>`;
+    }).join('');
+    return `<div class="diff-file">
+      <div class="diff-file-head"><span class="diff-file-name">${esc(f.path || f.newPath || f.oldPath)}</span>${stat}</div>
+      <div class="diff-file-body">${body}</div>
+    </div>`;
+  }).join('');
+}
+
 async function openDrawer(expId, opts) {
   opts = opts || {};
   const previousNode = state.selectedNode;
@@ -1793,6 +2040,13 @@ async function openDrawer(expId, opts) {
   const content = document.getElementById('sidebar-content');
   if (!sidebar || !content) return;
   sidebar.classList.remove('hidden');
+  // Restore a previously dragged side-panel width (ignored in center mode,
+  // where .peek-center fixes the width).
+  try {
+    const savedW = localStorage.getItem('evo.sidebarWidth');
+    if (savedW) sidebar.style.setProperty('--evo-sidebar-w', savedW);
+  } catch (_) { /* ignore */ }
+  applyDetailMode();
   // Reflect selection in scatter + timeline only on a real selection change.
   // Tab switches inside the drawer re-enter openDrawer with the same id —
   // re-rendering the canvas then would reset scroll/zoom for no reason.
@@ -1813,13 +2067,14 @@ async function openDrawer(expId, opts) {
   const ws = state.workspace || {};
 
   const delta = scoreDelta(node);
-  const deltaColor = delta.startsWith('+') && delta !== '+0.00' ? 'var(--green)' :
-                     delta.startsWith('-') ? 'var(--red)' : 'var(--text-4)';
+  const deltaColor = deltaColorFor(delta);
   const statusColor = STATUS_COLORS[node.status] || '#52525b';
   const hasChildren = (node.children || []).length > 0;
   const activeTab = ['summary', 'diff', 'tasks'].includes(state.sidebarTab)
     ? state.sidebarTab
     : 'summary';
+  // Drives the diff-tab fill layout in CSS (.sidebar[data-tab="diff"]).
+  sidebar.dataset.tab = activeTab;
   const isPrunable = node.status === 'committed' || node.status === 'evaluated';
   const canBack = state.drawerHistoryIndex > 0;
   const canForward = state.drawerHistoryIndex < state.drawerHistory.length - 1;
@@ -1838,6 +2093,7 @@ async function openDrawer(expId, opts) {
       ${node.id !== 'root' ? `<button class="sidebar-spawn-btn" onclick="spawnFromNode('${esc(node.id)}')" title="Queue an evo direct directive asking the orchestrator to branch a new experiment from this node.">+ spawn</button>` : ''}
       ${isPrunable ? `<button class="sidebar-prune-btn" onclick="pruneNode('${esc(node.id)}')" title="Remove this leaf from the frontier so the planner stops branching from it. Preserves the commit.">prune</button>` : ''}
       <div class="spacer"></div>
+      <button class="drawer-peek-toggle" onclick="toggleDetailMode(event)" title="Switch between side panel and centered view">${peekToggleSvg(state.detailMode)}</button>
       <span class="drawer-close" onclick="closeSidebar()" title="Close (Esc)">&times;</span>
     </div>
     <div class="drawer-tabs" role="tablist" aria-label="Experiment details">
@@ -1849,9 +2105,7 @@ async function openDrawer(expId, opts) {
   if (activeTab === 'summary') {
     // Status pill lives in the drawer HEADER (always-visible). No need
     // to repeat it here. The meta line just carries the parent link.
-    const deltaClass = !delta ? '' :
-      (delta.startsWith('+') && delta !== '+0.00') ? 'up' :
-      delta.startsWith('-') ? 'down' : 'neutral';
+    const deltaClass = deltaClassFor(delta);
     const parentLine = node.parent && node.parent !== 'root'
       ? `<div class="drawer-score-meta">from <a class="drawer-parent-link" onclick="openDrawer('${esc(node.parent)}')">${esc(node.parent)}</a></div>`
       : (node.parent === 'root' ? `<div class="drawer-score-meta">from baseline</div>` : '');
@@ -1912,15 +2166,16 @@ async function openDrawer(expId, opts) {
     const diff = await fetch(`/api/node/${expId}/log/diff.patch`).then(r => r.text());
     if (isStale()) return;
     if (diff.trim()) {
-      const diffHtml = diff.split('\n').map(line => {
-        if (line.startsWith('@@')) return `<span class="diff-hunk">${esc(line)}</span>`;
-        if (line.startsWith('+')) return `<span class="diff-add">${esc(line)}</span>`;
-        if (line.startsWith('-')) return `<span class="diff-del">${esc(line)}</span>`;
-        return `<span class="diff-ctx">${esc(line)}</span>`;
-      }).join('');
+      const mode = state.diffView === 'unified' ? 'unified' : 'split';
       html += `<div class="drawer-section">
-        <span class="drawer-section-title">Code Changes</span>
-        <div class="diff-block">${diffHtml}</div>
+        <div class="diff-toolbar">
+          <span class="drawer-section-title" style="margin-bottom:0">Code Changes</span>
+          <div class="diff-view-toggle" role="tablist">
+            <button class="diff-view-btn ${mode === 'split' ? 'active' : ''}" onclick="setDiffView('split')">Split</button>
+            <button class="diff-view-btn ${mode === 'unified' ? 'active' : ''}" onclick="setDiffView('unified')">Unified</button>
+          </div>
+        </div>
+        <div class="diff-files">${renderDiffFiles(diff, mode)}</div>
       </div>`;
     } else {
       html += `<div class="drawer-section"><div class="sidebar-empty">No diff recorded for this experiment.</div></div>`;
@@ -1966,11 +2221,13 @@ async function openDrawer(expId, opts) {
       const duration = formatDuration(trace?.started_at, trace?.ended_at);
 
       tasksHtml += `<div class="task-row" onclick="toggleTask(this, '${esc(expId)}', '${esc(tid)}')">
-        <span class="task-dot" style="background:${color}"></span>
-        <span class="task-id">task ${esc(tid)}</span>
-        <span class="task-summary">${esc(summary)}</span>
-        ${duration ? `<span class="task-duration">${esc(duration)}</span>` : ''}
-        <span class="task-score" style="color:${color}">${score.toFixed(1)}</span>
+        <div class="task-head">
+          <span class="task-dot" style="background:${color}"></span>
+          <span class="task-id">${esc(tid)}</span>
+          ${duration ? `<span class="task-duration">${esc(duration)}</span>` : ''}
+          <span class="task-score" style="color:${color}">${score.toFixed(1)}</span>
+        </div>
+        ${summary ? `<div class="task-summary">${esc(summary)}</div>` : ''}
       </div>`;
 
       // Trace detail (hidden by default, toggled by click)
@@ -2047,9 +2304,70 @@ function toggleTask(el, expId, taskId) {
   }
 }
 
+// Icon for the side/center peek toggle. Shows the icon for the mode you'd
+// switch TO, mirroring Notion's "switch peek mode" affordance.
+function peekToggleSvg(mode) {
+  if (mode === 'center') {
+    // Currently centered → offer "dock to side": a panel hugging the right edge.
+    return `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><line x1="10" y1="2.5" x2="10" y2="13.5"/></svg>`;
+  }
+  // Currently side → offer "expand to center": a centered framed box.
+  return `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><rect x="4.5" y="5" width="7" height="6" rx="1"/></svg>`;
+}
+
+function applyDetailMode() {
+  const sidebar = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (!sidebar) return;
+  const center = state.detailMode === 'center';
+  sidebar.classList.toggle('peek-center', center);
+  const open = !sidebar.classList.contains('hidden');
+  if (backdrop) backdrop.classList.toggle('hidden', !(center && open));
+}
+
+// Drag the left edge of the side panel to resize it. No-op in center mode.
+function startSidebarResize(e) {
+  e.preventDefault();
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar || state.detailMode === 'center') return;
+  const handle = e.currentTarget;
+  handle.classList.add('dragging');
+  document.body.style.userSelect = 'none';
+  const minW = 380;
+  const maxW = Math.min(1100, Math.round(window.innerWidth * 0.8));
+  const onMove = (ev) => {
+    const w = Math.max(minW, Math.min(maxW, window.innerWidth - ev.clientX));
+    sidebar.style.setProperty('--evo-sidebar-w', w + 'px');
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    const w = sidebar.style.getPropertyValue('--evo-sidebar-w');
+    if (w) { try { localStorage.setItem('evo.sidebarWidth', w.trim()); } catch (_) { /* ignore */ } }
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+function toggleDetailMode(e) {
+  if (e) e.stopPropagation();
+  state.detailMode = state.detailMode === 'center' ? 'side' : 'center';
+  try { localStorage.setItem('evo.detailMode', state.detailMode); } catch (_) { /* ignore */ }
+  applyDetailMode();
+  // Swap just the toggle icon in place — no need to re-render the panel.
+  const btn = document.querySelector('.drawer-peek-toggle');
+  if (btn) btn.innerHTML = peekToggleSvg(state.detailMode);
+}
+
 function closeSidebar() {
   const sidebar = document.getElementById('sidebar');
   if (sidebar) sidebar.classList.add('hidden');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (backdrop) backdrop.classList.add('hidden');
   state.selectedNode = null;
   // Reset history — the next open is a fresh navigation chain.
   state.drawerHistory.length = 0;

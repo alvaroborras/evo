@@ -1109,16 +1109,111 @@ body {
 
 /* ─── Docked sidebar (opens on node selection) ──────────── */
 .sidebar {
-  width: 575px;
+  width: var(--evo-sidebar-w, 575px);
   flex-shrink: 0;
   background: var(--bg-panel);
   border-left: 1px solid var(--border-subtle);
-  overflow-y: auto;
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
+/* The content area is the scroll container; .sidebar itself stays put so the
+   resize handle (its absolute child) doesn't scroll away. */
+#sidebar-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
 .sidebar.hidden { display: none; }
+
+/* Drag-to-resize handle on the panel's left edge (side mode only). */
+.sidebar-resize {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  z-index: 5;
+}
+.sidebar-resize::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.sidebar-resize:hover::before,
+.sidebar-resize.dragging::before { background: var(--accent, #e8843c); }
+/* No edge-resize in center peek — width is fixed there. */
+.sidebar.peek-center .sidebar-resize { display: none; }
+
+/* Diff tab: let the diff block fill the panel instead of capping at a fixed
+   height with empty space below it. */
+.sidebar[data-tab="diff"] #sidebar-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar[data-tab="diff"] .drawer-header,
+.sidebar[data-tab="diff"] .drawer-tabs { flex-shrink: 0; }
+.sidebar[data-tab="diff"] .drawer-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar[data-tab="diff"] .diff-toolbar { flex-shrink: 0; }
+.sidebar[data-tab="diff"] .diff-files,
+.sidebar[data-tab="diff"] .diff-block {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Center-peek (Notion-style): lift the panel out of the right rail into a
+   centered modal over a dimmed backdrop. The tree fills the width behind it. */
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 50;
+}
+.sidebar-backdrop.hidden { display: none; }
+.sidebar.peek-center {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(960px, 94vw);
+  height: min(82vh, 880px);
+  border: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+  z-index: 60;
+}
+.drawer-peek-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin-right: 4px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.drawer-peek-toggle:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+  color: var(--text-1);
+}
 .sidebar-prune-btn {
   display: inline-flex;
   align-items: center;
@@ -1492,40 +1587,150 @@ body {
 .diff-hunk { color: var(--text-4); display: block; }
 .diff-ctx { color: var(--text-3); display: block; }
 
-.task-row {
+/* GitHub-style per-file diff (split / unified) */
+.diff-toolbar {
   display: flex;
   align-items: center;
-  padding: 8px 0;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.diff-view-toggle { display: flex; gap: 4px; }
+.diff-view-btn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-subtle);
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.diff-view-btn.active {
+  background: var(--bg-hover, rgba(255,255,255,0.08));
+  color: var(--text-1);
+  border-color: var(--border);
+}
+.diff-files { overflow: auto; }
+.diff-file {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  margin-bottom: 14px;
+  overflow: hidden;
+  background: var(--bg-canvas);
+}
+.diff-file:last-child { margin-bottom: 0; }
+.diff-file-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-2);
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--border-subtle);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.diff-file-name { overflow-wrap: anywhere; }
+.diff-stat { font-size: 11px; margin-left: auto; flex-shrink: 0; }
+.diff-stat-add { color: var(--green); }
+.diff-stat-del { color: var(--red); }
+.diff-hunk-head {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-4);
+  background: rgba(255,255,255,0.02);
+  padding: 3px 12px;
+}
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.diff-gutter {
+  width: 40px;
+  min-width: 40px;
+  text-align: right;
+  padding: 0 8px;
+  color: var(--text-4);
+  background: rgba(255,255,255,0.02);
+  user-select: none;
+  vertical-align: top;
+}
+.diff-table.split .diff-gutter-r { border-left: 1px solid var(--border-subtle); }
+.diff-cell {
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  vertical-align: top;
+  color: var(--text-3);
+}
+.diff-cell.add { background: rgba(34,197,94,0.12); color: var(--text-1); }
+.diff-cell.del { background: rgba(239,68,68,0.12); color: var(--text-1); }
+.diff-cell.empty { background: rgba(255,255,255,0.015); }
+.diff-sign {
+  display: inline-block;
+  width: 1ch;
+  margin-right: 4px;
+  color: var(--text-4);
+  user-select: none;
+}
+/* Highlight.js tokens set their own foreground; keep their background clear
+   so the line-level add/del tint shows through. */
+.diff-cell .hljs,
+.diff-cell code { background: transparent; }
+
+.task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 11px 0;
   border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
 }
 .task-row:last-child { border-bottom: none; }
+/* Title line: dot + task id on the left, duration/score pushed right. */
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
 .task-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  margin-right: 13px;
+  flex-shrink: 0;
 }
 .task-id {
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
   color: var(--text-3);
-  width: 60px;
+  margin-right: auto;
+  overflow-wrap: anywhere;
 }
+/* Description text — its own line below the title, full width. */
 .task-summary {
   font-size: 14px;
+  line-height: 1.5;
   color: var(--text-4);
-  flex: 1;
+  /* indent to align under the id, past the dot + gap */
+  padding-left: 17px;
 }
 .task-score {
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
+  flex-shrink: 0;
 }
 .task-duration {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   color: var(--text-4);
-  margin-right: 10px;
+  flex-shrink: 0;
 }
 
 /* Trace detail (expanded task) */
