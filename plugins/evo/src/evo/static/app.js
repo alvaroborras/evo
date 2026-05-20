@@ -8,6 +8,9 @@ const state = {
   frontier: null,        // backend-authoritative {strategy, picks, all_ids}
   frontierMeta: null,
   selectedNode: null,
+  // Detail-view presentation: 'side' (right-rail peek) or 'center'
+  // (centered modal over a backdrop), Notion-style. Persisted across loads.
+  detailMode: (() => { try { return localStorage.getItem('evo.detailMode') || 'side'; } catch (_) { return 'side'; } })(),
   sidebarTab: 'summary',
   expandedTasks: new Set(),
   refreshTimer: null,
@@ -1810,6 +1813,7 @@ async function openDrawer(expId, opts) {
   const content = document.getElementById('sidebar-content');
   if (!sidebar || !content) return;
   sidebar.classList.remove('hidden');
+  applyDetailMode();
   // Reflect selection in scatter + timeline only on a real selection change.
   // Tab switches inside the drawer re-enter openDrawer with the same id —
   // re-rendering the canvas then would reset scroll/zoom for no reason.
@@ -1854,6 +1858,7 @@ async function openDrawer(expId, opts) {
       ${node.id !== 'root' ? `<button class="sidebar-spawn-btn" onclick="spawnFromNode('${esc(node.id)}')" title="Queue an evo direct directive asking the orchestrator to branch a new experiment from this node.">+ spawn</button>` : ''}
       ${isPrunable ? `<button class="sidebar-prune-btn" onclick="pruneNode('${esc(node.id)}')" title="Remove this leaf from the frontier so the planner stops branching from it. Preserves the commit.">prune</button>` : ''}
       <div class="spacer"></div>
+      <button class="drawer-peek-toggle" onclick="toggleDetailMode(event)" title="Switch between side panel and centered view">${peekToggleSvg(state.detailMode)}</button>
       <span class="drawer-close" onclick="closeSidebar()" title="Close (Esc)">&times;</span>
     </div>
     <div class="drawer-tabs" role="tablist" aria-label="Experiment details">
@@ -2063,9 +2068,44 @@ function toggleTask(el, expId, taskId) {
   }
 }
 
+// Icon for the side/center peek toggle. Shows the icon for the mode you'd
+// switch TO, mirroring Notion's "switch peek mode" affordance.
+function peekToggleSvg(mode) {
+  if (mode === 'center') {
+    // Currently centered → offer "dock to side": a panel hugging the right edge.
+    return `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><line x1="10" y1="2.5" x2="10" y2="13.5"/></svg>`;
+  }
+  // Currently side → offer "expand to center": a centered framed box.
+  return `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><rect x="4.5" y="5" width="7" height="6" rx="1"/></svg>`;
+}
+
+function applyDetailMode() {
+  const sidebar = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (!sidebar) return;
+  const center = state.detailMode === 'center';
+  sidebar.classList.toggle('peek-center', center);
+  const open = !sidebar.classList.contains('hidden');
+  if (backdrop) backdrop.classList.toggle('hidden', !(center && open));
+}
+
+function toggleDetailMode(e) {
+  if (e) e.stopPropagation();
+  state.detailMode = state.detailMode === 'center' ? 'side' : 'center';
+  try { localStorage.setItem('evo.detailMode', state.detailMode); } catch (_) { /* ignore */ }
+  applyDetailMode();
+  // Swap just the toggle icon in place — no need to re-render the panel.
+  const btn = document.querySelector('.drawer-peek-toggle');
+  if (btn) btn.innerHTML = peekToggleSvg(state.detailMode);
+}
+
 function closeSidebar() {
   const sidebar = document.getElementById('sidebar');
   if (sidebar) sidebar.classList.add('hidden');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (backdrop) backdrop.classList.add('hidden');
   state.selectedNode = null;
   // Reset history — the next open is a fresh navigation chain.
   state.drawerHistory.length = 0;
