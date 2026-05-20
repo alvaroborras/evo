@@ -30,14 +30,23 @@ from . import marker, queue
 from .paths import (
     exp_events_path,
     inject_root,
+    session_file,
     workspace_events_path,
 )
-from .registry import get_session
+from .registry import get_session, register_session
+
+# Hook event names that signal a fresh session — drain unconditionally on
+# these to catch directives queued before the session existed. Covers both
+# Claude Code's PascalCase and Cursor's camelCase spelling.
+_SESSION_START_EVENTS = ("SessionStart", "sessionStart")
 
 
 HOST_HOOK_EVENT_NAMES = {
     "claude-code": ("PreToolUse", "UserPromptSubmit", "SessionStart", "PostToolUse"),
     "codex": ("PreToolUse", "UserPromptSubmit", "SessionStart", "PostToolUse"),
+    # Cursor injects via additional_context, which only sessionStart and
+    # postToolUse honor (beforeSubmitPrompt is informational-only).
+    "cursor": ("sessionStart", "postToolUse"),
 }
 
 
@@ -59,21 +68,71 @@ def _detect_host_from_env() -> str:
     return "claude-code"
 
 
-def _detect_hook_event_from_stdin() -> str | None:
-    """Hook stdin payloads include hook_event_name. Read it best-effort."""
+def _read_stdin_payload() -> dict:
+    """Read the host's hook stdin payload as a dict. Returns {} when stdin
+    is a tty, empty, or not JSON. stdin can only be consumed once, so this
+    is the single read point — all fields (hook event, session id,
+    workspace roots) are derived from the returned dict."""
     if sys.stdin.isatty():
-        return None
+        return {}
     try:
         raw = sys.stdin.read()
     except Exception:  # noqa: BLE001
-        return None
+        return {}
     if not raw:
-        return None
+        return {}
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return None
-    return data.get("hook_event_name") or data.get("hookEventName")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _hook_event_from_payload(payload: dict) -> str | None:
+    return payload.get("hook_event_name") or payload.get("hookEventName")
+
+
+def _resolve_root_from_payload(payload: dict) -> Path | None:
+    """Locate the workspace root (dir containing `.evo/`) for hosts whose
+    hook command runs from outside the project. Cursor's user-level
+    `~/.cursor/hooks.json` runs from `~/.cursor/`, not the repo, so cwd is
+    useless — the project path arrives in the payload's `workspace_roots`.
+    Falls back to walking up from cwd. Returns None if no `.evo/` is found.
+    """
+    candidates: list[Path] = []
+    roots = payload.get("workspace_roots")
+    if isinstance(roots, list):
+        candidates.extend(Path(r) for r in roots if isinstance(r, str) and r)
+    candidates.append(Path.cwd())
+    for start in candidates:
+        cur = start
+        while True:
+            if (cur / ".evo").is_dir():
+                return cur
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+    return None
+
+
+def _self_contained_gate(
+    root: Path, session_id: str, host: str, hook_event: str | None
+) -> bool:
+    """Replicate the Rust hot-path's gate for hosts wired directly to
+    `evo-drain` (no `evo-hook-drain` binary in front). Returns True when the
+    caller should proceed to drain.
+
+    On a session-start event: register the session if new, then always
+    drain (catches directives queued before the session existed). Otherwise
+    require both a registered session and a marker file.
+    """
+    if hook_event in _SESSION_START_EVENTS:
+        if not session_file(root, session_id).exists():
+            register_session(root, session_id, host)
+        return True
+    if not session_file(root, session_id).exists():
+        return False
+    return marker.exists(root, session_id)
 
 
 def format_directive_text(events: list[dict]) -> str:
@@ -117,6 +176,17 @@ def emit_for_host(host: str, hook_event: str | None, text: str) -> None:
     if host == "hermes":
         payload = {"context": text}
         sys.stdout.write(json.dumps(payload, separators=(",", ":")))
+        return
+    if host == "cursor":
+        # Cursor's hook output contract differs from Claude Code's: there is
+        # no hookSpecificOutput envelope. `sessionStart` and `postToolUse`
+        # honor {"additional_context": ...}; `stop`/`subagentStop` honor
+        # {"followup_message": ...}. `beforeSubmitPrompt` is informational
+        # only (cannot inject), so it is never wired as a drain channel.
+        if hook_event in ("stop", "subagentStop"):
+            sys.stdout.write(json.dumps({"followup_message": text}, separators=(",", ":")))
+        else:
+            sys.stdout.write(json.dumps({"additional_context": text}, separators=(",", ":")))
         return
     # opencode and other in-process hosts: this entry point shouldn't
     # normally be invoked there. Fall through to a generic envelope.
@@ -179,25 +249,46 @@ def drain_session(root: Path, session_id: str, host: str | None = None, hook_eve
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Two invocation modes:
+
+    1. Front-ended by the `evo-hook-drain` Rust binary (claude-code/codex):
+       it passes `--run-dir` and `--session` and has already done the marker
+       gate, so this just drains.
+    2. Self-contained (cursor): the host's hooks.json calls `evo-drain
+       --host cursor` directly with no Rust binary in front. `--run-dir` and
+       `--session` are omitted; they're resolved from the hook stdin payload
+       (`workspace_roots`, `conversation_id`) and the marker gate runs here.
+    """
     parser = argparse.ArgumentParser(prog="evo.drain")
-    parser.add_argument("--run-dir", required=True, help="Path to .evo/run_*/ directory")
-    parser.add_argument("--session", required=True, help="session_id to drain")
-    parser.add_argument("--host", default=None, help="host name (claude-code/codex/hermes/opencode); auto-detected if omitted")
+    parser.add_argument("--run-dir", default=None, help="Path to .evo/run_*/ directory (omit for self-contained hosts)")
+    parser.add_argument("--session", default=None, help="session_id to drain (omit to read from stdin payload)")
+    parser.add_argument("--host", default=None, help="host name (claude-code/codex/hermes/opencode/cursor); auto-detected if omitted")
     args = parser.parse_args(argv)
 
-    run_dir = Path(args.run_dir)
-    # The drain logic uses workspace_path() internally via paths.py;
-    # but here we receive run_dir directly. We need root. Walk up from
-    # run_dir/.. to find the workspace root (the dir CONTAINING .evo/).
-    # run_dir is .../.evo/run_*; parent.parent is the workspace root.
-    if run_dir.parent.name == ".evo":
-        root = run_dir.parent.parent
-    else:
-        # Fallback: assume run_dir itself is under .evo/ at depth 1
-        root = run_dir.parent.parent
+    payload = _read_stdin_payload()
+    hook_event = _hook_event_from_payload(payload)
 
-    hook_event = _detect_hook_event_from_stdin()
-    return drain_session(root, args.session, host=args.host, hook_event=hook_event)
+    # Mode 1: Rust-driven — run-dir + session supplied, gate already done.
+    if args.run_dir:
+        run_dir = Path(args.run_dir)
+        # run_dir is .../.evo/run_*; the workspace root is its grandparent.
+        root = run_dir.parent.parent
+        return drain_session(root, args.session, host=args.host, hook_event=hook_event)
+
+    # Mode 2: self-contained — resolve everything from args + stdin payload.
+    session = args.session or payload.get("session_id") or payload.get("conversation_id")
+    if not session:
+        sys.stdout.write("{}")
+        return 0
+    root = _resolve_root_from_payload(payload)
+    if root is None or not inject_root(root).parent.exists():
+        sys.stdout.write("{}")
+        return 0
+    host = args.host or "cursor"
+    if not _self_contained_gate(root, session, host, hook_event):
+        sys.stdout.write("{}")
+        return 0
+    return drain_session(root, session, host=host, hook_event=hook_event)
 
 
 if __name__ == "__main__":

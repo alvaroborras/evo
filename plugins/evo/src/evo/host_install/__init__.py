@@ -14,11 +14,12 @@ See notes/cross-host-inject-design.md.
 
 from __future__ import annotations
 
-from . import claude_code, codex, hermes, opencode, openclaw, pi
+from . import claude_code, codex, cursor, hermes, opencode, openclaw, pi
 
 ADAPTERS = {
     "claude-code": claude_code,
     "codex": codex,
+    "cursor": cursor,
     "hermes": hermes,
     "opencode": opencode,
     "openclaw": openclaw,

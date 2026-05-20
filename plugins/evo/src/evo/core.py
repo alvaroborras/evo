@@ -25,6 +25,7 @@ RUNTIME_ENV_VALUES_FILE = "runtime_env_values.json"
 SUPPORTED_HOSTS = frozenset({
     "claude-code",
     "codex",
+    "cursor",
     "opencode",
     "openclaw",
     "hermes",

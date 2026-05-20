@@ -29,7 +29,7 @@ You give it a codebase. It discovers metrics to optimize, sets up the evaluation
 - **Benchmark discovery.** The `discover` skill explores the repo, figures out what to measure, and instruments the evaluation.
 
 
-Runs on Claude Code, Codex, OpenClaw, Hermes, Opencode, or Pi. Experiments run locally or on remote sandboxes — Modal, E2B, Daytona, AWS, Azure, SSH.
+Runs on Claude Code, Codex, Cursor, OpenClaw, Hermes, Opencode, or Pi. Experiments run locally or on remote sandboxes — Modal, E2B, Daytona, AWS, Azure, SSH.
 
 
 <p align="center">
@@ -63,7 +63,7 @@ Pass `optimize` parameters as `key=value` after the skill name:
 | `budget` | 5 | Max iterations each subagent can run within its branch |
 | `stall` | 5 | Consecutive rounds with no improvement before auto-stopping |
 
-Invocation syntax is host-specific: `/evo:` on Claude Code, `$evo` on Codex, natural language on Hermes, Opencode, OpenClaw, and Pi.
+Invocation syntax is host-specific: `/evo:` on Claude Code, `$evo` on Codex, `/` skill menu on Cursor, natural language on Hermes, Opencode, OpenClaw, and Pi.
 
 ## Install
 
@@ -73,9 +73,10 @@ uv tool install evo-hq-cli
 
 # 2. Host CLI (if you don't already have it)
 npm install -g @anthropic-ai/claude-code     # or @openai/codex, openclaw, @earendil-works/pi-coding-agent
+# Cursor: install from cursor.com (IDE), or `curl https://cursor.com/install -fsS | bash` for the cursor-agent CLI
 
 # 3. Plugin + host hooks
-evo install <host>     # claude-code | codex | hermes | opencode | openclaw | pi
+evo install <host>     # claude-code | codex | cursor | hermes | opencode | openclaw | pi
 ```
 
 `evo install <host>` installs the plugin into the host's marketplace and stages the hooks evo needs to talk to in-flight subagents. Verify with `evo doctor <host>`.
@@ -148,7 +149,7 @@ uv run --project /path/to/evo/plugins/evo evo dashboard --port 8080
 ## Upgrading
 
 ```bash
-evo update <host>                    # host: claude-code | codex | hermes | opencode | openclaw | pi
+evo update <host>                    # host: claude-code | codex | cursor | hermes | opencode | openclaw | pi
 evo update <host> --version 0.4.1    # pin to a release
 ```
 
