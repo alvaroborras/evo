@@ -11,6 +11,8 @@ const state = {
   // Detail-view presentation: 'side' (right-rail peek) or 'center'
   // (centered modal over a backdrop), Notion-style. Persisted across loads.
   detailMode: (() => { try { return localStorage.getItem('evo.detailMode') || 'side'; } catch (_) { return 'side'; } })(),
+  // Diff layout: 'split' (side-by-side, GitHub-style) or 'unified'. Persisted.
+  diffView: (() => { try { return localStorage.getItem('evo.diffView') || 'split'; } catch (_) { return 'split'; } })(),
   sidebarTab: 'summary',
   expandedTasks: new Set(),
   refreshTimer: null,
@@ -1796,6 +1798,130 @@ function renderChildrenSection(node) {
 // ─── Sidebar (detail panel) ──────────────────────────────
 // opts.fromHistory: skip pushing to drawerHistory (the back/forward
 // buttons already moved the index themselves).
+// ─── Diff rendering (GitHub-style: per-file, split or unified) ───────────
+
+function setDiffView(mode) {
+  state.diffView = mode === 'unified' ? 'unified' : 'split';
+  try { localStorage.setItem('evo.diffView', state.diffView); } catch (_) { /* ignore */ }
+  if (state.selectedNode) openDrawer(state.selectedNode, { fromHistory: true });
+}
+
+// Parse a unified git diff into per-file structures.
+function parseUnifiedDiff(text) {
+  const files = [];
+  let file = null, hunk = null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('diff --git')) {
+      const m = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+      file = { path: m ? m[2] : '', oldPath: m ? m[1] : '', newPath: m ? m[2] : '', hunks: [], adds: 0, dels: 0 };
+      files.push(file);
+      hunk = null;
+      continue;
+    }
+    if (!file) continue;
+    if (line.startsWith('--- ')) { file.oldPath = line.slice(4).replace(/^a\//, ''); continue; }
+    if (line.startsWith('+++ ')) {
+      const p = line.slice(4).replace(/^b\//, '');
+      file.newPath = p;
+      if (p && p !== '/dev/null') file.path = p;
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      hunk = { header: line, oldNo: m ? +m[1] : 0, newNo: m ? +m[2] : 0, lines: [] };
+      file.hunks.push(hunk);
+      continue;
+    }
+    if (hunk) {
+      if (line.startsWith('+')) file.adds++;
+      else if (line.startsWith('-')) file.dels++;
+      hunk.lines.push(line);
+    }
+  }
+  return files;
+}
+
+// Pair deletions with additions into side-by-side rows, tracking line numbers.
+function hunkSplitRows(hunk) {
+  const rows = [];
+  let oldNo = hunk.oldNo, newNo = hunk.newNo;
+  const ls = hunk.lines;
+  let i = 0;
+  while (i < ls.length) {
+    const tag = ls[i][0];
+    if (tag === '\\') { i++; continue; } // "\ No newline at end of file"
+    if (tag === '+' || tag === '-') {
+      const dels = [], adds = [];
+      while (i < ls.length && ls[i][0] === '-') { dels.push(ls[i].slice(1)); i++; }
+      while (i < ls.length && ls[i][0] === '+') { adds.push(ls[i].slice(1)); i++; }
+      const n = Math.max(dels.length, adds.length);
+      for (let k = 0; k < n; k++) {
+        const hasL = k < dels.length, hasR = k < adds.length;
+        rows.push({
+          leftNo: hasL ? oldNo++ : null, left: hasL ? dels[k] : '', leftType: hasL ? 'del' : 'empty',
+          rightNo: hasR ? newNo++ : null, right: hasR ? adds[k] : '', rightType: hasR ? 'add' : 'empty',
+        });
+      }
+    } else {
+      const txt = ls[i].slice(1);
+      rows.push({ leftNo: oldNo++, left: txt, leftType: 'ctx', rightNo: newNo++, right: txt, rightType: 'ctx' });
+      i++;
+    }
+  }
+  return rows;
+}
+
+function hunkUnifiedRows(hunk) {
+  const rows = [];
+  let oldNo = hunk.oldNo, newNo = hunk.newNo;
+  for (const l of hunk.lines) {
+    const tag = l[0], txt = l.slice(1);
+    if (tag === '\\') continue;
+    if (tag === '+') rows.push({ type: 'add', oldNo: '', newNo: newNo++, text: '+' + txt });
+    else if (tag === '-') rows.push({ type: 'del', oldNo: oldNo++, newNo: '', text: '-' + txt });
+    else rows.push({ type: 'ctx', oldNo: oldNo++, newNo: newNo++, text: ' ' + txt });
+  }
+  return rows;
+}
+
+function renderDiffFiles(text, mode) {
+  const files = parseUnifiedDiff(text);
+  // Not a recognizable git diff — fall back to the old single-block view.
+  if (!files.length) {
+    const raw = text.split('\n').map((line) => {
+      if (line.startsWith('@@')) return `<span class="diff-hunk">${esc(line)}</span>`;
+      if (line.startsWith('+')) return `<span class="diff-add">${esc(line)}</span>`;
+      if (line.startsWith('-')) return `<span class="diff-del">${esc(line)}</span>`;
+      return `<span class="diff-ctx">${esc(line)}</span>`;
+    }).join('');
+    return `<div class="diff-block">${raw}</div>`;
+  }
+  return files.map((f) => {
+    const stat = `<span class="diff-stat"><span class="diff-stat-add">+${f.adds}</span> <span class="diff-stat-del">−${f.dels}</span></span>`;
+    const body = f.hunks.map((h) => {
+      if (mode === 'split') {
+        const rows = hunkSplitRows(h).map((r) => `<tr>
+            <td class="diff-gutter">${r.leftNo ?? ''}</td>
+            <td class="diff-cell ${r.leftType}">${esc(r.left)}</td>
+            <td class="diff-gutter diff-gutter-r">${r.rightNo ?? ''}</td>
+            <td class="diff-cell ${r.rightType}">${esc(r.right)}</td>
+          </tr>`).join('');
+        return `<div class="diff-hunk-head">${esc(h.header)}</div><table class="diff-table split"><tbody>${rows}</tbody></table>`;
+      }
+      const rows = hunkUnifiedRows(h).map((r) => `<tr>
+          <td class="diff-gutter">${r.oldNo}</td>
+          <td class="diff-gutter">${r.newNo}</td>
+          <td class="diff-cell ${r.type}">${esc(r.text)}</td>
+        </tr>`).join('');
+      return `<div class="diff-hunk-head">${esc(h.header)}</div><table class="diff-table unified"><tbody>${rows}</tbody></table>`;
+    }).join('');
+    return `<div class="diff-file">
+      <div class="diff-file-head"><span class="diff-file-name">${esc(f.path || f.newPath || f.oldPath)}</span>${stat}</div>
+      <div class="diff-file-body">${body}</div>
+    </div>`;
+  }).join('');
+}
+
 async function openDrawer(expId, opts) {
   opts = opts || {};
   const previousNode = state.selectedNode;
@@ -1939,15 +2065,16 @@ async function openDrawer(expId, opts) {
     const diff = await fetch(`/api/node/${expId}/log/diff.patch`).then(r => r.text());
     if (isStale()) return;
     if (diff.trim()) {
-      const diffHtml = diff.split('\n').map(line => {
-        if (line.startsWith('@@')) return `<span class="diff-hunk">${esc(line)}</span>`;
-        if (line.startsWith('+')) return `<span class="diff-add">${esc(line)}</span>`;
-        if (line.startsWith('-')) return `<span class="diff-del">${esc(line)}</span>`;
-        return `<span class="diff-ctx">${esc(line)}</span>`;
-      }).join('');
+      const mode = state.diffView === 'unified' ? 'unified' : 'split';
       html += `<div class="drawer-section">
-        <span class="drawer-section-title">Code Changes</span>
-        <div class="diff-block">${diffHtml}</div>
+        <div class="diff-toolbar">
+          <span class="drawer-section-title" style="margin-bottom:0">Code Changes</span>
+          <div class="diff-view-toggle" role="tablist">
+            <button class="diff-view-btn ${mode === 'split' ? 'active' : ''}" onclick="setDiffView('split')">Split</button>
+            <button class="diff-view-btn ${mode === 'unified' ? 'active' : ''}" onclick="setDiffView('unified')">Unified</button>
+          </div>
+        </div>
+        <div class="diff-files">${renderDiffFiles(diff, mode)}</div>
       </div>`;
     } else {
       html += `<div class="drawer-section"><div class="sidebar-empty">No diff recorded for this experiment.</div></div>`;
