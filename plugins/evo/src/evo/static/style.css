@@ -1494,47 +1494,48 @@ body {
 
 .task-row {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 8px 0;
+  flex-direction: column;
+  gap: 5px;
+  padding: 11px 0;
   border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
 }
 .task-row:last-child { border-bottom: none; }
+/* Title line: dot + task id on the left, duration/score pushed right. */
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
 .task-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  margin-top: 6px;
   flex-shrink: 0;
 }
 .task-id {
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
-  line-height: 1.45;
   color: var(--text-3);
-  width: 130px;
-  flex-shrink: 0;
+  margin-right: auto;
   overflow-wrap: anywhere;
 }
+/* Description text — its own line below the title, full width. */
 .task-summary {
   font-size: 14px;
-  line-height: 1.45;
+  line-height: 1.5;
   color: var(--text-4);
-  flex: 1;
-  min-width: 0;
+  /* indent to align under the id, past the dot + gap */
+  padding-left: 17px;
 }
 .task-score {
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
-  line-height: 1.45;
   flex-shrink: 0;
-  margin-left: auto;
 }
 .task-duration {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
-  line-height: 1.45;
   color: var(--text-4);
   flex-shrink: 0;
 }

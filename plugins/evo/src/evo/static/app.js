@@ -1980,11 +1980,13 @@ async function openDrawer(expId, opts) {
       const duration = formatDuration(trace?.started_at, trace?.ended_at);
 
       tasksHtml += `<div class="task-row" onclick="toggleTask(this, '${esc(expId)}', '${esc(tid)}')">
-        <span class="task-dot" style="background:${color}"></span>
-        <span class="task-id">task ${esc(tid)}</span>
-        <span class="task-summary">${esc(summary)}</span>
-        ${duration ? `<span class="task-duration">${esc(duration)}</span>` : ''}
-        <span class="task-score" style="color:${color}">${score.toFixed(1)}</span>
+        <div class="task-head">
+          <span class="task-dot" style="background:${color}"></span>
+          <span class="task-id">${esc(tid)}</span>
+          ${duration ? `<span class="task-duration">${esc(duration)}</span>` : ''}
+          <span class="task-score" style="color:${color}">${score.toFixed(1)}</span>
+        </div>
+        ${summary ? `<div class="task-summary">${esc(summary)}</div>` : ''}
       </div>`;
 
       // Trace detail (hidden by default, toggled by click)
