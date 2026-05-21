@@ -130,17 +130,22 @@ echo "    Shell -> $SH"
 echo "$SH" | grep -q '"updated_input"' && echo "$SH" | grep -q 'T_SHELL' && echo "$SH" | grep -q 'ls -la' || die "Shell preToolUse should rewrite command with directive echo"
 pass "Shell preToolUse -> updated_input echo (non-disruptive, command preserved)"
 
+# Non-shell tools (Read, Edit, ...) DEFER — no consume — so stop can deliver.
+# (deny+agent_message consumed the directive without delivering it; deferring
+# is the fix.)
 qmark "T_READ"
 RD=$(ptu Read '{"path":"main.py"}')
 echo "    Read -> $RD"
-echo "$RD" | grep -q '"permission":"deny"' && echo "$RD" | grep -q '"agent_message"' && echo "$RD" | grep -q 'T_READ' || die "Read preToolUse should deny + agent_message"
-pass "Read preToolUse -> deny + agent_message"
+[ "$RD" = "{}" ] || die "Read preToolUse should DEFER (emit {}), got $RD"
+RDSTOP=$(printf '{"hook_event_name":"stop","conversation_id":"%s","workspace_roots":["%s"]}' "$SID" "$WORK" | $DRAIN --host cursor)
+echo "    stop after read -> $RDSTOP"
+echo "$RDSTOP" | grep -q 'T_READ' || die "deferred read directive lost — should deliver on next stop"
+pass "Read preToolUse defers (no consume); directive delivered on next stop"
 
 qmark "T_EDIT"
 ED=$(ptu Edit '{"path":"main.py"}')
 echo "    Edit -> $ED"
 [ "$ED" = "{}" ] || die "Edit preToolUse should DEFER (emit {}), got $ED"
-# the deferred directive must survive and deliver on the next stop
 EDSTOP=$(printf '{"hook_event_name":"stop","conversation_id":"%s","workspace_roots":["%s"]}' "$SID" "$WORK" | $DRAIN --host cursor)
 echo "    stop after edit -> $EDSTOP"
 echo "$EDSTOP" | grep -q 'T_EDIT' || die "deferred edit directive lost — should deliver on next stop"

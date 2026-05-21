@@ -187,8 +187,14 @@ def _self_contained_gate(
         queue.init_offset_to_latest(root, session_id)
     if hook_event not in _DELIVER_EVENTS:
         return False  # register-only (sessionStart, beforeSubmitPrompt, …)
-    if hook_event == "preToolUse" and _cursor_tool_class(tool_name) == "edit":
-        return False  # defer — never deny an edit (corruption risk)
+    if hook_event == "preToolUse" and _cursor_tool_class(tool_name) != "shell":
+        # Only shell delivers mid-turn (updated_input echo into stdout, which
+        # the model reliably reads). For every other tool, deny+agent_message
+        # CONSUMES the directive without actually delivering it (verified: a
+        # Read deny clears the marker but the agent never gets the message).
+        # So defer (no consume) — the directive waits for the next shell call
+        # or the turn-end `stop`, both of which deliver reliably.
+        return False
     if fresh:
         return False  # just registered on this event; nothing marked yet
     return marker.exists(root, session_id)
@@ -238,16 +244,13 @@ def emit_for_host(host: str, hook_event: str | None, text: str, payload: dict | 
         sys.stdout.write(json.dumps(payload, separators=(",", ":")))
         return
     if host == "cursor":
-        # Cursor delivery, mirroring claude-code's PreToolUse/Stop inject but
-        # routed around the IDE's broken additional_context:
+        # Cursor delivery, routed around the IDE's broken additional_context:
         #   stop/subagentStop -> followup_message (auto-submitted at turn end)
-        #   preToolUse:
-        #     shell tool -> updated_input: prepend an echo of the directive so it
-        #       lands in the command's stdout (the tool result the model reads);
-        #       command still runs (its exit code is preserved by ordering last).
-        #     other tools -> permission:"deny" + agent_message (only path that
-        #       reaches the model mid-turn); the agent reads it and re-issues.
-        #   (edit/write never reach here — the gate defers them.)
+        #   preToolUse + shell -> updated_input: prepend an echo of the directive
+        #     so it lands in the command's stdout (the tool result the model
+        #     reads); command still runs (exit code preserved by ordering last).
+        # Non-shell preToolUse never reaches here — the gate defers it (deny+
+        # agent_message consumes without delivering, so we let stop deliver).
         p = payload or {}
         if hook_event in ("stop", "subagentStop"):
             out: dict = {"followup_message": text}
@@ -256,12 +259,6 @@ def emit_for_host(host: str, hook_event: str | None, text: str, payload: dict | 
             orig = tool_input.get("command", "")
             tool_input["command"] = "printf '%s\\n' " + shlex.quote(text) + " ; " + orig
             out = {"permission": "allow", "updated_input": tool_input}
-        elif hook_event == "preToolUse":
-            out = {
-                "permission": "deny",
-                "agent_message": text + "\n\nApply this directive now, then re-issue the action you were about to take and continue your work.",
-                "user_message": "evo delivered a queued directive",
-            }
         else:
             out = {"additional_context": text}
         sys.stdout.write(json.dumps(out, separators=(",", ":")))
