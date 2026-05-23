@@ -688,10 +688,36 @@ class TestCursorPolicyNudge(_Base):
             {"file_path": "/f.py"},
             host="cursor",
         )
-        self.assertTrue(
-            out.get("permission") in ("deny", "ask"),
-            f"cursor edit_file must be denied/asked on first violation; got {out!r}"
+        self.assertEqual(
+            out.get("permission"), "deny",
+            f"cursor edit_file must be denied on first violation; got {out!r}"
         )
+
+    def test_cursor_deny_envelope_uses_agent_message_not_reason(self):
+        """Cursor's preToolUse contract documents `permission`,
+        `user_message`, `agent_message`, `updated_input` as return
+        fields. `reason` is NOT documented and cursor silently drops it.
+        The deny envelope must use `agent_message` so the policy banner
+        actually reaches the model.
+
+        Verified against ~/.cursor/skills-cursor/create-hook/SKILL.md:
+        'preToolUse: can return permission, user_message, agent_message,
+        and updated_input'.
+        """
+        self._setup_cursor_orchestrator()
+        out = _drive_pretooluse(
+            self.root, "cursor_sid", "edit_file",
+            {"file_path": "/f.py"},
+            host="cursor",
+        )
+        self.assertEqual(out.get("permission"), "deny")
+        self.assertIn("agent_message", out,
+                      f"cursor deny must use agent_message field; got {out!r}")
+        self.assertNotIn("reason", out,
+                         "cursor doesn't honor `reason` on preToolUse — "
+                         "must use agent_message instead")
+        self.assertIn("EVO POLICY", out["agent_message"],
+                      "policy banner must be in agent_message")
 
     def test_cursor_camelcase_pretooluse_blocked_via_drain_session(self):
         """Cursor sends `preToolUse` (camelCase). The policy block must
@@ -710,8 +736,8 @@ class TestCursorPolicyNudge(_Base):
             drain_session(self.root, "cursor_sid", host="cursor",
                           hook_event="preToolUse", payload=payload)
         out = json.loads(buf.getvalue() or "{}")
-        self.assertTrue(
-            out.get("permission") in ("deny", "ask"),
+        self.assertEqual(
+            out.get("permission"), "deny",
             f"camelCase preToolUse must trigger policy block; got {out!r}"
         )
 
