@@ -115,9 +115,12 @@ class TestClaudeCodeEndToEnd(unittest.TestCase):
         })
         self.assertEqual(rc, 0)
         result = json.loads(out)
-        self.assertEqual(result.get("permission"), "deny",
-                         f"PreToolUse Edit under /optimize must deny; got {result!r}")
-        self.assertIn("EVO POLICY", result.get("reason", ""))
+        hso = result.get("hookSpecificOutput") or {}
+        self.assertEqual(
+            hso.get("permissionDecision"), "deny",
+            f"PreToolUse Edit under /optimize must deny; got {result!r}"
+        )
+        self.assertIn("EVO POLICY", hso.get("permissionDecisionReason", ""))
 
         # Stop — must emit decision:block with EVO LOOP banner.
         rc, out = self._fire({
@@ -153,8 +156,11 @@ class TestClaudeCodeEndToEnd(unittest.TestCase):
         })
         self.assertEqual(rc, 0)
         result = json.loads(out)
-        self.assertNotEqual(result.get("permission"), "deny",
-                            f"after exit, Edit must pass; got {result!r}")
+        hso = result.get("hookSpecificOutput") or {}
+        self.assertNotEqual(
+            hso.get("permissionDecision"), "deny",
+            f"after exit, Edit must pass; got {result!r}"
+        )
 
     def test_non_denied_tool_fast_exits_without_optimize_mode(self):
         """Outside optimize_mode, PreToolUse with any tool must fast-exit
@@ -188,8 +194,11 @@ class TestClaudeCodeEndToEnd(unittest.TestCase):
         })
         self.assertEqual(rc, 0)
         result = json.loads(out)
-        self.assertNotEqual(result.get("permission"), "deny",
-                            "Read must not be denied even in optimize_mode")
+        hso = result.get("hookSpecificOutput") or {}
+        self.assertNotEqual(
+            hso.get("permissionDecision"), "deny",
+            "Read must not be denied even in optimize_mode"
+        )
 
 
 if __name__ == "__main__":

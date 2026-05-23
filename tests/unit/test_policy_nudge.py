@@ -70,6 +70,30 @@ def _drive_pretooluse(
     return json.loads(out) if out else {}
 
 
+def _is_denied(envelope: dict) -> bool:
+    """True if the policy-block envelope denies the tool, across host
+    shapes:
+      - cursor: `{"permission": "deny", "agent_message": "..."}`
+      - claude-code/codex: `{"hookSpecificOutput": {"permissionDecision":
+        "deny", ...}}` (the documented PreToolUse shape).
+    """
+    if envelope.get("permission") == "deny":
+        return True
+    hso = envelope.get("hookSpecificOutput") or {}
+    return hso.get("permissionDecision") == "deny"
+
+
+def _deny_reason(envelope: dict) -> str:
+    """Return the reason text from a deny envelope, in whichever field
+    the host's contract uses."""
+    if "reason" in envelope:
+        return envelope["reason"] or ""
+    if "agent_message" in envelope:
+        return envelope["agent_message"] or ""
+    hso = envelope.get("hookSpecificOutput") or {}
+    return hso.get("permissionDecisionReason") or ""
+
+
 class _Base(unittest.TestCase):
 
     def setUp(self):
@@ -527,17 +551,15 @@ class TestAlternatingCadence(_Base):
         self._setup_orchestrator()
         out = _drive_pretooluse(self.root, "orch", "Edit",
                                 {"file_path": "/some/file.py"})
-        self.assertEqual(out.get("permission"), "deny",
-                         f"first Edit must be hard-denied; got {out!r}")
-        self.assertIn("optimize", (out.get("reason") or "").lower(),
+        self.assertTrue(_is_denied(out), f"first Edit must be hard-denied; got {out!r}")
+        self.assertIn("optimize", _deny_reason(out).lower(),
                       "banner must mention optimize protocol")
 
     def test_second_edit_passes(self):
         self._setup_orchestrator()
         _drive_pretooluse(self.root, "orch", "Edit", {"file_path": "/f.py"})
         out = _drive_pretooluse(self.root, "orch", "Edit", {"file_path": "/f.py"})
-        self.assertNotEqual(out.get("permission"), "deny",
-                            f"#2 must pass under alternating cadence; got {out!r}")
+        self.assertFalse(_is_denied(out), f"#2 must pass under alternating cadence; got {out!r}")
 
     def test_third_edit_blocks_again(self):
         self._setup_orchestrator()
@@ -545,9 +567,9 @@ class TestAlternatingCadence(_Base):
             _drive_pretooluse(self.root, "orch", "Edit", {"file_path": "/f.py"})
             for _ in range(3)
         ]
-        self.assertEqual(outs[0].get("permission"), "deny", "#1 blocks")
-        self.assertNotEqual(outs[1].get("permission"), "deny", "#2 passes")
-        self.assertEqual(outs[2].get("permission"), "deny", "#3 blocks")
+        self.assertTrue(_is_denied(outs[0]), "#1 blocks")
+        self.assertFalse(_is_denied(outs[1]), "#2 passes")
+        self.assertTrue(_is_denied(outs[2]), "#3 blocks")
 
     def test_alternating_through_ten(self):
         self._setup_orchestrator()
@@ -558,11 +580,9 @@ class TestAlternatingCadence(_Base):
         # Odd-indexed-from-1 → indices 0, 2, 4, 6, 8 block
         for i, out in enumerate(outs, start=1):
             if i % 2 == 1:
-                self.assertEqual(out.get("permission"), "deny",
-                                 f"violation #{i} (odd) must block; got {out!r}")
+                self.assertTrue(_is_denied(out), f"violation #{i} (odd) must block; got {out!r}")
             else:
-                self.assertNotEqual(out.get("permission"), "deny",
-                                    f"violation #{i} (even) must pass; got {out!r}")
+                self.assertFalse(_is_denied(out), f"violation #{i} (even) must pass; got {out!r}")
 
     def test_edits_and_bash_share_counter(self):
         """Edit + Bash violations increment the same counter; the alternating
@@ -577,11 +597,9 @@ class TestAlternatingCadence(_Base):
         ]
         for i, out in enumerate(outs, start=1):
             if i % 2 == 1:
-                self.assertEqual(out.get("permission"), "deny",
-                                 f"mixed #{i} (odd) must block")
+                self.assertTrue(_is_denied(out), f"mixed #{i} (odd) must block")
             else:
-                self.assertNotEqual(out.get("permission"), "deny",
-                                    f"mixed #{i} (even) must pass")
+                self.assertFalse(_is_denied(out), f"mixed #{i} (even) must pass")
 
 
 # ---------------------------------------------------------------------------
@@ -600,16 +618,13 @@ class TestBashBlock(_Base):
         out = _drive_pretooluse(
             self.root, "orch", "Bash", {"command": "sed -i 's/a/b/' f.py"},
         )
-        self.assertEqual(out.get("permission"), "deny",
-                         f"first mutating bash must block; got {out!r}")
+        self.assertTrue(_is_denied(out), f"first mutating bash must block; got {out!r}")
 
     def test_evo_bash_never_blocks(self):
         self._setup_orchestrator()
         for cmd in ("evo status", "evo scratchpad", "evo wait", "evo direct 'foo'"):
             out = _drive_pretooluse(self.root, "orch", "Bash", {"command": cmd})
-            self.assertNotEqual(
-                out.get("permission"), "deny",
-                f"evo Bash must never block: {cmd!r}; got {out!r}"
+            self.assertFalse(_is_denied(out), f"evo Bash must never block: {cmd!r}; got {out!r}"
             )
 
     def test_subagent_spawn_bash_never_blocks(self):
@@ -619,9 +634,7 @@ class TestBashBlock(_Base):
             "nohup codex exec --full-auto 'brief' > /tmp/a.log 2>&1 &",
         ):
             out = _drive_pretooluse(self.root, "orch", "Bash", {"command": cmd})
-            self.assertNotEqual(
-                out.get("permission"), "deny",
-                f"subagent-spawn must never block: {cmd!r}; got {out!r}"
+            self.assertFalse(_is_denied(out), f"subagent-spawn must never block: {cmd!r}; got {out!r}"
             )
 
     def test_running_scripts_does_not_block(self):
@@ -630,9 +643,7 @@ class TestBashBlock(_Base):
         # in themselves — the deny list catches only file mutations.
         for cmd in ("python bench.py", "pytest tests/", "make eval", "node index.js"):
             out = _drive_pretooluse(self.root, "orch", "Bash", {"command": cmd})
-            self.assertNotEqual(
-                out.get("permission"), "deny",
-                f"running scripts must not block: {cmd!r}; got {out!r}"
+            self.assertFalse(_is_denied(out), f"running scripts must not block: {cmd!r}; got {out!r}"
             )
 
 
@@ -647,16 +658,14 @@ class TestPolicyNudgeDoesNotBlock(_Base):
         mark_engaged(self.root, "sub")
         for _ in range(10):
             out = _drive_pretooluse(self.root, "sub", "Edit", {"file_path": "/f.py"})
-            self.assertNotEqual(out.get("permission"), "deny",
-                                "subagents must never be policy-blocked")
+            self.assertFalse(_is_denied(out), "subagents must never be policy-blocked")
 
     def test_non_optimize_mode_session_never_blocked(self):
         register_session(self.root, "casual", "claude-code")
         mark_engaged(self.root, "casual")
         for _ in range(10):
             out = _drive_pretooluse(self.root, "casual", "Edit", {"file_path": "/f.py"})
-            self.assertNotEqual(out.get("permission"), "deny",
-                                "non-optimize-mode session must not be blocked")
+            self.assertFalse(_is_denied(out), "non-optimize-mode session must not be blocked")
 
     def test_read_tools_never_blocked(self):
         register_session(self.root, "orch", "claude-code")
@@ -664,8 +673,7 @@ class TestPolicyNudgeDoesNotBlock(_Base):
         mark_optimize_mode(self.root, "orch")
         for tool in ("Read", "Glob", "Grep", "TodoWrite", "WebFetch"):
             out = _drive_pretooluse(self.root, "orch", tool, {"file_path": "/f.py"})
-            self.assertNotEqual(out.get("permission"), "deny",
-                                f"{tool} must never be blocked")
+            self.assertFalse(_is_denied(out), f"{tool} must never be blocked")
 
 
 # ---------------------------------------------------------------------------
@@ -688,9 +696,7 @@ class TestCursorPolicyNudge(_Base):
             {"file_path": "/f.py"},
             host="cursor",
         )
-        self.assertEqual(
-            out.get("permission"), "deny",
-            f"cursor edit_file must be denied on first violation; got {out!r}"
+        self.assertTrue(_is_denied(out), f"cursor edit_file must be denied on first violation; got {out!r}"
         )
 
     def test_cursor_deny_envelope_uses_agent_message_not_reason(self):
@@ -736,9 +742,7 @@ class TestCursorPolicyNudge(_Base):
             drain_session(self.root, "cursor_sid", host="cursor",
                           hook_event="preToolUse", payload=payload)
         out = json.loads(buf.getvalue() or "{}")
-        self.assertEqual(
-            out.get("permission"), "deny",
-            f"camelCase preToolUse must trigger policy block; got {out!r}"
+        self.assertTrue(_is_denied(out), f"camelCase preToolUse must trigger policy block; got {out!r}"
         )
 
     def test_cursor_camelcase_pretooluse_via_main_pipeline(self):
@@ -761,9 +765,7 @@ class TestCursorPolicyNudge(_Base):
              patch("sys.stdout", buf):
             drain_mod.main(["--host", "cursor"])
         out = json.loads(buf.getvalue() or "{}")
-        self.assertEqual(
-            out.get("permission"), "deny",
-            f"cursor edit_file under optimize_mode must deny on #1; got {out!r}"
+        self.assertTrue(_is_denied(out), f"cursor edit_file under optimize_mode must deny on #1; got {out!r}"
         )
 
 
@@ -861,8 +863,7 @@ class TestCursorStopNudge(_Base):
              patch("sys.stdout", buf):
             drain_mod.main(["--host", "cursor"])
         out2 = json.loads(buf.getvalue() or "{}")
-        self.assertNotEqual(out2.get("permission"), "deny",
-                            "#2 must pass under alternating cadence")
+        self.assertFalse(_is_denied(out2), "#2 must pass under alternating cadence")
         self.assertNotIn("additional_context", out2,
                          "#2 must not emit additional_context (cursor drops it)")
         self.assertTrue(

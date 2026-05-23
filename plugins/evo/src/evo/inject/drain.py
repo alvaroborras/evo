@@ -1120,18 +1120,27 @@ def _should_policy_block(
 def _policy_block_envelope(host: str | None) -> dict:
     """Per-host hard-deny envelope.
 
-    - claude-code / codex: `{permission: deny, reason: …}` — the standard
-      Claude Code preToolUse contract; both honor `reason` as the
-      model-facing explanation.
-    - cursor: `{permission: deny, agent_message: …}` — verified against
-      the Cursor hooks contract (`~/.cursor/skills-cursor/create-hook/
-      SKILL.md`): preToolUse output fields are `permission`,
-      `user_message`, `agent_message`, `updated_input`. `reason` is NOT
-      a documented field and was being silently dropped by cursor.
+    - claude-code / codex: the documented PreToolUse shape is the
+      hookSpecificOutput envelope with `permissionDecision` and
+      `permissionDecisionReason`. The older top-level `{decision: block,
+      reason: …}` is deprecated for PreToolUse, and the
+      `{permission: deny, reason: …}` form (cursor-style) is silently
+      ignored by claude-code — verified empirically: the model got
+      `violation_count=1` written but the Edit still went through.
+    - cursor: `{permission: deny, agent_message: …}` — preToolUse output
+      fields per ~/.cursor/skills-cursor/create-hook/SKILL.md are
+      `permission`, `user_message`, `agent_message`, `updated_input`.
     """
     if host == "cursor":
         return {"permission": "deny", "agent_message": _POLICY_NUDGE_TEMPLATE}
-    return {"permission": "deny", "reason": _POLICY_NUDGE_TEMPLATE}
+    # claude-code / codex / default
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": _POLICY_NUDGE_TEMPLATE,
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
