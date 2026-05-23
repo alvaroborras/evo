@@ -580,6 +580,53 @@ def test_rust_writes_iso_timestamp_python_can_parse(tmp_path):
         dt.datetime.fromisoformat(ts_str)
 
 
+def test_legacy_session_record_exp_id_is_NOT_auto_migrated(tmp_path):
+    """Deliberate non-migration: pre-v0.4.4 subagent records have
+    exp_id=null but new code does NOT auto-fill it from EVO_EXP_ID.
+    Rationale: a parent orchestrator that somehow inherited
+    EVO_EXP_ID in its env would silently get demoted to subagent and
+    lose /evo:optimize steering. Pre-v0.4.4 subagents are short-lived
+    anyway; users restart them to pick up the new exp_id flow."""
+    sid = "legacy-sub"
+    run = tmp_path / ".evo" / "run_test"
+    (run / "inject" / "sessions").mkdir(parents=True)
+    (run / "inject" / "markers").mkdir(parents=True)
+
+    import json
+    legacy = {
+        "schema_version": 1,
+        "session_id": sid,
+        "host": "claude-code",
+        "pid": 99999,
+        "registered_at": "2025-12-01T00:00:00+00:00",
+        "last_seen_at": "2025-12-01T00:00:00+00:00",
+        "exp_id": None,
+        "parent_session_id": None,
+    }
+    (run / "inject" / "sessions" / f"{sid}.json").write_text(json.dumps(legacy))
+
+    venv_bin = REPO_ROOT / ".venv" / "bin"
+    if not (venv_bin / "evo-drain").exists():
+        return
+    env = os.environ.copy()
+    env["PATH"] = f"{venv_bin}{_path_separator()}{_base_path()}"
+    env["EVO_EXP_ID"] = "exp_should_not_propagate"
+
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=f'{{"session_id":"{sid}","hook_event_name":"UserPromptSubmit","prompt":"continue"}}'.encode(),
+        cwd=str(tmp_path), env=env, capture_output=True, timeout=15,
+    )
+    assert r.returncode == 0
+    rec = json.loads((run / "inject" / "sessions" / f"{sid}.json").read_text())
+    # The exp_id MUST stay null — never auto-promote on existing records.
+    assert rec.get("exp_id") is None, (
+        f"existing record's exp_id must NOT be silently overwritten by env; "
+        f"got {rec.get('exp_id')!r}. Auto-migration would risk demoting "
+        f"an orchestrator whose env carried a stale EVO_EXP_ID."
+    )
+
+
 def test_session_start_writes_null_exp_id_without_env(tmp_path):
     """No EVO_EXP_ID env → exp_id stays null (orchestrator-class)."""
     sid = "orchestrator-cc"

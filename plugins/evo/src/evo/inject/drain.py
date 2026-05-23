@@ -1223,6 +1223,16 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = Path(args.run_dir)
         # run_dir is .../.evo/run_*; the workspace root is its grandparent.
         root = run_dir.parent.parent
+        # NOTE on backward compat: pre-v0.4.4 subagent session records
+        # have `exp_id: null` because the old Rust binary didn't read
+        # EVO_EXP_ID at registration time. We DELIBERATELY do not auto-
+        # migrate them at handoff: a misbehaving env (EVO_EXP_ID leaked
+        # into a parent's shell) would silently demote the orchestrator
+        # to subagent, breaking `/evo:optimize` for that session.
+        # Limitation: already-running pre-v0.4.4 subagents won't receive
+        # `evo direct --to <exp_id>` directives until they restart. New
+        # subagents dispatched under v0.4.4+ are tagged correctly by
+        # the Rust register_session path.
         # Detect /evo:optimize invocation from the prompt payload, before
         # we drain. Idempotent + subagent-safe inside mark_optimize_mode.
         if args.session and args.host:
