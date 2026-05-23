@@ -1,0 +1,306 @@
+"""Tests for openclaw + pi steering (shared factory.ts).
+
+Both wrap the same `factory.ts` over pi's ExtensionAPI. Verified hooks
+(against earendil-works/pi extensions.md):
+  - session_start — observer.
+  - before_provider_request — can replace payload; used for directive
+    injection AND auto-arming optimize_mode by scanning user messages.
+  - tool_call — fires pre-tool; returns `{block: true, reason}` to block.
+  - turn_end — observer return is ignored, but the handler calls the
+    top-level `pi.sendUserMessage(text, {deliverAs: "followUp"})` to
+    queue an autonomous-continuation message. Per pi docs that message
+    always triggers a turn, so the orchestrator keeps driving /optimize
+    autonomously. (Distinct from `ctx.sendUserMessage`, which is
+    deadlock-prone in event handlers.)
+
+Run: pytest tests/unit/test_openclaw_pi_steering.py -v
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FACTORY_TS = REPO_ROOT / "plugins" / "evo" / "src" / "evo" / "openclaw_plugin" / "factory.ts"
+BUN = shutil.which("bun")
+
+
+def _make_workspace(root: Path) -> Path:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@evo"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=root, check=True)
+    (root / "README.md").write_text("x\n")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
+    sys.path.insert(0, str(REPO_ROOT / "plugins" / "evo" / "src"))
+    from evo.core import init_workspace
+    init_workspace(
+        root, target="agent.py", benchmark="python bench.py",
+        metric="max", gate=None,
+    )
+    return next(iter((root / ".evo").glob("run_*")))
+
+
+@unittest.skipIf(BUN is None, "bun runtime not available")
+class TestOpenclawPiDenyGate(unittest.TestCase):
+    """Drive the shared makeRegister factory through a mock ExtensionAPI
+    and verify the tool_call hook blocks denied tools under optimize_mode."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.run_dir = _make_workspace(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_factory(self, host: str, body: str) -> dict:
+        # Drive the factory in `cwd=self.root` so deriveSessionId picks
+        # up the workspace path.
+        script = textwrap.dedent(f"""
+            import {{ makeRegister }} from "{FACTORY_TS}"
+            process.chdir("{self.root}")
+            const handlers: Record<string, any> = {{}}
+            const api = {{
+                on(name: string, h: any) {{ handlers[name] = h }},
+            }}
+            const register = makeRegister("{host}")
+            register(api)
+        """).strip() + "\n" + body
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".ts", delete=False) as fp:
+            fp.write(script)
+            script_path = fp.name
+        try:
+            r = subprocess.run(
+                [BUN, "run", script_path], capture_output=True, text=True, timeout=20,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+        self.assertEqual(r.returncode, 0,
+                         f"bun failed: stderr={r.stderr!r}\nstdout={r.stdout!r}")
+        return json.loads(r.stdout)
+
+    def test_tool_call_blocks_edit_in_optimize_mode(self):
+        result = self._run_factory("pi", textwrap.dedent("""
+            // Fire session_start to register, then arm optimize_mode,
+            // then fire tool_call and capture the return.
+            await handlers.session_start({}, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            rec.optimize_mode = true
+            fs.writeFileSync(sfile, JSON.stringify(rec))
+
+            const ret = await handlers.tool_call(
+                { toolName: "edit", input: { file_path: "/tmp/x" } },
+                {}
+            )
+            process.stdout.write(JSON.stringify({
+                blocked: ret?.block === true,
+                reason_has_policy: typeof ret?.reason === "string" && ret.reason.indexOf("EVO POLICY") >= 0,
+            }))
+        """))
+        self.assertTrue(result["blocked"], "tool_call must return {block: true}")
+        self.assertTrue(result["reason_has_policy"],
+                        "block reason must contain EVO POLICY banner")
+
+    def test_tool_call_allows_read(self):
+        result = self._run_factory("pi", textwrap.dedent("""
+            await handlers.session_start({}, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            rec.optimize_mode = true
+            fs.writeFileSync(sfile, JSON.stringify(rec))
+
+            const ret = await handlers.tool_call(
+                { toolName: "read_file", input: { file_path: "/tmp/x" } },
+                {}
+            )
+            process.stdout.write(JSON.stringify({
+                blocked: ret?.block === true,
+                ret_is_undefined: ret === undefined,
+            }))
+        """))
+        self.assertFalse(result["blocked"], "read_file must not block")
+
+    def test_tool_call_alternating_cadence(self):
+        result = self._run_factory("pi", textwrap.dedent("""
+            await handlers.session_start({}, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            rec.optimize_mode = true
+            fs.writeFileSync(sfile, JSON.stringify(rec))
+
+            const outcomes: boolean[] = []
+            for (let i = 0; i < 5; i++) {
+                const ret = await handlers.tool_call(
+                    { toolName: "edit", input: { file_path: "/tmp/x" } },
+                    {}
+                )
+                outcomes.push(ret?.block === true)
+            }
+            process.stdout.write(JSON.stringify(outcomes))
+        """))
+        # Alternating cadence: #1, #3, #5 block; #2, #4 pass.
+        self.assertEqual(result, [True, False, True, False, True])
+
+    def test_tool_call_not_blocked_outside_optimize_mode(self):
+        result = self._run_factory("openclaw", textwrap.dedent("""
+            await handlers.session_start({}, {})
+            // optimize_mode is NOT armed for this session.
+            const ret = await handlers.tool_call(
+                { toolName: "edit", input: { file_path: "/tmp/x" } },
+                {}
+            )
+            process.stdout.write(JSON.stringify({
+                blocked: ret?.block === true,
+            }))
+        """))
+        self.assertFalse(result["blocked"])
+
+    def test_optimize_prompt_arms_mode_via_before_provider_request(self):
+        result = self._run_factory("pi", textwrap.dedent("""
+            await handlers.session_start({}, {})
+            // Simulate openai-style payload with /optimize as the user msg.
+            await handlers.before_provider_request({
+                payload: {
+                    input: [
+                        { role: "user", content: [{ type: "input_text", text: "/optimize fix the thing" }] }
+                    ],
+                },
+            }, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            process.stdout.write(JSON.stringify({
+                optimize_mode: rec.optimize_mode === true,
+            }))
+        """))
+        self.assertTrue(result["optimize_mode"],
+                        "/optimize in user message must auto-arm optimize_mode")
+
+    def test_turn_end_fires_stop_nudge_via_sendUserMessage(self):
+        """When optimize_mode is on, turn_end should call
+        pi.sendUserMessage(text, {deliverAs: "followUp"}) with the EVO
+        LOOP banner. This is pi's autonomous-continuation primitive."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            const calls: any[] = []
+            api.sendUserMessage = (content: any, options: any) => {
+                calls.push({ content, options })
+            }
+            await handlers.session_start({}, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            rec.optimize_mode = true
+            fs.writeFileSync(sfile, JSON.stringify(rec))
+
+            await handlers.turn_end({ turnIndex: 0 }, {})
+
+            process.stdout.write(JSON.stringify({
+                num_calls: calls.length,
+                content_has_loop: typeof calls[0]?.content === "string" &&
+                                  calls[0].content.indexOf("EVO LOOP") >= 0,
+                deliver_as: calls[0]?.options?.deliverAs,
+            }))
+        """))
+        self.assertEqual(result["num_calls"], 1, "turn_end must call sendUserMessage once")
+        self.assertTrue(result["content_has_loop"], "content must include EVO LOOP")
+        self.assertEqual(result["deliver_as"], "followUp",
+                         "must use deliverAs:followUp for safe continuation")
+
+    def test_turn_end_no_nudge_outside_optimize_mode(self):
+        result = self._run_factory("pi", textwrap.dedent("""
+            const calls: any[] = []
+            api.sendUserMessage = (content: any, options: any) => {
+                calls.push({ content, options })
+            }
+            await handlers.session_start({}, {})
+            // optimize_mode NOT set
+            await handlers.turn_end({ turnIndex: 0 }, {})
+            process.stdout.write(JSON.stringify({ num_calls: calls.length }))
+        """))
+        self.assertEqual(result["num_calls"], 0,
+                         "casual pi session must not be force-continued")
+
+    def test_anthropic_payload_with_string_content_arms_mode(self):
+        """Regression for the round-1 P2: openai-style `input` items
+        with a plain-string `content` field (not parts array) must also
+        be matched by extractLatestUserText."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            await handlers.session_start({}, {})
+            // Plain string content (not a parts array)
+            await handlers.before_provider_request({
+                payload: {
+                    input: [
+                        { role: "user", content: "/optimize plain string" }
+                    ],
+                },
+            }, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            process.stdout.write(JSON.stringify({ optimize_mode: rec.optimize_mode === true }))
+        """))
+        self.assertTrue(result["optimize_mode"],
+                        "input item with string content must reach the matcher")
+
+    def test_host_string_recorded_correctly(self):
+        """Sanity: openclaw and pi each record their own host string."""
+        for host in ("pi", "openclaw"):
+            with self.subTest(host=host):
+                # Reset workspace for each subtest.
+                self.tearDown()
+                self.setUp()
+                result = self._run_factory(host, textwrap.dedent("""
+                    await handlers.session_start({}, {})
+                    const fs = await import("fs")
+                    const path = await import("path")
+                    const cryp = await import("crypto")
+                    const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+                """ + f'                    const sid = `{host}-${{hash}}`\n' + """
+                    const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+                    const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+                    process.stdout.write(JSON.stringify({ host: rec.host }))
+                """))
+                self.assertEqual(result["host"], host,
+                                 f"session record must tag host={host!r}, got {result!r}")
+
+
+if __name__ == "__main__":
+    unittest.main()

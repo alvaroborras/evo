@@ -9,20 +9,52 @@
 //   2. Session ids are prefixed `<host>-<cwd_hash>`, so running pi and
 //      openclaw concurrently against the same workspace produces two
 //      distinct session records instead of colliding on one.
+//
+// Pi ExtensionAPI contract (verified against
+// earendil-works/pi `packages/coding-agent/docs/extensions.md`):
+//   - `session_start` — observer.
+//   - `before_provider_request` — can replace payload; used to inject
+//     directives + the policy banner as user messages.
+//   - `tool_call` — fires pre-tool; return `{block: true, reason}` to
+//     block. CAN mutate `event.input`. Used as the policy gate.
+//   - `turn_end` — observer-only return-wise, but we can call
+//     `pi.sendUserMessage(text, { deliverAs: "followUp" })` from inside
+//     it to queue an autonomous-continuation message. That message
+//     "Always triggers a turn" per the upstream docs, so the orchestrator
+//     keeps driving the /optimize loop autonomously.
+//
+// (`ctx.sendUserMessage` is the deadlock-risk variant — only safe in
+// command handlers. The top-level `pi.sendUserMessage` is safe to call
+// from event handlers.)
 
 import {
+  POLICY_NUDGE_TEMPLATE,
+  STOP_NUDGE_TEMPLATE,
+  commitDrainPeek,
   drainSession,
   findEvoRunDir,
+  formatDirectiveText,
+  getSession,
+  incrementAndShouldBlock,
   initOffsetToLatest,
+  isDeniedInOptimizeMode,
   isEvoCommand,
   isRegistered,
   markEngaged,
+  markOptimizeMode,
+  maybeMarkOptimizeFromPrompt,
+  maybeStopNudgeText,
+  peekDrainSession,
   registerSession,
 } from "../opencode_plugin/drain.js"
 import * as crypto from "crypto"
 
 interface PiExtensionAPI {
   on(event: string, handler: (event: any, ctx: any) => any): void
+  sendUserMessage?: (
+    content: string | Array<{ type: string; text?: string }>,
+    options?: { deliverAs?: "steer" | "followUp" | "nextTurn"; triggerTurn?: boolean },
+  ) => void
 }
 
 export function makeRegister(host: string): (api: PiExtensionAPI) => void {
@@ -103,9 +135,48 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       return false
     }
 
+    // Extract the most recent user-message text from the outbound LLM
+    // payload. Handles both OpenAI Responses-style (payload.input) and
+    // Anthropic Messages-style (payload.messages), with `content` as
+    // either a plain string or a parts array.
+    const extractLatestUserText = (payload: any): string => {
+      try {
+        const items = Array.isArray(payload?.input) ? payload.input : []
+        for (let i = items.length - 1; i >= 0; i--) {
+          const it = items[i]
+          if (it?.role !== "user") continue
+          if (typeof it.content === "string" && it.content) return it.content
+          if (Array.isArray(it.content)) {
+            for (const c of it.content) {
+              if (typeof c?.text === "string" && c.text) return c.text
+            }
+          }
+        }
+        const msgs = Array.isArray(payload?.messages) ? payload.messages : []
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i]
+          if (m?.role !== "user") continue
+          if (typeof m.content === "string") return m.content
+          if (Array.isArray(m.content)) {
+            for (const c of m.content) {
+              if (typeof c?.text === "string" && c.text) return c.text
+            }
+          }
+        }
+      } catch {
+        // Defensive
+      }
+      return ""
+    }
+
     api.on("before_provider_request", (event: any, _ctx: any) => {
       const ctx = ensureRegistered()
       if (!ctx) return
+
+      // Auto-arm optimize_mode if the most recent user message looks like
+      // `/optimize`. Mirrors the per-host pattern matchers.
+      const promptText = extractLatestUserText(event.payload)
+      maybeMarkOptimizeFromPrompt(ctx.runDir, ctx.sid, host, promptText)
 
       // Engagement detection — flip the flag if the outbound payload
       // shows the agent has been running `evo` commands.
@@ -125,6 +196,53 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       const combined = drainedTexts.join("\n")
       appendToPayload(event, combined)
       return event.payload
+    })
+
+    // Policy gate via the tool_call hook. Verified against
+    // earendil-works/pi: returning `{block: true, reason}` blocks the
+    // tool and feeds the reason back to the agent as the tool result.
+    api.on("tool_call", (event: any, _ctx: any) => {
+      const ctx = ensureRegistered()
+      if (!ctx) return
+      const sess = getSession(ctx.runDir, ctx.sid) as any
+      if (!sess) return
+      if (sess.exp_id) return // subagent — exempt
+      if (!sess.optimize_mode) return
+      const toolName = event?.toolName ?? event?.tool_name
+      const toolInput = event?.input ?? {}
+      if (!isDeniedInOptimizeMode(toolName, toolInput)) return
+      if (incrementAndShouldBlock(ctx.runDir, ctx.sid, toolName)) {
+        return { block: true, reason: POLICY_NUDGE_TEMPLATE }
+      }
+      // Even-numbered violation under alternating cadence — pass.
+    })
+
+    // Always-fire stop nudge via turn_end. Uses pi's top-level
+    // `pi.sendUserMessage(text, { deliverAs: "followUp" })`. Per upstream
+    // docs the followUp message waits for the agent to finish current
+    // tool execution, then delivers AND triggers another turn — the
+    // exact behavior we want for /optimize loop continuation.
+    api.on("turn_end", async (_event: any, _ctx: any) => {
+      if (typeof api.sendUserMessage !== "function") return // older pi
+      const ctx = ensureRegistered()
+      if (!ctx) return
+      const sess = getSession(ctx.runDir, ctx.sid) as any
+      if (!sess) return
+      if (sess.exp_id) return
+      if (!sess.optimize_mode) return
+
+      // Peek queued directives (don't pop) and combine with the nudge.
+      // If sendUserMessage throws, directives stay queued.
+      const peek = peekDrainSession(ctx.runDir, ctx.sid)
+      const text = peek.text
+        ? peek.text + "\n\n" + STOP_NUDGE_TEMPLATE
+        : STOP_NUDGE_TEMPLATE
+      try {
+        api.sendUserMessage(text, { deliverAs: "followUp" })
+        commitDrainPeek(ctx.runDir, ctx.sid, peek)
+      } catch (_e) {
+        // Best-effort — pi may reject if the session is shutting down.
+      }
     })
   }
 }
