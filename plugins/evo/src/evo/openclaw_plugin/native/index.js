@@ -98,7 +98,14 @@ function writeOffset(runDir, sid, opts) {
 function formatDirectiveText(events) {
   const lines = [];
   for (const ev of events) {
-    if (ev.text) {
+    if (!ev.text)
+      continue;
+    const id = ev.id || "";
+    if (id) {
+      lines.push(`[EVO DIRECTIVE id=${id}]`);
+      lines.push(ev.text);
+      lines.push(`[END EVO DIRECTIVE — when done, run: evo ack ${id}]`);
+    } else {
       lines.push("[EVO DIRECTIVE]");
       lines.push(ev.text);
       lines.push("[END EVO DIRECTIVE]");
@@ -120,6 +127,12 @@ function registerSession(runDir, sid, host, expId = null) {
   const existing = readJsonOrNull(p);
   if (existing) {
     existing.last_seen_at = now;
+    if (expId && !existing.exp_id)
+      existing.exp_id = expId;
+    if (existing.has_evo_engaged === undefined)
+      existing.has_evo_engaged = false;
+    if (existing.engaged_at === undefined)
+      existing.engaged_at = null;
     atomicWriteJson(p, existing);
     return;
   }
@@ -131,9 +144,22 @@ function registerSession(runDir, sid, host, expId = null) {
     registered_at: now,
     last_seen_at: now,
     exp_id: expId,
-    parent_session_id: null
+    parent_session_id: null,
+    has_evo_engaged: false,
+    engaged_at: null
   };
   atomicWriteJson(p, rec);
+  initOffsetToLatest(runDir, sid);
+}
+function initOffsetToLatest(runDir, sid) {
+  const wsPath = workspaceEventsPath(runDir);
+  let latest = null;
+  if (fs.existsSync(wsPath)) {
+    const events = readEventsAfter(wsPath, null);
+    if (events.length > 0)
+      latest = events[events.length - 1].id;
+  }
+  writeOffset(runDir, sid, { workspaceId: latest });
 }
 function findEvoRunDir(cwd) {
   const envRunDir = process.env.EVO_RUN_DIR;
@@ -192,6 +218,61 @@ function drainSession(runDir, sessionId) {
   unlinkIfExists(markerFile(runDir, sessionId));
   return { text, newWorkspaceOffset, newExpOffset };
 }
+var POLICY_NUDGE_TEMPLATE = `[EVO POLICY]
+` + `Preventative block. You may have strayed from /evo:optimize protocol.
+` + `
+` + `When /optimize is active, the orchestrator should NOT edit files directly
+` + `or run experiment commands by hand. The protocol is: write briefs, spawn
+` + `subagents, let them do the edits and runs, then read the results.
+` + `
+` + "If you need to wait for subagents to finish, use `evo wait` — it blocks\n" + `until any experiment concludes, max 1h.
+` + `
+` + `Manual edits and shell commands that mutate files are discouraged unless
+` + `evo doesn't already expose the operation. If this block was actually
+` + "warranted (rare), run `evo exit-optimize-mode` to disable the safety\n" + `nudges, then retry the tool.
+` + `[END EVO POLICY]
+`;
+var STOP_NUDGE_TEMPLATE = `[EVO LOOP]
+` + `You are driving /evo:optimize autonomously. Don't stop, and don't ask
+` + `the user for direction — they explicitly invoked /optimize for hands-off
+` + "operation. They'll intervene via `evo direct` if they need to.\n" + `
+` + "If subagents are still running: run `evo wait` to block until the next\n" + `experiment concludes (or up to 1h). Then resume planning.
+` + `
+` + "If subagents are done and you have unread results: read `evo scratchpad`,\n" + `update annotations as needed, and plan + spawn the next round.
+` + `
+` + "Stop only if `evo status` shows the budget exhausted or you've hit the\n" + `stall limit. If so, print a final summary first. To suppress this
+` + `continuation loop for a legitimate one-off task, run
+` + "`evo exit-optimize-mode`.\n" + `[END EVO LOOP]
+`;
+var DENY_TOOL_NAMES = new Set([
+  "edit",
+  "write",
+  "notebookedit",
+  "notebook_edit",
+  "multiedit",
+  "multi_edit",
+  "edit_file",
+  "create_file",
+  "search_replace",
+  "str_replace",
+  "applypatch",
+  "apply_patch",
+  "delete_file",
+  "file_write",
+  "file_edit"
+]);
+var BASH_TOOL_NAMES = new Set([
+  "bash",
+  "shell",
+  "exec",
+  "run_terminal_cmd",
+  "runterminalcmd",
+  "run_command",
+  "terminal",
+  "execute_code",
+  "execute"
+]);
+var SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ash"]);
 
 // index.ts
 import * as crypto from "crypto";
@@ -223,7 +304,9 @@ function deriveSessionId() {
   const marker = "/.evo/";
   const idx = runDir.indexOf(marker);
   const workspace = idx >= 0 ? runDir.slice(0, idx) : process.cwd();
-  const hash = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 12);
+  const expId = process.env.EVO_EXP_ID || "";
+  const seed = expId ? `${workspace}|${expId}` : workspace;
+  const hash = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
   return "openclaw-" + hash;
 }
 var drainedTexts = [];
@@ -247,8 +330,9 @@ var native_default = {
         return null;
       const sid = deriveSessionId();
       if (!isRegistered(runDir, sid)) {
-        registerSession(runDir, sid, "openclaw");
-        log(`registered session ${sid} in ${runDir}`);
+        const expId = process.env.EVO_EXP_ID || null;
+        registerSession(runDir, sid, "openclaw", expId);
+        log(`registered session ${sid} in ${runDir}${expId ? " (exp_id=" + expId + ")" : ""}`);
       }
       return { runDir, sid };
     };

@@ -394,8 +394,16 @@ fn main() {
         handoff_to_drain(&run_dir, &sid, host, &stdin_buf);
     }
 
+    // Resume support: claude-code resumes (and `evo init` mid-session)
+    // don't fire SessionStart, so the session may not be registered yet
+    // when UserPromptSubmit arrives. Lazy-register on first prompt so the
+    // /optimize matcher in Python actually has a session record to flip.
     if !sessions_file.is_file() {
-        emit_ok();
+        if hook_event == "UserPromptSubmit" {
+            let _ = register_session(&run_dir, &sid, host);
+        } else {
+            emit_ok();
+        }
     }
 
     let marker = marker_exists(&run_dir, &sid);

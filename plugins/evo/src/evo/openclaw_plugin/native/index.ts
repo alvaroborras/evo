@@ -63,7 +63,12 @@ function deriveSessionId(): string {
   const marker = "/.evo/"
   const idx = runDir.indexOf(marker)
   const workspace = idx >= 0 ? runDir.slice(0, idx) : process.cwd()
-  const hash = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 12)
+  // Include EVO_EXP_ID in the seed so subagents get a distinct sid
+  // from the parent and from each other. See factory.ts deriveSessionId
+  // for the design rationale.
+  const expId = process.env.EVO_EXP_ID || ""
+  const seed = expId ? `${workspace}|${expId}` : workspace
+  const hash = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12)
   return "openclaw-" + hash
 }
 
@@ -96,9 +101,13 @@ export default {
       const runDir = findOpenclawRunDir()
       if (!runDir) return null
       const sid = deriveSessionId()
+      // Subagent gets a distinct sid (via EVO_EXP_ID in the hash);
+      // pass exp_id at first registration so the record is tagged
+      // correctly from birth.
       if (!isRegistered(runDir, sid)) {
-        registerSession(runDir, sid, "openclaw")
-        log(`registered session ${sid} in ${runDir}`)
+        const expId = process.env.EVO_EXP_ID || null
+        registerSession(runDir, sid, "openclaw", expId)
+        log(`registered session ${sid} in ${runDir}${expId ? " (exp_id=" + expId + ")" : ""}`)
       }
       return { runDir, sid }
     }

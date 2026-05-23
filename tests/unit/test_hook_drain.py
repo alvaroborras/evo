@@ -510,6 +510,62 @@ def test_nested_env_host_matches_payload_sid_owner(tmp_path):
     assert args[sid_idx + 1] == payload_sid
 
 
+def test_resume_userpromptsubmit_lazy_registers_session(tmp_path):
+    """Resumed claude-code sessions don't fire SessionStart, so the
+    session may not be in the registry when UserPromptSubmit arrives.
+    The Rust hook must lazy-register on UserPromptSubmit and hand off
+    to Python so the /optimize matcher can fire."""
+    sid = "resumed-sess"
+    # Build a workspace WITHOUT scaffolding a session file (simulates
+    # resume against a workspace where this session never ran SessionStart).
+    run = tmp_path / ".evo" / "run_test"
+    (run / "inject" / "sessions").mkdir(parents=True)
+    (run / "inject" / "markers").mkdir(parents=True)
+    # No session file. No marker. No opt flag.
+
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(
+        tmp_path,
+        f'{{"session_id":"{sid}","hook_event_name":"UserPromptSubmit","prompt":"/evo:optimize"}}'.encode(),
+        path_env=path_env,
+    )
+    assert r.returncode == 0
+    # Session file should now exist (lazy-registered).
+    assert (run / "inject" / "sessions" / f"{sid}.json").exists(), (
+        "UserPromptSubmit on unregistered session must lazy-register"
+    )
+    # Drain should have been invoked.
+    assert (fake_bin / "argv.log").exists(), (
+        "lazy-registered UserPromptSubmit must still hand off to drain"
+    )
+
+
+def test_resume_pretooluse_still_fast_exits_when_unregistered(tmp_path):
+    """For PreToolUse (and other non-SessionStart, non-UserPromptSubmit
+    events), an unregistered session still fast-exits. We only lazy-
+    register on the prompt path so optimize-mode detection works; other
+    events with no session record stay quiet."""
+    sid = "ghost-sess"
+    run = tmp_path / ".evo" / "run_test"
+    (run / "inject" / "sessions").mkdir(parents=True)
+    (run / "inject" / "markers").mkdir(parents=True)
+
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(
+        tmp_path,
+        f'{{"session_id":"{sid}","hook_event_name":"PreToolUse"}}'.encode(),
+        path_env=path_env,
+    )
+    assert r.returncode == 0
+    assert r.stdout.strip() == b"{}"
+    # No drain invocation for unregistered non-prompt event.
+    assert not (fake_bin / "argv.log").exists()
+
+
 def test_nested_env_host_falls_back_when_no_env_matches(tmp_path):
     """Payload sid + no env var matches it → fall back to path-fragment
     detection. With no `.codex/` etc. in the payload, default is claude-code."""

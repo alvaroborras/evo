@@ -183,7 +183,14 @@ def mark_optimize_mode(root: Path, session_id: str) -> bool:
         return False
     data["optimize_mode"] = True
     data["optimize_mode_at"] = _now_iso()
-    atomic_write_json(path, data)
+    # Fail-open on disk-full / perms: this fires from the hot prompt
+    # path. Crashing here would halt the agent. Better to leave
+    # optimize_mode unset and let the user re-arm than to block the
+    # hook entirely.
+    try:
+        atomic_write_json(path, data)
+    except OSError:
+        return False
     _write_optimize_mode_flag(root, session_id)
     return True
 
@@ -212,7 +219,14 @@ def unmark_optimize_mode(root: Path, session_id: str) -> bool:
         return False
     data["optimize_mode"] = False
     data["optimize_mode_at"] = None
-    atomic_write_json(path, data)
+    try:
+        atomic_write_json(path, data)
+    except OSError:
+        # Even if the JSON write fails, clear the flag — that's the
+        # signal Rust reads. User invoked `evo exit-optimize-mode`
+        # explicitly; honor that intent.
+        _clear_optimize_mode_flag(root, session_id)
+        return False
     _clear_optimize_mode_flag(root, session_id)
     return True
 

@@ -59,7 +59,15 @@ interface PiExtensionAPI {
 
 export function makeRegister(host: string): (api: PiExtensionAPI) => void {
   function deriveSessionId(): string {
-    const hash = crypto.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+    // Include EVO_EXP_ID in the seed so subagents get a DIFFERENT sid
+    // from the parent (and from each other). Without this, a parent and
+    // a subagent in the same cwd collapse onto one session record;
+    // tagging exp_id on the shared record would then disable the
+    // orchestrator's steering. Distinct sids let each agent carry its
+    // own exp_id state and own queue offsets.
+    const expId = process.env.EVO_EXP_ID || ""
+    const seed = expId ? `${process.cwd()}|${expId}` : process.cwd()
+    const hash = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12)
     return `${host}-${hash}`
   }
 
@@ -74,8 +82,13 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       const runDir = findEvoRunDir()
       if (!runDir) return null
       const sid = deriveSessionId()
+      // Subagents get a different sid (EVO_EXP_ID in the hash seed),
+      // so each agent has its own session record — no shared-record
+      // pollution between parent and child. Pass exp_id at first
+      // registration so the record carries the right tag from birth.
       if (!isRegistered(runDir, sid)) {
-        registerSession(runDir, sid, host)
+        const expId = process.env.EVO_EXP_ID || null
+        registerSession(runDir, sid, host, expId)
       }
       return { sid, runDir }
     }

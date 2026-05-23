@@ -280,6 +280,145 @@ class TestOpenclawPiDenyGate(unittest.TestCase):
         self.assertTrue(result["optimize_mode"],
                         "input item with string content must reach the matcher")
 
+    def test_subagent_env_var_records_exp_id(self):
+        """When EVO_EXP_ID is set in the env (subagent dispatch sets it),
+        the subagent gets a DISTINCT sid (cwd + exp_id in the hash seed)
+        and registerSession records exp_id on that subagent's own record.
+        The subagent fence (`sess.exp_id` checks) then fires correctly."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            process.env.EVO_EXP_ID = "exp_0042"
+            await handlers.session_start({}, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            // Subagent sid uses cwd|exp_id as the hash seed.
+            const seed = process.cwd() + "|" + "exp_0042"
+            const hash = cryp.createHash("sha256").update(seed).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            process.stdout.write(JSON.stringify({ exp_id: rec.exp_id, host: rec.host }))
+        """))
+        self.assertEqual(result["exp_id"], "exp_0042",
+                         "subagent record must carry exp_id")
+        self.assertEqual(result["host"], "pi")
+
+    def test_parent_and_subagent_get_distinct_session_records(self):
+        """The architecturally correct fix for cwd-collision: parent and
+        subagent derive DIFFERENT sids (parent uses cwd alone, subagent
+        uses cwd|exp_id). Each gets its own session record. Parent's
+        record stays exp_id=null so its steering still fires. Subagent's
+        record has exp_id set so the fence exempts it."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+
+            // Phase 1: parent registers without EVO_EXP_ID.
+            delete process.env.EVO_EXP_ID
+            await handlers.session_start({}, {})
+            const parent_hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const parent_sid = `pi-${parent_hash}`
+            const parent_sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${parent_sid}.json`)
+            const parent_rec = JSON.parse(fs.readFileSync(parent_sfile, "utf8"))
+
+            // Phase 2: subagent with EVO_EXP_ID. Same cwd, DIFFERENT sid.
+            process.env.EVO_EXP_ID = "exp_sub_001"
+            await handlers.session_start({}, {})
+            const sub_seed = process.cwd() + "|exp_sub_001"
+            const sub_hash = cryp.createHash("sha256").update(sub_seed).digest("hex").slice(0, 12)
+            const sub_sid = `pi-${sub_hash}`
+            const sub_sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sub_sid}.json`)
+            const sub_rec = JSON.parse(fs.readFileSync(sub_sfile, "utf8"))
+
+            // Re-read parent to confirm it wasn't mutated.
+            const parent_after = JSON.parse(fs.readFileSync(parent_sfile, "utf8"))
+
+            process.stdout.write(JSON.stringify({
+                parent_sid: parent_sid,
+                sub_sid: sub_sid,
+                sids_differ: parent_sid !== sub_sid,
+                parent_exp_id_before: parent_rec.exp_id,
+                parent_exp_id_after: parent_after.exp_id,
+                sub_exp_id: sub_rec.exp_id,
+            }))
+        """))
+        self.assertTrue(result["sids_differ"],
+                        "parent and subagent must derive different sids")
+        self.assertIsNone(result["parent_exp_id_before"],
+                          "parent record starts exp_id=null")
+        self.assertIsNone(result["parent_exp_id_after"],
+                          "parent record must STAY exp_id=null after "
+                          "subagent registers — otherwise parent's "
+                          "steering would be disabled")
+        self.assertEqual(result["sub_exp_id"], "exp_sub_001",
+                         "subagent's own record carries exp_id")
+
+    def test_parent_steering_still_fires_after_subagent_registered(self):
+        """End-to-end check: orchestrator-in-optimize_mode + subagent
+        registers in the same cwd → parent's tool_call must STILL deny
+        edit (the previous merge-fix would have broken this)."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+
+            // Parent registers + arms optimize_mode.
+            delete process.env.EVO_EXP_ID
+            await handlers.session_start({}, {})
+            const phash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const psid = `pi-${phash}`
+            const pfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${psid}.json`)
+            let prec = JSON.parse(fs.readFileSync(pfile, "utf8"))
+            prec.optimize_mode = true
+            fs.writeFileSync(pfile, JSON.stringify(prec))
+
+            // Subagent registers with EVO_EXP_ID.
+            process.env.EVO_EXP_ID = "exp_sub_002"
+            await handlers.session_start({}, {})
+
+            // Reset env back so the parent's tool_call hits the parent.
+            delete process.env.EVO_EXP_ID
+
+            const ret = await handlers.tool_call(
+                { toolName: "edit", input: {} }, {}
+            )
+            process.stdout.write(JSON.stringify({ blocked: ret?.block === true }))
+        """))
+        self.assertTrue(result["blocked"],
+                        "parent's tool_call must STILL deny after subagent "
+                        "registers — distinct-sid design keeps parent's "
+                        "exp_id=null so the policy gate fires")
+
+    def test_subagent_tool_call_not_blocked_even_in_optimize_mode(self):
+        """End-to-end: subagent process (EVO_EXP_ID set) registers its
+        OWN session record (distinct sid). The exp_id on that record
+        exempts the subagent's tool_call even if optimize_mode is
+        on for that record."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            process.env.EVO_EXP_ID = "exp_sub"
+            await handlers.session_start({}, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            // Subagent sid uses cwd|exp_id as the seed.
+            const seed = process.cwd() + "|exp_sub"
+            const hash = cryp.createHash("sha256").update(seed).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            // Even with optimize_mode flipped on, the subagent must pass.
+            rec.optimize_mode = true
+            fs.writeFileSync(sfile, JSON.stringify(rec))
+
+            const ret = await handlers.tool_call(
+                { toolName: "edit", input: {} }, {}
+            )
+            process.stdout.write(JSON.stringify({ blocked: ret?.block === true }))
+        """))
+        self.assertFalse(result["blocked"],
+                         "subagent (exp_id set) must not be policy-blocked")
+
     def test_host_string_recorded_correctly(self):
         """Sanity: openclaw and pi each record their own host string."""
         for host in ("pi", "openclaw"):

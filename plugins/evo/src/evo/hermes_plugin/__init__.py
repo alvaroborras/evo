@@ -1,8 +1,29 @@
 """Hermes runtime plugin — auto-discovered via pip entry-point
 `hermes_agent.plugins`.
 
-Hooks registered (only hooks that hermes actually fires per its
-`VALID_HOOKS` set in `hermes_cli/plugins.py`):
+KNOWN LIMITATIONS (hermes hook contract, not bugs in this plugin):
+
+  1. Cannot block denied tool calls. Hermes's `pre_tool_call` is
+     observer-only — return value is ignored per upstream docs
+     ("Use cases: ... blocking dangerous operations (print a warning)").
+     We record the violation and inject the policy banner on the NEXT
+     pre_llm_call. The agent self-corrects on its next iteration, but
+     the offending tool has already executed by then. On claude-code /
+     codex / cursor / opencode / openclaw / pi the gate is synchronous;
+     here it is reactive. Same `optimize_mode` + alternating cadence
+     gating; weaker enforcement.
+
+  2. No always-fire stop nudge. Hermes has no turn-end hook whose
+     return value can force a new turn. `post_llm_call` exists but its
+     return is ignored. If the agent stops, nothing here continues it.
+     For `hermes chat -q ... -Q` batch mode this is a hard limit; for
+     interactive sessions the user's next prompt resumes naturally.
+
+  Both limitations are upstream API constraints. They're documented
+  here so that a session starting with `/optimize` on hermes is known
+  to operate under weaker steering than on the other hosts.
+
+Hooks registered (verified against hermes-agent 0.10's `VALID_HOOKS`):
 
 - `on_session_start`: registers the hermes session in evo's inject
   registry. Return value is ignored by hermes.

@@ -654,7 +654,9 @@ function incrementAndShouldBlock(runDir, sid, toolName) {
 import * as crypto from "crypto";
 function makeRegister(host) {
   function deriveSessionId() {
-    const hash = crypto.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12);
+    const expId = process.env.EVO_EXP_ID || "";
+    const seed = expId ? `${process.cwd()}|${expId}` : process.cwd();
+    const hash = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
     return `${host}-${hash}`;
   }
   return function register(api) {
@@ -665,7 +667,8 @@ function makeRegister(host) {
         return null;
       const sid = deriveSessionId();
       if (!isRegistered(runDir, sid)) {
-        registerSession(runDir, sid, host);
+        const expId = process.env.EVO_EXP_ID || null;
+        registerSession(runDir, sid, host, expId);
       }
       return { sid, runDir };
     };

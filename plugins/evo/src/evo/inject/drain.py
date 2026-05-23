@@ -1043,9 +1043,16 @@ def _read_policy_state(root: Path, session_id: str) -> dict:
 
 
 def _write_policy_state(root: Path, session_id: str, data: dict) -> None:
+    """Best-effort: never propagate OSError from the hot PreToolUse path.
+    If the counter write fails (disk full, perms), the worst case is
+    cadence drift — same risk as #39 we already accepted. Crashing here
+    would halt the agent."""
     p = _policy_state_file(root, session_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data))
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data))
+    except OSError:
+        pass
 
 
 _PRE_TOOL_EVENTS = ("PreToolUse", "preToolUse")
