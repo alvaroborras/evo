@@ -211,3 +211,328 @@ def test_session_start_silent_when_drain_present(tmp_path):
     r = _run_hook(tmp_path, PAYLOAD_SESSION_START, path_env=path_env)
     assert b"install evo-hq-cli" not in r.stderr
     assert r.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# optimize_mode flag-file gate — the actual policy-gate correctness fix.
+# Without this, claude-code/codex tool events fast-exit (no marker) even
+# when the policy gate should fire. The flag file is the signal.
+# ---------------------------------------------------------------------------
+
+
+def _write_recording_drain(fake_bin: Path) -> Path:
+    """Fake evo-drain that records its argv to a sibling `argv.log` file
+    and prints {}. Used to assert what the Rust hook passes through."""
+    fake_bin.mkdir(exist_ok=True)
+    if sys.platform == "win32":
+        # On Windows the .cmd shim's argv path is awkward to record; use
+        # a simpler Python-via-py shim. The cargo-built binary spawns
+        # CreateProcess regardless.
+        drain = fake_bin / "evo-drain.cmd"
+        drain.write_text(
+            f"@echo off\r\n"
+            f'(echo %*) > "{(fake_bin / "argv.log").as_posix()}"\r\n'
+            f"echo {{}}\r\nexit /b 0\r\n"
+        )
+        return drain
+    drain = fake_bin / "evo-drain"
+    drain.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$@" > "{fake_bin / "argv.log"}"\n'
+        "echo '{}'\nexit 0\n"
+    )
+    drain.chmod(0o755)
+    return drain
+
+
+def _scaffold_with_opt_flag(tmp_path: Path, sid: str = "test-sid") -> Path:
+    """Scaffold a session WITHOUT a marker but WITH the optimize_mode
+    flag file present."""
+    run = tmp_path / ".evo" / "run_test"
+    (run / "inject" / "sessions").mkdir(parents=True)
+    (run / "inject" / "markers").mkdir(parents=True)
+    (run / "inject" / "optimize_mode").mkdir(parents=True)
+    (run / "inject" / "sessions" / f"{sid}.json").write_text(
+        '{"schema_version":1,"session_id":"' + sid + '","host":"claude-code"}'
+    )
+    (run / "inject" / "optimize_mode" / f"{sid}.flag").touch()
+    return tmp_path
+
+
+def test_opt_flag_present_pretooluse_hands_off(tmp_path):
+    """When optimize_mode flag exists and event is PreToolUse, hand off
+    to drain even without a marker. This is the policy-gate correctness
+    fix: the Python drain enforces the deny list."""
+    _scaffold_with_opt_flag(tmp_path)
+    fake_bin = tmp_path / "fake-bin"
+    _write_fake_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(tmp_path, PAYLOAD_PRETOOL, path_env=path_env)
+    assert r.returncode == 0
+    # Fake drain prints {} — if it ran, that's what we get on stdout.
+    assert r.stdout.strip() == b"{}"
+
+
+def test_opt_flag_present_stop_hands_off(tmp_path):
+    """Stop event with optimize_mode flag → hand off (stop nudge)."""
+    _scaffold_with_opt_flag(tmp_path)
+    fake_bin = tmp_path / "fake-bin"
+    _write_fake_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(
+        tmp_path,
+        b'{"session_id":"test-sid","hook_event_name":"Stop"}',
+        path_env=path_env,
+    )
+    assert r.returncode == 0
+    assert r.stdout.strip() == b"{}"
+
+
+def test_opt_flag_present_subagent_stop_hands_off(tmp_path):
+    _scaffold_with_opt_flag(tmp_path)
+    fake_bin = tmp_path / "fake-bin"
+    _write_fake_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(
+        tmp_path,
+        b'{"session_id":"test-sid","hook_event_name":"SubagentStop"}',
+        path_env=path_env,
+    )
+    assert r.returncode == 0
+
+
+def test_opt_flag_absent_pretooluse_fast_exits(tmp_path):
+    """Without optimize_mode flag AND without marker, PreToolUse fast-exits.
+    This is the cost-saving fast path — no Python invocation for normal
+    tool calls outside /optimize."""
+    # Use the marker-less scaffold (no opt_flag, no marker).
+    _scaffold_evo_run(tmp_path, with_marker=False)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(tmp_path, PAYLOAD_PRETOOL, path_env=path_env)
+    assert r.returncode == 0
+    assert r.stdout.strip() == b"{}"
+    # Recording drain should NOT have been invoked (no argv.log).
+    assert not (fake_bin / "argv.log").exists(), (
+        "drain must NOT be invoked on PreToolUse outside optimize_mode"
+    )
+
+
+def test_userpromptsubmit_hands_off_when_opt_flag_missing(tmp_path):
+    """UserPromptSubmit without optimize_mode flag → hand off (might
+    detect /optimize in the prompt)."""
+    _scaffold_evo_run(tmp_path, with_marker=False)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(
+        tmp_path,
+        b'{"session_id":"test-sid","hook_event_name":"UserPromptSubmit","prompt":"/optimize do x"}',
+        path_env=path_env,
+    )
+    assert r.returncode == 0
+    # drain WAS invoked — argv.log exists.
+    assert (fake_bin / "argv.log").exists(), (
+        "drain must be invoked on UserPromptSubmit to detect /optimize"
+    )
+
+
+def test_userpromptsubmit_fast_exits_when_opt_flag_already_set(tmp_path):
+    """UserPromptSubmit + optimize_mode already on → fast exit (no
+    need to re-detect /optimize, already armed)."""
+    _scaffold_with_opt_flag(tmp_path)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(
+        tmp_path,
+        b'{"session_id":"test-sid","hook_event_name":"UserPromptSubmit","prompt":"more work"}',
+        path_env=path_env,
+    )
+    assert r.returncode == 0
+    assert r.stdout.strip() == b"{}"
+    # drain NOT invoked — optimize already on, no need to re-detect.
+    assert not (fake_bin / "argv.log").exists(), (
+        "drain must NOT be invoked for UserPromptSubmit when optimize_mode "
+        "is already on (skip the prompt-pattern re-check)"
+    )
+
+
+def test_marker_alone_still_hands_off(tmp_path):
+    """Backward compat: marker file alone (no optimize_mode flag) still
+    triggers handoff. This is the original `evo direct` delivery path."""
+    _scaffold_evo_run(tmp_path, with_marker=True)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(tmp_path, PAYLOAD_PRETOOL, path_env=path_env)
+    assert r.returncode == 0
+    assert (fake_bin / "argv.log").exists(), (
+        "marker present must trigger handoff regardless of optimize_mode"
+    )
+
+
+def test_handoff_passes_host_arg(tmp_path):
+    """The Rust hook must pass `--host <host>` to evo-drain so the
+    Python side knows which envelope to emit."""
+    _scaffold_evo_run(tmp_path, with_marker=True)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    r = _run_hook(tmp_path, PAYLOAD_PRETOOL, path_env=path_env)
+    assert r.returncode == 0
+    argv_log = fake_bin / "argv.log"
+    assert argv_log.exists()
+    args = argv_log.read_text().splitlines()
+    assert "--host" in args, f"--host must be in argv, got {args}"
+    host_idx = args.index("--host")
+    assert host_idx + 1 < len(args), "--host must have a value"
+    host_val = args[host_idx + 1]
+    # claude-code is the default when stdin doesn't carry a host hint.
+    assert host_val in {"claude-code", "codex", "hermes", "opencode"}, (
+        f"--host value should be a known host, got {host_val!r}"
+    )
+
+
+def test_codex_env_var_overrides_path_fragment(tmp_path):
+    """Codex's stdin payload doesn't always include `.codex/` path
+    fragments. When CODEX_THREAD_ID is set, host must be detected as
+    `codex` regardless of path fragments — otherwise the codex
+    `$evo:optimize` pattern matcher never runs."""
+    sid = "codex-sess-123"
+    _scaffold_evo_run(tmp_path, sid=sid, with_marker=True)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{_path_separator()}{_base_path()}"
+    # Set CODEX_THREAD_ID; clear all other host env vars.
+    for v in ("CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID", "OPENCODE_SESSION_ID"):
+        env.pop(v, None)
+    env["CODEX_THREAD_ID"] = sid
+    payload = f'{{"session_id":"{sid}","hook_event_name":"PreToolUse"}}'.encode()
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=payload, cwd=str(tmp_path), env=env,
+        capture_output=True, timeout=10,
+    )
+    assert r.returncode == 0
+    args = (fake_bin / "argv.log").read_text().splitlines()
+    host_idx = args.index("--host")
+    assert args[host_idx + 1] == "codex", (
+        f"CODEX_THREAD_ID env should imply host=codex; got --host {args[host_idx + 1]!r}"
+    )
+
+
+def test_claude_code_env_var_implies_host(tmp_path):
+    """CLAUDE_CODE_SESSION_ID set → host=claude-code."""
+    sid = "claude-sess-456"
+    _scaffold_evo_run(tmp_path, sid=sid, with_marker=True)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{_path_separator()}{_base_path()}"
+    for v in ("CODEX_THREAD_ID", "HERMES_SESSION_ID", "OPENCODE_SESSION_ID"):
+        env.pop(v, None)
+    env["CLAUDE_CODE_SESSION_ID"] = sid
+    payload = f'{{"session_id":"{sid}","hook_event_name":"PreToolUse"}}'.encode()
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=payload, cwd=str(tmp_path), env=env,
+        capture_output=True, timeout=10,
+    )
+    assert r.returncode == 0
+    args = (fake_bin / "argv.log").read_text().splitlines()
+    host_idx = args.index("--host")
+    assert args[host_idx + 1] == "claude-code"
+
+
+def test_nested_env_payload_session_id_wins(tmp_path):
+    """When both CLAUDE_CODE_SESSION_ID and CODEX_THREAD_ID are set,
+    the session_id in the stdin payload must take precedence."""
+    sid_from_payload = "payload-wins-sid"
+    # Scaffold with the payload sid as the registered session.
+    _scaffold_evo_run(tmp_path, sid=sid_from_payload, with_marker=True)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{_path_separator()}{_base_path()}"
+    env["CLAUDE_CODE_SESSION_ID"] = "env-claude-sid"
+    env["CODEX_THREAD_ID"] = "env-codex-sid"
+    payload = (
+        f'{{"session_id":"{sid_from_payload}","hook_event_name":"PreToolUse"}}'
+    ).encode()
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=payload,
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        timeout=10,
+    )
+    assert r.returncode == 0
+    args = (fake_bin / "argv.log").read_text().splitlines()
+    sid_idx = args.index("--session")
+    assert args[sid_idx + 1] == sid_from_payload, (
+        f"payload session_id must win over env; got --session {args[sid_idx + 1]!r}"
+    )
+
+
+def test_nested_env_host_matches_payload_sid_owner(tmp_path):
+    """When both CODEX_THREAD_ID and CLAUDE_CODE_SESSION_ID are set with
+    DIFFERENT values, and the payload sid matches CODEX_THREAD_ID, host
+    must be `codex` — NOT the first-listed env var. Detection by
+    value-match, not presence."""
+    payload_sid = "codex-matched-sid"
+    _scaffold_evo_run(tmp_path, sid=payload_sid, with_marker=True)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{_path_separator()}{_base_path()}"
+    env["CLAUDE_CODE_SESSION_ID"] = "claude-sid-different"
+    env["CODEX_THREAD_ID"] = payload_sid  # matches payload
+    payload = (
+        f'{{"session_id":"{payload_sid}","hook_event_name":"PreToolUse"}}'
+    ).encode()
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=payload, cwd=str(tmp_path), env=env,
+        capture_output=True, timeout=10,
+    )
+    assert r.returncode == 0
+    args = (fake_bin / "argv.log").read_text().splitlines()
+    host_idx = args.index("--host")
+    assert args[host_idx + 1] == "codex", (
+        f"host must follow value-match: payload sid matches CODEX_THREAD_ID, "
+        f"so host=codex; got {args[host_idx + 1]!r}"
+    )
+    sid_idx = args.index("--session")
+    assert args[sid_idx + 1] == payload_sid
+
+
+def test_nested_env_host_falls_back_when_no_env_matches(tmp_path):
+    """Payload sid + no env var matches it → fall back to path-fragment
+    detection. With no `.codex/` etc. in the payload, default is claude-code."""
+    payload_sid = "orphan-sid"
+    _scaffold_evo_run(tmp_path, sid=payload_sid, with_marker=True)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{_path_separator()}{_base_path()}"
+    env["CODEX_THREAD_ID"] = "unrelated-codex-sid"
+    env["CLAUDE_CODE_SESSION_ID"] = "unrelated-claude-sid"
+    payload = (
+        f'{{"session_id":"{payload_sid}","hook_event_name":"PreToolUse"}}'
+    ).encode()
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=payload, cwd=str(tmp_path), env=env,
+        capture_output=True, timeout=10,
+    )
+    assert r.returncode == 0
+    args = (fake_bin / "argv.log").read_text().splitlines()
+    host_idx = args.index("--host")
+    # Path doesn't contain `.codex/` etc., so default is claude-code.
+    assert args[host_idx + 1] == "claude-code", (
+        f"no env match + no path fragment → claude-code default; got {args[host_idx + 1]!r}"
+    )

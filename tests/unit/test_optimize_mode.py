@@ -164,6 +164,89 @@ class TestUnmarkOptimizeMode(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# optimize_mode side-channel flag file — fast-path signal for the Rust hook
+# ---------------------------------------------------------------------------
+
+class TestOptimizeModeFlagFile(unittest.TestCase):
+    """The Rust hook decides whether to hand off to Python by stat()'ing
+    `inject/optimize_mode/<sid>.flag`. mark/unmark keep this cache in
+    sync with the source-of-truth field in `inject/sessions/<sid>.json`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        _make_workspace(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_mark_drops_flag_file(self):
+        from evo.inject.registry import mark_optimize_mode
+        from evo.inject.paths import optimize_mode_flag_file
+        register_session(self.root, "s1", "claude-code")
+        self.assertFalse(optimize_mode_flag_file(self.root, "s1").exists(),
+                         "flag must not exist before mark")
+        mark_optimize_mode(self.root, "s1")
+        self.assertTrue(optimize_mode_flag_file(self.root, "s1").exists(),
+                        "mark_optimize_mode must drop the flag file")
+
+    def test_unmark_removes_flag_file(self):
+        from evo.inject.registry import mark_optimize_mode, unmark_optimize_mode
+        from evo.inject.paths import optimize_mode_flag_file
+        register_session(self.root, "s1", "claude-code")
+        mark_optimize_mode(self.root, "s1")
+        self.assertTrue(optimize_mode_flag_file(self.root, "s1").exists())
+        unmark_optimize_mode(self.root, "s1")
+        self.assertFalse(optimize_mode_flag_file(self.root, "s1").exists(),
+                         "unmark_optimize_mode must remove the flag file")
+
+    def test_mark_does_not_drop_flag_for_subagent(self):
+        """Subagents (exp_id set) are never tagged orchestrator; the flag
+        file must not appear for them."""
+        from evo.inject.registry import mark_optimize_mode
+        from evo.inject.paths import optimize_mode_flag_file
+        register_session(self.root, "sub", "claude-code", exp_id="exp_0001")
+        result = mark_optimize_mode(self.root, "sub")
+        self.assertFalse(result, "subagent mark must no-op")
+        self.assertFalse(optimize_mode_flag_file(self.root, "sub").exists(),
+                         "subagent must not have a flag file")
+
+    def test_self_heal_recreates_missing_flag_on_second_mark(self):
+        """If the flag file is removed externally but optimize_mode is
+        still true in the JSON, the next `mark_optimize_mode` call must
+        re-create the flag even though it returns False (no transition)."""
+        from evo.inject.registry import mark_optimize_mode
+        from evo.inject.paths import optimize_mode_flag_file
+        register_session(self.root, "s1", "claude-code")
+        mark_optimize_mode(self.root, "s1")
+        flag = optimize_mode_flag_file(self.root, "s1")
+        flag.unlink()
+        self.assertFalse(flag.exists())
+        # Second mark returns False (already true) but must re-create flag.
+        result = mark_optimize_mode(self.root, "s1")
+        self.assertFalse(result, "no transition since already true")
+        self.assertTrue(flag.exists(),
+                        "self-heal must re-create the missing flag file")
+
+    def test_unmark_clears_leaked_flag_even_if_json_missing(self):
+        """If the session JSON was wiped but the flag leaked, unmark
+        should still clean up the flag."""
+        from evo.inject.registry import unmark_optimize_mode
+        from evo.inject.paths import (
+            optimize_mode_dir,
+            optimize_mode_flag_file,
+        )
+        # Drop a leaked flag with no corresponding session JSON.
+        optimize_mode_dir(self.root).mkdir(parents=True, exist_ok=True)
+        flag = optimize_mode_flag_file(self.root, "ghost")
+        flag.touch()
+        self.assertTrue(flag.exists())
+        unmark_optimize_mode(self.root, "ghost")
+        self.assertFalse(flag.exists(),
+                         "unmark must clear a leaked flag even without JSON")
+
+
+# ---------------------------------------------------------------------------
 # evo exit-optimize-mode CLI
 # ---------------------------------------------------------------------------
 

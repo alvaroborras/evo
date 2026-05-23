@@ -20,6 +20,8 @@ from .paths import (
     ensure_dirs,
     inject_root,
     offset_file,
+    optimize_mode_dir,
+    optimize_mode_flag_file,
     session_file,
     sessions_dir,
 )
@@ -130,6 +132,28 @@ def register_session(
     init_offset_to_latest(root, session_id)
 
 
+def _write_optimize_mode_flag(root: Path, session_id: str) -> None:
+    """Drop the empty `inject/optimize_mode/<sid>.flag` side-channel file.
+    The Rust hook checks this via stat() to decide whether to hand off
+    on tool/stop events without reading the session JSON. Best-effort:
+    a missing flag self-heals on the next mark_optimize_mode call or
+    via the drain's consistency check."""
+    try:
+        optimize_mode_dir(root).mkdir(parents=True, exist_ok=True)
+        optimize_mode_flag_file(root, session_id).touch(exist_ok=True)
+    except OSError:
+        pass  # never block on cache-write failures
+
+
+def _clear_optimize_mode_flag(root: Path, session_id: str) -> None:
+    try:
+        optimize_mode_flag_file(root, session_id).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
 def mark_optimize_mode(root: Path, session_id: str) -> bool:
     """Flip `optimize_mode` true on the session record if currently false.
 
@@ -138,6 +162,9 @@ def mark_optimize_mode(root: Path, session_id: str) -> bool:
     transition, False on no-op (already true, missing record, or
     subagent). Caller should treat True as a signal to (optionally)
     side-effect, e.g. write to telemetry.
+
+    Side-effect on transition: drops `inject/optimize_mode/<sid>.flag`
+    as a fast-path side channel for the Rust hook.
     """
     path = session_file(root, session_id)
     if not path.exists():
@@ -149,10 +176,15 @@ def mark_optimize_mode(root: Path, session_id: str) -> bool:
     if data.get("exp_id"):
         return False  # subagent — never tag as orchestrator
     if data.get("optimize_mode"):
+        # Self-heal: if the JSON says optimize_mode=true but the flag
+        # file is missing (e.g. someone manually cleaned `inject/`),
+        # re-create it. Cheap — the touch is idempotent.
+        _write_optimize_mode_flag(root, session_id)
         return False
     data["optimize_mode"] = True
     data["optimize_mode_at"] = _now_iso()
     atomic_write_json(path, data)
+    _write_optimize_mode_flag(root, session_id)
     return True
 
 
@@ -161,20 +193,27 @@ def unmark_optimize_mode(root: Path, session_id: str) -> bool:
 
     Used by the `evo exit-optimize-mode` CLI command. Returns True on
     the true→false transition, False on no-op (already false, missing
-    record).
+    record). Also removes the `inject/optimize_mode/<sid>.flag` side
+    channel.
     """
     path = session_file(root, session_id)
     if not path.exists():
+        # Still try to clear the flag in case the JSON was already removed
+        # but the flag leaked. Cheap.
+        _clear_optimize_mode_flag(root, session_id)
         return False
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
+        _clear_optimize_mode_flag(root, session_id)
         return False
     if not data.get("optimize_mode"):
+        _clear_optimize_mode_flag(root, session_id)
         return False
     data["optimize_mode"] = False
     data["optimize_mode_at"] = None
     atomic_write_json(path, data)
+    _clear_optimize_mode_flag(root, session_id)
     return True
 
 

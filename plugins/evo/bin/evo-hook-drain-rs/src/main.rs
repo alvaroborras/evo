@@ -51,23 +51,61 @@ fn find_json_string(buf: &str, key: &str) -> Option<String> {
     Some(after_quote[..end].to_string())
 }
 
-fn find_session_id(stdin_buf: &str) -> String {
-    if let Some(sid) = find_json_string(stdin_buf, "session_id") {
-        return sid;
+/// Per-host env var → host string. Ordered for stable fallback when
+/// no payload session_id is present and multiple env vars are set
+/// (nested env corner case). The match-by-value path in
+/// `resolve_session` makes the order irrelevant when a payload sid is
+/// available — we pick the env var whose value equals the payload sid.
+const HOST_ENV_VARS: &[(&str, &str)] = &[
+    ("CLAUDE_CODE_SESSION_ID", "claude-code"),
+    ("CODEX_THREAD_ID", "codex"),
+    ("HERMES_SESSION_ID", "hermes"),
+    ("OPENCODE_SESSION_ID", "opencode"),
+];
+
+fn detect_host_from_path(buf: &str) -> &'static str {
+    if buf.contains(".codex/") || buf.contains("\\.codex\\") {
+        "codex"
+    } else if buf.contains(".hermes/") || buf.contains("\\.hermes\\") {
+        "hermes"
+    } else if buf.contains(".opencode/") || buf.contains("\\.opencode\\") {
+        "opencode"
+    } else {
+        "claude-code"
     }
-    for env_var in [
-        "CLAUDE_CODE_SESSION_ID",
-        "CODEX_THREAD_ID",
-        "HERMES_SESSION_ID",
-        "OPENCODE_SESSION_ID",
-    ] {
-        if let Ok(v) = env::var(env_var) {
+}
+
+/// Resolve (session_id, host) together. The payload session_id wins;
+/// host is the env var whose value matches that sid. If no env var
+/// matches, fall back to path-fragment detection. With no payload sid,
+/// the first non-empty env var in `HOST_ENV_VARS` order supplies both
+/// sid and host — that handles the standalone case while keeping
+/// matched-sid the priority signal in nested envs.
+fn resolve_session(stdin_buf: &str) -> (String, &'static str) {
+    if let Some(sid) = find_json_string(stdin_buf, "session_id") {
+        // Pick the env var whose value matches; that's authoritative
+        // for which host owns this session.
+        for (var, host) in HOST_ENV_VARS {
+            if let Ok(v) = env::var(var) {
+                if v == sid {
+                    return (sid, host);
+                }
+            }
+        }
+        // No env var matches the payload sid — fall back to path
+        // detection. Common in test harnesses + nested cases where the
+        // outer host's env vars don't reflect this inner session.
+        return (sid, detect_host_from_path(stdin_buf));
+    }
+    // No payload sid — pick the first env var set.
+    for (var, host) in HOST_ENV_VARS {
+        if let Ok(v) = env::var(var) {
             if !v.is_empty() {
-                return v;
+                return (v, host);
             }
         }
     }
-    String::new()
+    (String::new(), "claude-code")
 }
 
 fn find_evo_run_dir() -> Option<PathBuf> {
@@ -100,17 +138,6 @@ fn find_evo_run_dir() -> Option<PathBuf> {
     }
 }
 
-fn detect_host_from_stdin(buf: &str) -> &'static str {
-    if buf.contains(".codex/") || buf.contains("\\.codex\\") {
-        "codex"
-    } else if buf.contains(".hermes/") || buf.contains("\\.hermes\\") {
-        "hermes"
-    } else if buf.contains(".opencode/") || buf.contains("\\.opencode\\") {
-        "opencode"
-    } else {
-        "claude-code"
-    }
-}
 
 fn iso8601_utc_now() -> String {
     let secs = SystemTime::now()
@@ -248,7 +275,7 @@ fn session_start_drift_checks(plugin_root: &Path) {
     }
 }
 
-fn handoff_to_drain(run_dir: &Path, sid: &str, stdin_buf: &str) -> ! {
+fn handoff_to_drain(run_dir: &Path, sid: &str, host: &str, stdin_buf: &str) -> ! {
     let drain = match which("evo-drain") {
         Some(p) => p,
         None => {
@@ -266,6 +293,8 @@ fn handoff_to_drain(run_dir: &Path, sid: &str, stdin_buf: &str) -> ! {
         .arg(run_dir)
         .arg("--session")
         .arg(sid)
+        .arg("--host")
+        .arg(host)
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -285,10 +314,54 @@ fn handoff_to_drain(run_dir: &Path, sid: &str, stdin_buf: &str) -> ! {
     process::exit(status);
 }
 
+
+/// Returns true if `<run_dir>/inject/markers/<sid>.flag` exists.
+fn marker_exists(run_dir: &Path, sid: &str) -> bool {
+    run_dir
+        .join("inject")
+        .join("markers")
+        .join(format!("{}.flag", sid))
+        .is_file()
+}
+
+/// Returns true if `<run_dir>/inject/optimize_mode/<sid>.flag` exists.
+/// This is the side-channel signal that says "this session is the
+/// orchestrator driving /evo:optimize" — the deny gate + stop nudge
+/// need drain to run on tool/stop events.
+fn optimize_flag_exists(run_dir: &Path, sid: &str) -> bool {
+    run_dir
+        .join("inject")
+        .join("optimize_mode")
+        .join(format!("{}.flag", sid))
+        .is_file()
+}
+
+/// Decide whether to hand off to the Python drain. Inputs are the three
+/// fast-path stat results. SessionStart is handled before this; here we
+/// gate everything else.
+///
+/// Rules:
+///   - marker exists                       → hand off (deliver directive)
+///   - optimize flag on + tool/stop event  → hand off (policy / stop nudge)
+///   - optimize flag off + UserPromptSubmit → hand off (might detect /optimize)
+///   - otherwise                            → fast exit ({})
+fn should_handoff(hook_event: &str, marker: bool, opt_flag: bool) -> bool {
+    if marker {
+        return true;
+    }
+    if opt_flag {
+        return matches!(hook_event, "PreToolUse" | "Stop" | "SubagentStop");
+    }
+    matches!(hook_event, "UserPromptSubmit")
+}
+
 fn main() {
     let stdin_buf = read_stdin();
 
-    let sid = find_session_id(&stdin_buf);
+    // Resolve session id + host together. Matching env var value to
+    // payload sid is what makes nested envs (codex spawned from claude
+    // and vice versa) classify correctly.
+    let (sid, host) = resolve_session(&stdin_buf);
     if sid.is_empty() {
         emit_ok();
     }
@@ -304,7 +377,6 @@ fn main() {
 
     if hook_event == "SessionStart" {
         if !sessions_file.is_file() {
-            let host = detect_host_from_stdin(&stdin_buf);
             let _ = register_session(&run_dir, &sid, host);
         }
         // Plugin root = parent of the directory containing this executable.
@@ -317,18 +389,20 @@ fn main() {
         if let Some(root) = plugin_root {
             session_start_drift_checks(&root);
         }
+        // Fall through to handoff: drain seeds offsets + emits empty
+        // additionalContext envelope. Cheap and matches prior behavior.
+        handoff_to_drain(&run_dir, &sid, host, &stdin_buf);
     }
 
     if !sessions_file.is_file() {
         emit_ok();
     }
 
-    if hook_event != "SessionStart" {
-        let marker = run_dir.join("inject").join("markers").join(format!("{}.flag", sid));
-        if !marker.is_file() {
-            emit_ok();
-        }
+    let marker = marker_exists(&run_dir, &sid);
+    let opt_flag = optimize_flag_exists(&run_dir, &sid);
+    if !should_handoff(&hook_event, marker, opt_flag) {
+        emit_ok();
     }
 
-    handoff_to_drain(&run_dir, &sid, &stdin_buf);
+    handoff_to_drain(&run_dir, &sid, host, &stdin_buf);
 }

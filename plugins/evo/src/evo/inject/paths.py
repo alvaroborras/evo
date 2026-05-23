@@ -52,6 +52,20 @@ def marker_file(root: Path, session_id: str) -> Path:
     return markers_dir(root) / f"{session_id}.flag"
 
 
+def optimize_mode_dir(root: Path) -> Path:
+    """Side channel for optimize_mode state — empty flag files keyed by
+    session_id. The Rust hook (and other hot-path readers) check
+    existence in ~50µs instead of opening + parsing the session JSON.
+    Source of truth is still `inject/sessions/<sid>.json#optimize_mode`;
+    this directory is a cache that mark/unmark keep in sync.
+    """
+    return inject_root(root) / "optimize_mode"
+
+
+def optimize_mode_flag_file(root: Path, session_id: str) -> Path:
+    return optimize_mode_dir(root) / f"{session_id}.flag"
+
+
 def delivered_dir(root: Path) -> Path:
     """L1 ACK: where drain writes a record per directive emitted."""
     return inject_root(root) / "delivered"
@@ -78,6 +92,7 @@ def ensure_dirs(root: Path) -> None:
         events_dir(root),
         offsets_dir(root),
         markers_dir(root),
+        optimize_mode_dir(root),
         delivered_dir(root),
         acks_dir(root),
     ):

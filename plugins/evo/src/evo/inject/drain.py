@@ -1210,7 +1210,14 @@ def main(argv: list[str] | None = None) -> int:
             _maybe_mark_optimize_from_prompt(
                 root, args.session, args.host, hook_event, payload,
             )
-        return drain_session(root, args.session, host=args.host, hook_event=hook_event)
+        # Pass payload through — the policy gate reads `tool_name` /
+        # `tool_input` from it. Without this, PreToolUse drain runs with
+        # payload=None and `_should_policy_block` bails before checking
+        # the deny list, so the policy gate never fires.
+        return drain_session(
+            root, args.session, host=args.host,
+            hook_event=hook_event, payload=payload,
+        )
 
     # Mode 2: self-contained — resolve everything from args + stdin payload.
     # Key on conversation_id: it's present in EVERY Cursor hook event, whereas
