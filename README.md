@@ -158,7 +158,7 @@ Every `evo install` / `evo update` keeps the CLI on PATH in lockstep with the ho
 
 See `evo update --help` for `--force`, `--scope`, and additional flags.
 
-### Migrating from v0.4.0 or earlier
+### Migrating from any pre-0.4.4 version
 
 Reinstall the CLI and refresh the host plugin cache:
 
@@ -166,7 +166,13 @@ Reinstall the CLI and refresh the host plugin cache:
 uv tool install --force evo-hq-cli && evo update --force
 ```
 
+This is a one-time bootstrap. After it, the auto-sync introduced in 0.4.4 keeps the CLI and host plugins aligned on every subsequent `evo install`/`evo update` — you don't need to remember to run `uv tool install --force` separately anymore.
+
 `--force` wipes the host plugin cache and reinstalls, working around [anthropics/claude-code#14061](https://github.com/anthropics/claude-code/issues/14061): `/plugin update` returns success but does not replace cached plugin files.
+
+**Codex users**: you may see a line like `removed legacy evo registrations: evo@evo-hq` during the update. Earlier installer versions registered the plugin under the GitHub-owner name (`evo-hq`) and later versions switched to the marketplace.json name (`evo-hq-evo`). Without cleanup both registrations stayed active and the older one fired hooks against a cache directory that no longer had the binary, producing `exit code 127` noise on every event. The cleanup removes the stale registration + its cache dir.
+
+**Opencode / openclaw / pi users**: the bundled JS extensions ship in the host plugin cache (not in the CLI). `evo update --force` refreshes them — important for picking up the position-agnostic `/optimize` detection and per-host invocation aliases (`/skill:optimize` on pi, `/skill optimize` on openclaw, etc.).
 
 ### Testing a pre-release (alpha)
 
