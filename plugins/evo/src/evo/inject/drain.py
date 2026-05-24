@@ -203,11 +203,36 @@ _OPTIMIZE_INVOCATION_PATTERNS: dict[str, list[_re.Pattern[str]]] = {
         _re.compile(r"(?:^|[^A-Za-z0-9_:-])\$(?:[A-Za-z0-9_-]+:)?optimize\b", _re.IGNORECASE),
         _re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE),
     ],
+    # Cursor: `/cmd` only, no plugin namespacing. Bare /optimize covers it.
     "cursor": [_re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE)],
-    "hermes": [_re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE)],
+    # Hermes: bundled plugins can namespace their skills as `/plugin:skill`
+    # (verified against hermes-agent/agent/skill_commands.py). evo's
+    # current install lays bare skills into ~/.agents/skills/optimize/,
+    # so `/optimize` is the canonical form, but accept `/<ns>:optimize`
+    # too for future bundled-plugin installs and for collision-disambig
+    # scenarios where users namespace explicitly.
+    "hermes": [
+        _re.compile(r"(?:^|[^A-Za-z0-9_/:-])/(?:[a-z0-9_-]+:)?optimize\b", _re.IGNORECASE),
+    ],
     "opencode": [_re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE)],
-    "openclaw": [_re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE)],
-    "pi": [_re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE)],
+    # Openclaw: bare `/optimize` is the user-invocable skill form. The
+    # `/skill <name>` generic invoker (registered as textAlias "/skill"
+    # in src/auto-reply/commands-registry.shared.ts) always works even
+    # for skills not marked user-invocable, so accept both.
+    "openclaw": [
+        _re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE),
+        _re.compile(r"(?:^|[^A-Za-z0-9_/:-])/skill\s+optimize\b", _re.IGNORECASE),
+    ],
+    # Pi: skill invocations REQUIRE the `/skill:` prefix per
+    # @earendil-works/pi-coding-agent/dist/core/agent-session.js:844
+    # (`if (!text.startsWith("/skill:")) return text;`). Bare `/optimize`
+    # in pi is a prompt template lookup, not a skill — would never have
+    # armed the gate before. Accept bare form too as a defensive fallback
+    # for users mixing slash-command conventions.
+    "pi": [
+        _re.compile(r"(?:^|[^A-Za-z0-9_/:-])/skill:optimize\b", _re.IGNORECASE),
+        _re.compile(r"(?:^|[^A-Za-z0-9_/:-])/optimize\b", _re.IGNORECASE),
+    ],
 }
 
 

@@ -282,6 +282,94 @@ class TestCursorDetection(_BaseDetectionTest):
 
 
 # ---------------------------------------------------------------------------
+# Hermes: `/optimize` + `/<plugin>:optimize` (bundled-plugin namespace)
+# ---------------------------------------------------------------------------
+
+class TestHermesDetection(_BaseDetectionTest):
+
+    def test_bare_slash_optimize(self):
+        register_session(self.root, "h1", "hermes")
+        self._fire_prompt_submit("h1", "hermes", "/optimize",
+                                 hook_event="UserPromptSubmit")
+        rec = _read_record(self.root, "h1")
+        self.assertTrue(rec["optimize_mode"])
+
+    def test_namespaced_plugin_form(self):
+        """hermes bundles can register skills as `/plugin:skill`."""
+        register_session(self.root, "h2", "hermes")
+        self._fire_prompt_submit("h2", "hermes", "/evo:optimize fix the bug",
+                                 hook_event="UserPromptSubmit")
+        rec = _read_record(self.root, "h2")
+        self.assertTrue(rec["optimize_mode"])
+
+    def test_mid_prompt(self):
+        register_session(self.root, "h3", "hermes")
+        self._fire_prompt_submit(
+            "h3", "hermes", "ok now /optimize agent.py please",
+            hook_event="UserPromptSubmit",
+        )
+        rec = _read_record(self.root, "h3")
+        self.assertTrue(rec["optimize_mode"])
+
+
+# ---------------------------------------------------------------------------
+# Openclaw: `/optimize` + `/skill optimize` (generic invoker)
+# ---------------------------------------------------------------------------
+
+class TestOpenclawDetection(_BaseDetectionTest):
+
+    def test_bare_slash_optimize(self):
+        register_session(self.root, "oc1", "openclaw")
+        self._fire_prompt_submit("oc1", "openclaw", "/optimize",
+                                 hook_event="UserPromptSubmit")
+        rec = _read_record(self.root, "oc1")
+        self.assertTrue(rec["optimize_mode"])
+
+    def test_slash_skill_invoker(self):
+        """`/skill <name>` is always available in openclaw, even for skills
+        not marked user-invocable (registered as textAlias "/skill" in
+        commands-registry.shared.ts)."""
+        register_session(self.root, "oc2", "openclaw")
+        self._fire_prompt_submit("oc2", "openclaw", "/skill optimize",
+                                 hook_event="UserPromptSubmit")
+        rec = _read_record(self.root, "oc2")
+        self.assertTrue(rec["optimize_mode"])
+
+
+# ---------------------------------------------------------------------------
+# Pi: `/skill:optimize` (canonical) + `/optimize` (defensive)
+# ---------------------------------------------------------------------------
+
+class TestPiDetection(_BaseDetectionTest):
+
+    def test_canonical_skill_colon_form(self):
+        """pi requires the `/skill:` prefix per agent-session.ts:1149
+        — bare `/optimize` is a prompt-template lookup, not a skill."""
+        register_session(self.root, "pi1", "pi")
+        self._fire_prompt_submit("pi1", "pi", "/skill:optimize",
+                                 hook_event="UserPromptSubmit")
+        rec = _read_record(self.root, "pi1")
+        self.assertTrue(rec["optimize_mode"])
+
+    def test_bare_optimize_defensive(self):
+        """Defensive cross-host fallback: even though pi itself won't
+        expand bare `/optimize`, users naturally type it. Arm the gate
+        so the steering still works."""
+        register_session(self.root, "pi2", "pi")
+        self._fire_prompt_submit("pi2", "pi", "/optimize",
+                                 hook_event="UserPromptSubmit")
+        rec = _read_record(self.root, "pi2")
+        self.assertTrue(rec["optimize_mode"])
+
+    def test_skill_colon_with_args(self):
+        register_session(self.root, "pi3", "pi")
+        self._fire_prompt_submit("pi3", "pi", "/skill:optimize budget=5",
+                                 hook_event="UserPromptSubmit")
+        rec = _read_record(self.root, "pi3")
+        self.assertTrue(rec["optimize_mode"])
+
+
+# ---------------------------------------------------------------------------
 # Subagent fence — never flip optimize_mode on a subagent session
 # ---------------------------------------------------------------------------
 

@@ -860,14 +860,32 @@ export function unmarkOptimizeMode(runDir: string, sid: string): boolean {
 // shell-quoted invocations land in chat.message with the literal `"` as the
 // first character. Without this, the model never auto-arms optimize_mode
 // because the regex sees `"/optimize` and the `/` isn't at the start.
-// Position-agnostic: matches /optimize anywhere in the prompt, not
-// just at position 0. The boundary class `[^A-Za-z0-9_/:-]` before
-// the slash prevents file-path matches like `src/optimize.py`.
-// Mirrors Python `_OPTIMIZE_INVOCATION_PATTERNS` — keep in sync.
-const OPTIMIZE_PROMPT_RES: Record<string, RegExp> = {
-  opencode: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
-  openclaw: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
-  pi: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
+// Position-agnostic: matches the invocation anywhere in the prompt.
+// Boundary class `[^A-Za-z0-9_/:-]` before the slash prevents file-path
+// matches like `src/optimize.py`. Mirrors Python
+// `_OPTIMIZE_INVOCATION_PATTERNS` — keep in sync.
+//
+// Per-host forms (verified against each host's source):
+//   - opencode: bare `/optimize` only (no namespacing in core).
+//   - openclaw: bare `/optimize` + `/skill optimize` (generic invoker
+//     registered as textAlias "/skill" in
+//     src/auto-reply/commands-registry.shared.ts).
+//   - pi: `/skill:optimize` is the only form pi actually expands
+//     (@earendil-works/pi-coding-agent agent-session.ts:1149 —
+//     `if (!text.startsWith("/skill:")) return text;`). Bare
+//     `/optimize` accepted defensively for users mixing conventions.
+//
+// Each host has an array of patterns; auto-arm fires on any match.
+const OPTIMIZE_PROMPT_RES: Record<string, RegExp[]> = {
+  opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
+  openclaw: [
+    /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
+    /(?:^|[^A-Za-z0-9_/:-])\/skill\s+optimize\b/i,
+  ],
+  pi: [
+    /(?:^|[^A-Za-z0-9_/:-])\/skill:optimize\b/i,
+    /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
+  ],
 }
 
 /** Auto-arm optimize_mode if the user's prompt matches the host's
@@ -879,9 +897,9 @@ export function maybeMarkOptimizeFromPrompt(
   promptText: string | null | undefined,
 ): void {
   if (!promptText) return
-  const re = OPTIMIZE_PROMPT_RES[host]
-  if (!re) return
-  if (!re.test(promptText)) return
+  const patterns = OPTIMIZE_PROMPT_RES[host]
+  if (!patterns) return
+  if (!patterns.some((re) => re.test(promptText))) return
   markOptimizeMode(runDir, sid)
 }
 

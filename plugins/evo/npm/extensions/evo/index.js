@@ -1,4 +1,4 @@
-// drain.ts
+// ../opencode_plugin/drain.ts
 import * as fs from "fs";
 import * as path from "path";
 var QUEUE_SCHEMA_VERSION = 1;
@@ -618,17 +618,23 @@ function markOptimizeMode(runDir, sid) {
   return true;
 }
 var OPTIMIZE_PROMPT_RES = {
-  opencode: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
-  openclaw: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
-  pi: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i
+  opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
+  openclaw: [
+    /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
+    /(?:^|[^A-Za-z0-9_/:-])\/skill\s+optimize\b/i
+  ],
+  pi: [
+    /(?:^|[^A-Za-z0-9_/:-])\/skill:optimize\b/i,
+    /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i
+  ]
 };
 function maybeMarkOptimizeFromPrompt(runDir, sid, host, promptText) {
   if (!promptText)
     return;
-  const re = OPTIMIZE_PROMPT_RES[host];
-  if (!re)
+  const patterns = OPTIMIZE_PROMPT_RES[host];
+  if (!patterns)
     return;
-  if (!re.test(promptText))
+  if (!patterns.some((re) => re.test(promptText)))
     return;
   markOptimizeMode(runDir, sid);
 }
@@ -650,134 +656,172 @@ function incrementAndShouldBlock(runDir, sid, toolName) {
   writePolicyState(runDir, sid, state);
   return count % 2 === 1;
 }
-function shouldPolicyBlock(runDir, sid, toolName, toolInput) {
-  const sess = getSession(runDir, sid);
-  if (!sess)
-    return false;
-  if (sess.exp_id)
-    return false;
-  if (!sess.optimize_mode)
-    return false;
-  if (!isDeniedInOptimizeMode(toolName, toolInput))
-    return false;
-  return incrementAndShouldBlock(runDir, sid, toolName);
-}
-function maybeStopNudgeText(runDir, sid) {
-  const sess = getSession(runDir, sid);
-  if (!sess)
-    return null;
-  if (sess.exp_id)
-    return null;
-  if (!sess.optimize_mode)
-    return null;
-  return STOP_NUDGE_TEMPLATE;
-}
 
-// index.ts
-function extractPromptTextFromParts(parts) {
-  if (!Array.isArray(parts))
-    return "";
-  for (const p of parts) {
-    if (p && p.type === "text" && typeof p.text === "string" && p.text) {
-      return p.text;
-    }
+// factory.ts
+import * as crypto from "crypto";
+function makeRegister(host) {
+  function deriveSessionId() {
+    const expId = process.env.EVO_EXP_ID || "";
+    const seed = expId ? `${process.cwd()}|${expId}` : process.cwd();
+    const hash = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
+    return `${host}-${hash}`;
   }
-  return "";
-}
-var EvoPlugin = async ({ project, client }) => {
-  const ensureRegistered = (sessionID) => {
-    if (!sessionID)
-      return null;
-    const runDir = findEvoRunDir(project?.directory);
-    if (!runDir)
-      return null;
-    if (!isRegistered(runDir, sessionID)) {
-      registerSession(runDir, sessionID, "opencode");
-    }
-    return runDir;
-  };
-  return {
-    "chat.message": async (input, output) => {
-      const sessionID = input?.sessionID;
-      if (!sessionID)
-        return;
-      const runDir = ensureRegistered(sessionID);
+  return function register(api) {
+    const drainedTexts = [];
+    const ensureRegistered = () => {
+      const runDir = findEvoRunDir();
       if (!runDir)
-        return;
-      const promptText = extractPromptTextFromParts(output?.parts);
-      maybeMarkOptimizeFromPrompt(runDir, sessionID, "opencode", promptText);
-      const result = drainSession(runDir, sessionID);
-      if (!result.text)
-        return;
-      if (!Array.isArray(output.parts)) {
-        output.parts = [];
+        return null;
+      const sid = deriveSessionId();
+      if (!isRegistered(runDir, sid)) {
+        const expId = process.env.EVO_EXP_ID || null;
+        registerSession(runDir, sid, host, expId);
       }
-      const messageID = input?.messageID ?? output?.message?.id ?? output.parts[0]?.messageID ?? "";
-      const partID = `prt_evo_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-      output.parts.unshift({
-        type: "text",
-        id: partID,
-        sessionID,
-        messageID,
-        text: result.text
-      });
-    },
-    "tool.execute.before": async (input, output) => {
-      const runDir = ensureRegistered(input?.sessionID);
-      if (!runDir)
-        return;
-      const sid = input?.sessionID;
-      if (!sid)
-        return;
-      const toolName = (input?.tool || input?.toolName || "").toString();
-      const toolArgs = output?.args ?? input?.args ?? {};
-      if (toolName.toLowerCase() === "bash" || toolName.toLowerCase() === "shell") {
-        const cmd = toolArgs?.command ?? "";
-        if (typeof cmd === "string" && isEvoCommand(cmd)) {
-          if (markEngaged(runDir, sid)) {
-            initOffsetToLatest(runDir, sid);
+      return { sid, runDir };
+    };
+    const appendToPayload = (event, text) => {
+      if (Array.isArray(event.payload?.input)) {
+        event.payload.input.push({
+          role: "user",
+          content: [{ type: "input_text", text }]
+        });
+      } else if (Array.isArray(event.payload?.messages)) {
+        event.payload.messages.push({
+          role: "user",
+          content: [{ type: "text", text }]
+        });
+      }
+    };
+    api.on("session_start", () => {
+      ensureRegistered();
+    });
+    const scanForEvoCommands = (payload) => {
+      try {
+        const items = Array.isArray(payload?.input) ? payload.input : [];
+        for (const it of items) {
+          const args = it?.arguments;
+          if (typeof args === "string" && isEvoCommand(args))
+            return true;
+          if (typeof args === "object" && args) {
+            const cmd = args.command ?? args.cmd ?? args.shell;
+            if (typeof cmd === "string" && isEvoCommand(cmd))
+              return true;
           }
         }
+        const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
+        for (const m of msgs) {
+          const content = Array.isArray(m?.content) ? m.content : [];
+          for (const c of content) {
+            if (c?.type === "tool_use") {
+              const cmd = c?.input?.command ?? c?.input?.cmd;
+              if (typeof cmd === "string" && isEvoCommand(cmd))
+                return true;
+            }
+          }
+        }
+      } catch {}
+      return false;
+    };
+    const extractLatestUserText = (payload) => {
+      try {
+        const items = Array.isArray(payload?.input) ? payload.input : [];
+        for (let i = items.length - 1;i >= 0; i--) {
+          const it = items[i];
+          if (it?.role !== "user")
+            continue;
+          if (typeof it.content === "string" && it.content)
+            return it.content;
+          if (Array.isArray(it.content)) {
+            for (const c of it.content) {
+              if (typeof c?.text === "string" && c.text)
+                return c.text;
+            }
+          }
+        }
+        const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
+        for (let i = msgs.length - 1;i >= 0; i--) {
+          const m = msgs[i];
+          if (m?.role !== "user")
+            continue;
+          if (typeof m.content === "string")
+            return m.content;
+          if (Array.isArray(m.content)) {
+            for (const c of m.content) {
+              if (typeof c?.text === "string" && c.text)
+                return c.text;
+            }
+          }
+        }
+      } catch {}
+      return "";
+    };
+    api.on("before_provider_request", (event, _ctx) => {
+      const ctx = ensureRegistered();
+      if (!ctx)
+        return;
+      const promptText = extractLatestUserText(event.payload);
+      maybeMarkOptimizeFromPrompt(ctx.runDir, ctx.sid, host, promptText);
+      if (scanForEvoCommands(event.payload)) {
+        if (markEngaged(ctx.runDir, ctx.sid)) {
+          initOffsetToLatest(ctx.runDir, ctx.sid);
+        }
       }
-      if (shouldPolicyBlock(runDir, sid, toolName, toolArgs)) {
-        throw new Error(POLICY_NUDGE_TEMPLATE);
+      const result = drainSession(ctx.runDir, ctx.sid);
+      if (result.text)
+        drainedTexts.push(result.text);
+      if (drainedTexts.length === 0)
+        return;
+      const combined = drainedTexts.join(`
+`);
+      appendToPayload(event, combined);
+      return event.payload;
+    });
+    api.on("tool_call", (event, _ctx) => {
+      const ctx = ensureRegistered();
+      if (!ctx)
+        return;
+      const sess = getSession(ctx.runDir, ctx.sid);
+      if (!sess)
+        return;
+      if (sess.exp_id)
+        return;
+      if (!sess.optimize_mode)
+        return;
+      const toolName = event?.toolName ?? event?.tool_name;
+      const toolInput = event?.input ?? {};
+      if (!isDeniedInOptimizeMode(toolName, toolInput))
+        return;
+      if (incrementAndShouldBlock(ctx.runDir, ctx.sid, toolName)) {
+        return { block: true, reason: POLICY_NUDGE_TEMPLATE };
       }
-    },
-    event: async ({ event }) => {
-      if (!event || event.type !== "session.idle")
+    });
+    api.on("turn_end", async (_event, _ctx) => {
+      if (typeof api.sendUserMessage !== "function")
         return;
-      const sessionID = event.properties?.sessionID ?? event.sessionID ?? event.session_id;
-      if (!sessionID)
+      const ctx = ensureRegistered();
+      if (!ctx)
         return;
-      const runDir = findEvoRunDir(project?.directory);
-      if (!runDir)
+      const sess = getSession(ctx.runDir, ctx.sid);
+      if (!sess)
         return;
-      const sess = getSession(runDir, sessionID);
-      if (!sess || sess.exp_id || !sess.optimize_mode)
+      if (sess.exp_id)
         return;
-      if (!client || typeof client.session?.prompt !== "function")
+      if (!sess.optimize_mode)
         return;
-      const peek = peekDrainSession(runDir, sessionID);
-      const nudge = maybeStopNudgeText(runDir, sessionID);
-      if (!nudge)
-        return;
+      const peek = peekDrainSession(ctx.runDir, ctx.sid);
       const text = peek.text ? peek.text + `
 
-` + nudge : nudge;
+` + STOP_NUDGE_TEMPLATE : STOP_NUDGE_TEMPLATE;
       try {
-        await client.session.prompt({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text }]
-          }
-        });
-        commitDrainPeek(runDir, sessionID, peek);
+        api.sendUserMessage(text, { deliverAs: "followUp" });
+        commitDrainPeek(ctx.runDir, ctx.sid, peek);
       } catch (_e) {}
-    }
+    });
   };
-};
-var opencode_plugin_default = EvoPlugin;
+}
+
+// pi-entry.ts
+var pi_entry_default = makeRegister("pi");
 export {
-  opencode_plugin_default as default,
-  EvoPlugin
+  pi_entry_default as default
 };

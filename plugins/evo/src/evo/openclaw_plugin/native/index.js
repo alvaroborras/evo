@@ -566,17 +566,23 @@ function markOptimizeMode(runDir, sid) {
   return true;
 }
 var OPTIMIZE_PROMPT_RES = {
-  opencode: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
-  openclaw: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
-  pi: /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i
+  opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
+  openclaw: [
+    /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i,
+    /(?:^|[^A-Za-z0-9_/:-])\/skill\s+optimize\b/i
+  ],
+  pi: [
+    /(?:^|[^A-Za-z0-9_/:-])\/skill:optimize\b/i,
+    /(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i
+  ]
 };
 function maybeMarkOptimizeFromPrompt(runDir, sid, host, promptText) {
   if (!promptText)
     return;
-  const re = OPTIMIZE_PROMPT_RES[host];
-  if (!re)
+  const patterns = OPTIMIZE_PROMPT_RES[host];
+  if (!patterns)
     return;
-  if (!re.test(promptText))
+  if (!patterns.some((re) => re.test(promptText)))
     return;
   markOptimizeMode(runDir, sid);
 }
