@@ -182,17 +182,6 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       return ""
     }
 
-    // Saturation tracking — for the stop-nudge in turn_end. If the
-    // orchestrator stops calling `evo …` AND the queue is empty,
-    // there's nothing left for the loop to do; firing another nudge
-    // just makes the agent invent busywork (verified on pi: agent
-    // achieved 139x improvement, printed final summary, but the
-    // unconditional nudge kept it spinning until the sandbox killed
-    // it at 30 min).
-    let turnCount = 0
-    let lastEvoActivityTurn = 0
-    const SATURATION_TURNS = 2  // skip nudge after this many idle turns
-
     api.on("before_provider_request", (event: any, _ctx: any) => {
       const ctx = ensureRegistered()
       if (!ctx) return
@@ -203,11 +192,8 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       maybeMarkOptimizeFromPrompt(ctx.runDir, ctx.sid, host, promptText)
 
       // Engagement detection — flip the flag if the outbound payload
-      // shows the agent has been running `evo` commands. Also doubles
-      // as the saturation signal for turn_end (below): if the agent
-      // is still running evo commands, the loop has work to do.
+      // shows the agent has been running `evo` commands.
       if (scanForEvoCommands(event.payload)) {
-        lastEvoActivityTurn = turnCount
         if (markEngaged(ctx.runDir, ctx.sid)) {
           initOffsetToLatest(ctx.runDir, ctx.sid)
         }
@@ -250,7 +236,6 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
     // tool execution, then delivers AND triggers another turn — the
     // exact behavior we want for /optimize loop continuation.
     api.on("turn_end", async (_event: any, _ctx: any) => {
-      turnCount += 1
       if (typeof api.sendUserMessage !== "function") return // older pi
       const ctx = ensureRegistered()
       if (!ctx) return
@@ -262,21 +247,6 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       // Peek queued directives (don't pop) and combine with the nudge.
       // If sendUserMessage throws, directives stay queued.
       const peek = peekDrainSession(ctx.runDir, ctx.sid)
-
-      // Saturation gate: if the queue is empty AND the orchestrator
-      // hasn't run any evo command in the last SATURATION_TURNS turns,
-      // assume the loop has nothing left to do. Skip the nudge and let
-      // the agent exit naturally. This is the host-side circuit-breaker
-      // for the case where the model refuses to call
-      // `evo exit-optimize-mode` even when budget/progress signals say
-      // it should — adding more imperative language to the nudge text
-      // is a coercion arms-race that always loses. Verified failure
-      // mode (pi v9 release-smoke): agent achieved 139x improvement,
-      // emitted summary, no queued work; nudge unconditionally pushed
-      // another turn for 30 min until the sandbox killed it.
-      if (!peek.text && turnCount - lastEvoActivityTurn > SATURATION_TURNS) {
-        return
-      }
 
       const text = peek.text
         ? peek.text + "\n\n" + STOP_NUDGE_TEMPLATE

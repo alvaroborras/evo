@@ -1201,9 +1201,9 @@ _STOP_EVENTS = ("Stop", "SubagentStop", "stop", "subagentStop")
 
 
 _STOP_NUDGE_TEMPLATE = """[EVO LOOP]
-You are driving /evo:optimize autonomously. Don't stop, and don't ask
-the user for direction — they explicitly invoked /optimize for hands-off
-operation. They'll intervene via `evo direct` if they need to.
+You are driving /evo:optimize autonomously. The user explicitly invoked
+/optimize for hands-off operation — don't ask them for direction. They'll
+intervene via `evo direct` if they need to.
 
 If subagents are still running: run `evo wait` to block until the next
 experiment concludes (or up to 1h). Then resume planning.
@@ -1211,10 +1211,15 @@ experiment concludes (or up to 1h). Then resume planning.
 If subagents are done and you have unread results: read `evo scratchpad`,
 update annotations as needed, and plan + spawn the next round.
 
-Stop only if `evo status` shows the budget exhausted or you've hit the
-stall limit. If so, print a final summary first. To suppress this
-continuation loop for a legitimate one-off task, run
-`evo exit-optimize-mode`.
+Call `evo exit-optimize-mode` to end the loop when ANY of these are true:
+  - the last 3+ committed experiments show no improvement over the
+    current best (the search has plateaued),
+  - `evo status` shows the budget exhausted or you've hit the stall limit,
+  - the user's stated objective has been met (e.g. a target score was
+    reached, or the directive's task is complete).
+Print a final summary first when you exit.
+
+Otherwise continue with the next round.
 [END EVO LOOP]
 """
 
