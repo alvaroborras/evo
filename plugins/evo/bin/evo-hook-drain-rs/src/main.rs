@@ -444,5 +444,34 @@ fn main() {
         emit_ok();
     }
 
+    // Subagent fence: claude-code (and codex) inherit the parent's
+    // CLAUDE_CODE_SESSION_ID env var when spawning subagents via the
+    // Task tool. So when a subagent makes a tool call and PreToolUse
+    // fires, this hook resolves to the parent's session_id — same as
+    // the orchestrator. If we drain here, the directive's
+    // additionalContext flows into the SUBAGENT's API call, not the
+    // orchestrator's. The subagent finishes its narrow task, context
+    // is discarded, the orchestrator never sees the directive.
+    //
+    // Discriminator: the hook payload's `transcript_path` field. For
+    // the main session it points to `<projects>/<id>.jsonl`; for a
+    // subagent it points to `<projects>/<id>/subagents/agent-*.jsonl`.
+    // The `/subagents/` segment is the canonical signal.
+    //
+    // On subagent context: fast-exit. The queue stays pending until a
+    // main-session hook (typically the next Stop) consumes it and
+    // delivers as a new user turn via `{decision: "block", reason}`.
+    if is_subagent_transcript(&stdin_buf) {
+        emit_ok();
+    }
+
     handoff_to_drain(&run_dir, &sid, host, &stdin_buf);
+}
+
+
+fn is_subagent_transcript(stdin_buf: &str) -> bool {
+    match find_json_string(stdin_buf, "transcript_path") {
+        Some(path) => path.contains("/subagents/"),
+        None => false,
+    }
 }

@@ -310,6 +310,71 @@ def test_opt_flag_present_subagent_stop_hands_off(tmp_path):
     assert r.returncode == 0
 
 
+def test_subagent_transcript_skips_drain_even_with_marker(tmp_path):
+    """When transcript_path points into `/subagents/`, the hook must
+    fast-exit instead of draining the queue — even though the parent's
+    marker exists and the session_id is the parent's.
+
+    Claude-code (and codex) Task-tool subagents inherit the parent's
+    CLAUDE_CODE_SESSION_ID env var, so without this guard the subagent's
+    PreToolUse fire would resolve to the parent's session, drain the
+    parent's queue, and the additionalContext would land in the
+    subagent's API call instead of the orchestrator's. Net effect:
+    directive eaten by a subagent doing its narrow task; orchestrator
+    never sees it.
+    """
+    _scaffold_evo_run(tmp_path)  # marker present
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    payload = (
+        b'{"session_id":"test-sid","hook_event_name":"PreToolUse",'
+        b'"transcript_path":"/Users/x/.claude/projects/foo/test-sid/'
+        b'subagents/agent-xyz123.jsonl"}'
+    )
+    r = _run_hook(tmp_path, payload, path_env=path_env)
+    assert r.returncode == 0
+    assert r.stdout.strip() == b"{}"
+    assert not (fake_bin / "argv.log").exists(), (
+        "drain must NOT be invoked when transcript_path indicates "
+        "subagent context — directive belongs to the orchestrator"
+    )
+
+
+def test_main_transcript_path_still_drains(tmp_path):
+    """The companion to the above — main session transcripts (no
+    `/subagents/` segment) must continue to drain normally."""
+    _scaffold_evo_run(tmp_path)  # marker present
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    payload = (
+        b'{"session_id":"test-sid","hook_event_name":"PreToolUse",'
+        b'"transcript_path":"/Users/x/.claude/projects/foo/test-sid.jsonl"}'
+    )
+    r = _run_hook(tmp_path, payload, path_env=path_env)
+    assert r.returncode == 0
+    assert (fake_bin / "argv.log").exists(), (
+        "drain must be invoked when transcript_path is the main session"
+    )
+
+
+def test_missing_transcript_path_drains_normally(tmp_path):
+    """Hosts that don't pass transcript_path (older claude-code, codex,
+    other hosts) must continue to drain as before. The subagent fence
+    is an OPT-IN signal — absence defaults to main-session behaviour."""
+    _scaffold_evo_run(tmp_path)
+    fake_bin = tmp_path / "fake-bin"
+    _write_recording_drain(fake_bin)
+    path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
+    payload = b'{"session_id":"test-sid","hook_event_name":"PreToolUse"}'
+    r = _run_hook(tmp_path, payload, path_env=path_env)
+    assert r.returncode == 0
+    assert (fake_bin / "argv.log").exists(), (
+        "drain must run when transcript_path is absent — defaults to main"
+    )
+
+
 def test_opt_flag_absent_pretooluse_fast_exits(tmp_path):
     """Without optimize_mode flag AND without marker, PreToolUse fast-exits.
     This is the cost-saving fast path — no Python invocation for normal
