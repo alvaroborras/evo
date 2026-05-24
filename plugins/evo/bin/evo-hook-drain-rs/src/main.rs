@@ -453,15 +453,16 @@ fn main() {
     // orchestrator's. The subagent finishes its narrow task, context
     // is discarded, the orchestrator never sees the directive.
     //
-    // Discriminator: the hook payload's `transcript_path` field. For
-    // the main session it points to `<projects>/<id>.jsonl`; for a
-    // subagent it points to `<projects>/<id>/subagents/agent-*.jsonl`.
-    // The `/subagents/` segment is the canonical signal.
+    // Discriminator: the hook payload's `agent_id` field. Claude-code
+    // includes it (along with `agent_type`) in PreToolUse payloads
+    // for subagent (Task tool) tool calls; the orchestrator's own
+    // tool calls have it absent. Verified empirically.
     //
     // On subagent context: fast-exit. The queue stays pending until a
-    // main-session hook (typically the next Stop) consumes it and
-    // delivers as a new user turn via `{decision: "block", reason}`.
-    if is_subagent_transcript(&stdin_buf) {
+    // main-session hook (typically the orchestrator's next Stop or a
+    // top-level Bash/Read call) consumes it and delivers as a new
+    // user turn / additionalContext.
+    if is_subagent_context(&stdin_buf) {
         emit_ok();
     }
 
@@ -469,9 +470,23 @@ fn main() {
 }
 
 
-fn is_subagent_transcript(stdin_buf: &str) -> bool {
-    match find_json_string(stdin_buf, "transcript_path") {
-        Some(path) => path.contains("/subagents/"),
+fn is_subagent_context(stdin_buf: &str) -> bool {
+    // Claude-code includes `agent_id` (and `agent_type`) fields in hook
+    // payloads triggered by subagent (Task tool) tool calls. The
+    // orchestrator's own tool calls have these fields absent. This is
+    // the canonical discriminator — verified empirically by dumping
+    // every hook payload across a release-smoke run:
+    //   - 20 PreToolUse with agent_id present: every one originated
+    //     from a subagent (file edits in worktrees/exp_*/, evo run
+    //     commands inside subagents)
+    //   - 12 PreToolUse with agent_id absent: every one originated
+    //     from the orchestrator (Skill, top-level Bash, Agent/Task
+    //     spawn, evo ack)
+    //
+    // Earlier `transcript_path` check was wrong — claude-code passes
+    // the MAIN session's transcript_path even for subagent tool calls.
+    match find_json_string(stdin_buf, "agent_id") {
+        Some(aid) => !aid.is_empty(),
         None => false,
     }
 }

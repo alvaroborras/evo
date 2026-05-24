@@ -310,10 +310,11 @@ def test_opt_flag_present_subagent_stop_hands_off(tmp_path):
     assert r.returncode == 0
 
 
-def test_subagent_transcript_skips_drain_even_with_marker(tmp_path):
-    """When transcript_path points into `/subagents/`, the hook must
-    fast-exit instead of draining the queue — even though the parent's
-    marker exists and the session_id is the parent's.
+def test_subagent_context_skips_drain_even_with_marker(tmp_path):
+    """When the hook payload contains `agent_id` (non-empty), the call
+    originated from a Task-tool subagent and the hook must fast-exit
+    instead of draining the queue — even though the parent's marker
+    exists and the session_id is the parent's.
 
     Claude-code (and codex) Task-tool subagents inherit the parent's
     CLAUDE_CODE_SESSION_ID env var, so without this guard the subagent's
@@ -322,6 +323,11 @@ def test_subagent_transcript_skips_drain_even_with_marker(tmp_path):
     subagent's API call instead of the orchestrator's. Net effect:
     directive eaten by a subagent doing its narrow task; orchestrator
     never sees it.
+
+    Empirically verified discriminator: claude-code includes
+    `agent_id` + `agent_type` in PreToolUse payloads for subagent
+    tool calls only. Orchestrator-context tool calls have these fields
+    absent.
     """
     _scaffold_evo_run(tmp_path)  # marker present
     fake_bin = tmp_path / "fake-bin"
@@ -329,49 +335,52 @@ def test_subagent_transcript_skips_drain_even_with_marker(tmp_path):
     path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
     payload = (
         b'{"session_id":"test-sid","hook_event_name":"PreToolUse",'
-        b'"transcript_path":"/Users/x/.claude/projects/foo/test-sid/'
-        b'subagents/agent-xyz123.jsonl"}'
+        b'"agent_id":"a892a53b6207","agent_type":"general-purpose",'
+        b'"tool_name":"Edit"}'
     )
     r = _run_hook(tmp_path, payload, path_env=path_env)
     assert r.returncode == 0
     assert r.stdout.strip() == b"{}"
     assert not (fake_bin / "argv.log").exists(), (
-        "drain must NOT be invoked when transcript_path indicates "
-        "subagent context — directive belongs to the orchestrator"
+        "drain must NOT be invoked when agent_id indicates subagent "
+        "context — directive belongs to the orchestrator"
     )
 
 
-def test_main_transcript_path_still_drains(tmp_path):
-    """The companion to the above — main session transcripts (no
-    `/subagents/` segment) must continue to drain normally."""
+def test_main_context_without_agent_id_still_drains(tmp_path):
+    """The companion to the above — orchestrator tool calls (no
+    `agent_id` field) must continue to drain normally."""
     _scaffold_evo_run(tmp_path)  # marker present
     fake_bin = tmp_path / "fake-bin"
     _write_recording_drain(fake_bin)
     path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
     payload = (
         b'{"session_id":"test-sid","hook_event_name":"PreToolUse",'
-        b'"transcript_path":"/Users/x/.claude/projects/foo/test-sid.jsonl"}'
+        b'"tool_name":"Bash","tool_input":{"command":"evo status"}}'
     )
     r = _run_hook(tmp_path, payload, path_env=path_env)
     assert r.returncode == 0
     assert (fake_bin / "argv.log").exists(), (
-        "drain must be invoked when transcript_path is the main session"
+        "drain must be invoked when agent_id is absent (orchestrator)"
     )
 
 
-def test_missing_transcript_path_drains_normally(tmp_path):
-    """Hosts that don't pass transcript_path (older claude-code, codex,
-    other hosts) must continue to drain as before. The subagent fence
-    is an OPT-IN signal — absence defaults to main-session behaviour."""
+def test_empty_agent_id_treated_as_main(tmp_path):
+    """If claude-code ever serialises `agent_id` as an empty string
+    instead of omitting the field, treat it as orchestrator context
+    (not subagent) — the discriminator is presence + non-empty."""
     _scaffold_evo_run(tmp_path)
     fake_bin = tmp_path / "fake-bin"
     _write_recording_drain(fake_bin)
     path_env = f"{fake_bin}{_path_separator()}{_base_path()}"
-    payload = b'{"session_id":"test-sid","hook_event_name":"PreToolUse"}'
+    payload = (
+        b'{"session_id":"test-sid","hook_event_name":"PreToolUse",'
+        b'"agent_id":"","tool_name":"Bash"}'
+    )
     r = _run_hook(tmp_path, payload, path_env=path_env)
     assert r.returncode == 0
     assert (fake_bin / "argv.log").exists(), (
-        "drain must run when transcript_path is absent — defaults to main"
+        "empty agent_id must NOT fence — only present + non-empty counts"
     )
 
 
