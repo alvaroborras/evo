@@ -1,16 +1,16 @@
 """Tests for the hermes steering port.
 
-Hermes hook contract (verified against hermes-agent 0.10's
+Hermes hook contract (verified against hermes-agent
 `hermes_cli/plugins.py#VALID_HOOKS`):
-  - `pre_tool_call` — observer-only; return value ignored.
-  - `pre_llm_call` — can return `{"context": "..."}` to inject context.
-  - `post_tool_call` — observer-only.
-
-No mid-turn delivery is possible (no hook with a mutable model-input
-return value during the tool-calling loop). The port:
-  - `pre_tool_call` records optimize-mode violations in policy_state.
-  - `pre_llm_call` consumes any pending nudge and injects it into the
-    next turn's context, alongside any queued directives.
+  - `pre_tool_call` — return `{"action": "block", "message": ...}` to
+    short-circuit a tool. Verified at hermes_cli/plugins.py:88-90 and
+    model_tools.py:60-62.
+  - `pre_llm_call` — return `{"context": "..."}` to append text to the
+    current turn's user message (run_agent.py:721-740).
+  - `on_session_end` — observer-style return, but `ctx.inject_message`
+    queues a follow-up turn (plugins.py:359-383; CLI loop picks it up
+    at cli.py:14000-14082, same mechanism `/goal` uses at
+    cli.py:9126-9240).
 
 Tests drive the hook functions directly with real on-disk session
 state. No mocks of drain or registry.
@@ -59,11 +59,14 @@ class _Base(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name).resolve()
         self.run_dir = _make_workspace(self.root)
-        # repo_root() walks up from cwd; chdir to the workspace so the
-        # hermes plugin's _resolve_root() finds it.
         import os
         self._orig_cwd = os.getcwd()
         os.chdir(self.root)
+        # Reset module-level state between tests so register() runs
+        # under the test fixture's stub ctx, not a previous test's.
+        import evo.hermes_plugin as hp
+        hp._PLUGIN_CTX = None
+        hp._LAST_SESSION_ID = None
 
     def tearDown(self):
         import os
@@ -77,7 +80,7 @@ class _Base(unittest.TestCase):
 
 class TestRegistersOnlyValidHooks(unittest.TestCase):
 
-    # Match hermes-agent 0.10's hermes_cli/plugins.py#VALID_HOOKS exactly.
+    # Match hermes-agent's hermes_cli/plugins.py#VALID_HOOKS.
     HERMES_VALID_HOOKS = frozenset({
         "pre_tool_call", "post_tool_call",
         "pre_llm_call", "post_llm_call",
@@ -103,10 +106,22 @@ class TestRegistersOnlyValidHooks(unittest.TestCase):
                 f"VALID_HOOKS. The hook will never fire."
             )
 
+    def test_register_includes_session_end_for_stop_nudge(self):
+        from evo.hermes_plugin import register
+
+        registered: list[str] = []
+
+        class _FakeCtx:
+            def register_hook(self, name, cb):
+                registered.append(name)
+
+        register(_FakeCtx())
+        self.assertIn("on_session_end", registered,
+                      "on_session_end must be registered — it's the stop-nudge entry point")
+
     def test_transform_tool_result_not_registered(self):
-        """Regression: the previous evo plugin registered
-        `transform_tool_result`, a hook hermes does not fire. The new
-        port must not."""
+        """Regression: a previous evo plugin registered
+        `transform_tool_result`, which hermes does not fire."""
         from evo.hermes_plugin import register
 
         registered: list[str] = []
@@ -120,10 +135,27 @@ class TestRegistersOnlyValidHooks(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# pre_tool_call observer: records violations to policy_state
+# pre_tool_call deny gate: synchronous block on odd violations
 # ---------------------------------------------------------------------------
 
-class TestPreToolCallRecordsViolations(_Base):
+class TestPreToolCallDenies(_Base):
+
+    def test_denied_tool_returns_block_envelope(self):
+        from evo.hermes_plugin import _on_pre_tool_call
+
+        register_session(self.root, "h1", "hermes")
+        mark_engaged(self.root, "h1")
+        mark_optimize_mode(self.root, "h1")
+
+        out = _on_pre_tool_call(
+            tool_name="file_write", args={"file_path": "/x"},
+            task_id="h1", session_id="h1",
+        )
+        self.assertIsInstance(out, dict, "denied tool must return a dict")
+        self.assertEqual(out.get("action"), "block",
+                         f"odd-numbered violation must block; got {out!r}")
+        self.assertIn("EVO POLICY", out.get("message", ""),
+                      "block message must carry the policy banner")
 
     def test_denied_tool_increments_counter(self):
         from evo.hermes_plugin import _on_pre_tool_call
@@ -138,27 +170,48 @@ class TestPreToolCallRecordsViolations(_Base):
             task_id="h1", session_id="h1",
         )
         state = _read_policy_state(self.root, "h1")
-        self.assertEqual(state.get("violation_count"), 1,
-                         f"denied tool must increment counter; got {state!r}")
-        self.assertTrue(state.get("nudge_pending"),
-                        "nudge_pending flag must be set after a violation")
+        self.assertEqual(state.get("violation_count"), 1)
+        self.assertEqual(state.get("last_violation_tool"), "file_write")
 
-    def test_denied_bash_command_recorded(self):
+    def test_alternating_cadence(self):
         from evo.hermes_plugin import _on_pre_tool_call
-        from evo.inject.drain import _read_policy_state
 
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
 
-        _on_pre_tool_call(
+        # #1 odd → block
+        out1 = _on_pre_tool_call(tool_name="file_write", args={"file_path": "/a"},
+                                 task_id="h1", session_id="h1")
+        self.assertEqual(out1.get("action"), "block",
+                         f"violation #1 must block; got {out1!r}")
+
+        # #2 even → pass
+        out2 = _on_pre_tool_call(tool_name="file_write", args={"file_path": "/b"},
+                                 task_id="h1", session_id="h1")
+        self.assertIsNone(out2,
+                          f"violation #2 must pass under alternating cadence; got {out2!r}")
+
+        # #3 odd → block
+        out3 = _on_pre_tool_call(tool_name="file_write", args={"file_path": "/c"},
+                                 task_id="h1", session_id="h1")
+        self.assertEqual(out3.get("action"), "block",
+                         f"violation #3 must block; got {out3!r}")
+
+    def test_denied_bash_command_blocks(self):
+        from evo.hermes_plugin import _on_pre_tool_call
+
+        register_session(self.root, "h1", "hermes")
+        mark_engaged(self.root, "h1")
+        mark_optimize_mode(self.root, "h1")
+
+        out = _on_pre_tool_call(
             tool_name="terminal", args={"command": "sed -i s/a/b/ f.py"},
             task_id="h1", session_id="h1",
         )
-        state = _read_policy_state(self.root, "h1")
-        self.assertEqual(state.get("violation_count"), 1)
+        self.assertEqual(out.get("action"), "block")
 
-    def test_non_denied_tool_does_not_record(self):
+    def test_non_denied_tool_passes(self):
         from evo.hermes_plugin import _on_pre_tool_call
         from evo.inject.drain import _read_policy_state
 
@@ -167,130 +220,73 @@ class TestPreToolCallRecordsViolations(_Base):
         mark_optimize_mode(self.root, "h1")
 
         for tn in ("read_file", "list_dir", "web_search", "grep"):
-            _on_pre_tool_call(
+            out = _on_pre_tool_call(
                 tool_name=tn, args={"path": "/x"},
                 task_id="h1", session_id="h1",
             )
+            self.assertIsNone(out, f"non-denied tool {tn!r} must not block")
         state = _read_policy_state(self.root, "h1")
-        self.assertEqual(state.get("violation_count", 0), 0,
-                         f"non-denied tools must not record; got {state!r}")
+        self.assertEqual(state.get("violation_count", 0), 0)
 
-    def test_outside_optimize_mode_not_recorded(self):
+    def test_outside_optimize_mode_passes(self):
         from evo.hermes_plugin import _on_pre_tool_call
-        from evo.inject.drain import _read_policy_state
 
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         # optimize_mode NOT set
-        _on_pre_tool_call(
+        out = _on_pre_tool_call(
             tool_name="file_write", args={}, task_id="h1", session_id="h1",
         )
-        state = _read_policy_state(self.root, "h1")
-        self.assertEqual(state.get("violation_count", 0), 0)
+        self.assertIsNone(out, "no optimize_mode → must not block")
 
-    def test_subagent_not_recorded(self):
+    def test_subagent_passes(self):
         from evo.hermes_plugin import _on_pre_tool_call
-        from evo.inject.drain import _read_policy_state
         from evo.inject.paths import session_file
 
         register_session(self.root, "h_sub", "hermes", exp_id="exp_0001")
         mark_engaged(self.root, "h_sub")
-        # Force optimize_mode true (mark_optimize_mode refuses subagents)
+        # Force optimize_mode true (mark_optimize_mode refuses subagents).
         sf = session_file(self.root, "h_sub")
         data = json.loads(sf.read_text())
         data["optimize_mode"] = True
         sf.write_text(json.dumps(data))
 
-        _on_pre_tool_call(
+        out = _on_pre_tool_call(
             tool_name="file_write", args={}, task_id="h_sub", session_id="h_sub",
         )
-        state = _read_policy_state(self.root, "h_sub")
-        self.assertEqual(state.get("violation_count", 0), 0,
-                         "subagent must not be policy-recorded")
+        self.assertIsNone(out, "subagent must be exempt from deny gate")
 
 
 # ---------------------------------------------------------------------------
-# pre_llm_call: consumes nudge + delivers directives
+# pre_llm_call: directive drain + auto-arm
 # ---------------------------------------------------------------------------
 
-class TestPreLlmCallNudgeDelivery(_Base):
+class TestPreLlmCallDrain(_Base):
 
-    def test_first_violation_injects_banner_on_next_pre_llm_call(self):
-        from evo.hermes_plugin import _on_pre_tool_call, _on_pre_llm_call
-
-        register_session(self.root, "h1", "hermes")
-        mark_engaged(self.root, "h1")
-        mark_optimize_mode(self.root, "h1")
-
-        # Turn 1: denied tool fires.
-        _on_pre_tool_call(
-            tool_name="file_write", args={"file_path": "/x"},
-            task_id="h1", session_id="h1",
-        )
-        # Turn 2: pre_llm_call should inject the banner.
-        out = _on_pre_llm_call(session_id="h1")
-        self.assertIsNotNone(out, "pending nudge must inject context")
-        self.assertIn("EVO POLICY", out.get("context", ""))
-
-    def test_alternating_cadence_on_consecutive_violations(self):
-        from evo.hermes_plugin import _on_pre_tool_call, _on_pre_llm_call
-
-        register_session(self.root, "h1", "hermes")
-        mark_engaged(self.root, "h1")
-        mark_optimize_mode(self.root, "h1")
-
-        # Violation #1 → odd → next pre_llm_call nudges
-        _on_pre_tool_call(tool_name="file_write", args={"file_path": "/a"},
-                          task_id="h1", session_id="h1")
-        out1 = _on_pre_llm_call(session_id="h1")
-        self.assertIsNotNone(out1)
-        self.assertIn("EVO POLICY", out1.get("context", ""))
-
-        # Violation #2 → even → next pre_llm_call does NOT nudge
-        _on_pre_tool_call(tool_name="file_write", args={"file_path": "/b"},
-                          task_id="h1", session_id="h1")
-        out2 = _on_pre_llm_call(session_id="h1")
-        if out2 is not None:
-            self.assertNotIn("EVO POLICY", out2.get("context", ""),
-                             f"#2 must not nudge under alternating cadence; got {out2!r}")
-
-        # Violation #3 → odd → nudges again
-        _on_pre_tool_call(tool_name="file_write", args={"file_path": "/c"},
-                          task_id="h1", session_id="h1")
-        out3 = _on_pre_llm_call(session_id="h1")
-        self.assertIsNotNone(out3)
-        self.assertIn("EVO POLICY", out3.get("context", ""))
-
-    def test_pre_llm_call_without_pending_violation_returns_none(self):
+    def test_no_pending_state_returns_none(self):
         from evo.hermes_plugin import _on_pre_llm_call
 
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
 
-        # No violations recorded; no directives queued.
         out = _on_pre_llm_call(session_id="h1")
-        self.assertIsNone(out, "no pending state must return None (no injection)")
+        self.assertIsNone(out, "no queued directive → no injection")
 
-    def test_pending_nudge_cleared_after_injection(self):
-        from evo.hermes_plugin import _on_pre_tool_call, _on_pre_llm_call
-        from evo.inject.drain import _read_policy_state
+    def test_queued_directive_delivered(self):
+        from evo.hermes_plugin import _on_pre_llm_call
+        from evo.inject import queue, marker
 
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
-        mark_optimize_mode(self.root, "h1")
 
-        _on_pre_tool_call(tool_name="file_write", args={},
-                          task_id="h1", session_id="h1")
-        _on_pre_llm_call(session_id="h1")
-        state = _read_policy_state(self.root, "h1")
-        self.assertFalse(state.get("nudge_pending", False),
-                         "nudge_pending must clear after injection")
+        queue.append_workspace_event(self.root, "TRY_COSINE")
+        marker.touch(self.root, "h1")
 
+        out = _on_pre_llm_call(session_id="h1")
+        self.assertIsNotNone(out)
+        self.assertIn("TRY_COSINE", out.get("context", ""))
 
-# ---------------------------------------------------------------------------
-# Auto-arm optimize_mode from /optimize prompt
-# ---------------------------------------------------------------------------
 
 class TestHermesAutoArmOptimizeMode(_Base):
 
@@ -316,35 +312,71 @@ class TestHermesAutoArmOptimizeMode(_Base):
 
 
 # ---------------------------------------------------------------------------
-# Combined emit: policy banner + queued directive ordering
+# on_session_end: stop nudge via ctx.inject_message
 # ---------------------------------------------------------------------------
 
-class TestHermesCombinedEmit(_Base):
+class TestOnSessionEnd(_Base):
 
-    def test_banner_before_directive_in_context(self):
-        from evo.hermes_plugin import _on_pre_tool_call, _on_pre_llm_call
-        from evo.inject import queue, marker
+    def _install_stub_ctx(self) -> list[tuple[str, str]]:
+        """Register the plugin against a stub ctx that records
+        inject_message calls. Returns the recording list."""
+        from evo.hermes_plugin import register
+        recorded: list[tuple[str, str]] = []
 
+        class _StubCtx:
+            def register_hook(self, name, cb):
+                pass
+
+            def inject_message(self, content, role="user"):
+                recorded.append((role, content))
+                return True
+
+        register(_StubCtx())
+        return recorded
+
+    def test_session_end_injects_stop_nudge_in_optimize_mode(self):
+        from evo.hermes_plugin import _on_session_end
+
+        recorded = self._install_stub_ctx()
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
 
-        # Queue a directive and record a violation.
-        queue.append_workspace_event(self.root, "TRY_COSINE")
-        marker.touch(self.root, "h1")
-        _on_pre_tool_call(tool_name="file_write", args={},
-                          task_id="h1", session_id="h1")
+        _on_session_end(session_id="h1")
+        self.assertEqual(len(recorded), 1,
+                         f"optimize_mode session end must inject 1 message; got {recorded!r}")
+        role, content = recorded[0]
+        self.assertEqual(role, "user")
+        self.assertIn("EVO LOOP", content,
+                      "stop nudge must carry the EVO LOOP banner")
 
-        out = _on_pre_llm_call(session_id="h1")
-        self.assertIsNotNone(out)
-        ctx = out.get("context", "")
-        self.assertIn("EVO POLICY", ctx, "banner must appear")
-        self.assertIn("TRY_COSINE", ctx, "directive must appear")
-        banner_pos = ctx.find("EVO POLICY")
-        directive_pos = ctx.find("TRY_COSINE")
-        self.assertLess(banner_pos, directive_pos,
-                        "banner must come before directive so truncation "
-                        "doesn't lose the corrective signal")
+    def test_session_end_outside_optimize_mode_is_noop(self):
+        from evo.hermes_plugin import _on_session_end
+
+        recorded = self._install_stub_ctx()
+        register_session(self.root, "h1", "hermes")
+        mark_engaged(self.root, "h1")
+        # optimize_mode NOT set
+
+        _on_session_end(session_id="h1")
+        self.assertEqual(recorded, [],
+                         "no optimize_mode → no stop nudge")
+
+    def test_session_end_in_subagent_is_noop(self):
+        from evo.hermes_plugin import _on_session_end
+        from evo.inject.paths import session_file
+
+        recorded = self._install_stub_ctx()
+        register_session(self.root, "h_sub", "hermes", exp_id="exp_0001")
+        mark_engaged(self.root, "h_sub")
+        sf = session_file(self.root, "h_sub")
+        data = json.loads(sf.read_text())
+        data["optimize_mode"] = True
+        sf.write_text(json.dumps(data))
+
+        _on_session_end(session_id="h_sub")
+        self.assertEqual(recorded, [],
+                         "subagent session end must not push a parent-loop nudge")
 
 
 if __name__ == "__main__":

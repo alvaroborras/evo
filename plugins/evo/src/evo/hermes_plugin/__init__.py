@@ -1,60 +1,33 @@
 """Hermes runtime plugin — auto-discovered via pip entry-point
 `hermes_agent.plugins`.
 
-KNOWN LIMITATIONS (hermes hook contract, not bugs in this plugin):
-
-  1. Cannot block denied tool calls. Hermes's `pre_tool_call` is
-     observer-only — return value is ignored per upstream docs
-     ("Use cases: ... blocking dangerous operations (print a warning)").
-     We record the violation and inject the policy banner on the NEXT
-     pre_llm_call. The agent self-corrects on its next iteration, but
-     the offending tool has already executed by then. On claude-code /
-     codex / cursor / opencode / openclaw / pi the gate is synchronous;
-     here it is reactive. Same `optimize_mode` + alternating cadence
-     gating; weaker enforcement.
-
-  2. No always-fire stop nudge. Hermes has no turn-end hook whose
-     return value can force a new turn. `post_llm_call` exists but its
-     return is ignored. If the agent stops, nothing here continues it.
-     For `hermes chat -q ... -Q` batch mode this is a hard limit; for
-     interactive sessions the user's next prompt resumes naturally.
-
-  Both limitations are upstream API constraints. They're documented
-  here so that a session starting with `/optimize` on hermes is known
-  to operate under weaker steering than on the other hosts.
-
-Hooks registered (verified against hermes-agent 0.10's `VALID_HOOKS`):
+Hooks registered:
 
 - `on_session_start`: registers the hermes session in evo's inject
-  registry. Return value is ignored by hermes.
-- `pre_llm_call`: drains pending events at turn start AND injects the
-  policy nudge banner if violations were recorded since the last turn.
-  This is the only hook whose return value hermes honors (as
-  `{"context": "..."}`).
-- `pre_tool_call`: observer-only on hermes (return ignored). Records
-  optimize-mode violations to a state file. The nudge is delivered
-  the next time `pre_llm_call` fires.
+  registry.
+- `pre_llm_call`: per-turn drain of pending `evo direct` events. The
+  only hook whose return value hermes honors as `{"context": "..."}`
+  (appended to the current turn's user message — see
+  hermes-agent run_agent.py:721-740).
+- `pre_tool_call`: synchronous deny gate. Returning
+  `{"action": "block", "message": ...}` short-circuits the tool and
+  feeds `message` back to the model as the tool error (see
+  hermes_cli/plugins.py:88-90 + model_tools.py:60-62). Alternating
+  cadence — block on odd violations (1, 3, 5, …), pass on even.
+- `on_session_end`: stop nudge. Calls `ctx.inject_message(...)` to
+  enqueue a follow-up user turn (hermes_cli/plugins.py:359-383). The
+  background process_loop picks it up and starts another `chat()`
+  iteration — the same mechanism `/goal` uses internally
+  (cli.py:9126-9240).
 
-Why not mid-turn delivery: hermes has no hook that can mutate model
-input mid-tool-loop. `pre_tool_call` is observer-only; `post_tool_call`
-return is ignored. So directives queued during a turn are delivered at
-the NEXT turn's `pre_llm_call`. Single-turn (`hermes chat -q ... -Q`)
-runs have no next turn, so mid-turn-queued directives wait until the
-next `hermes chat` invocation. (This was misrepresented in the previous
-plugin which registered a `transform_tool_result` hook hermes doesn't
-fire — verified absent from `VALID_HOOKS` in hermes-agent 0.10.)
+Gateway-mode caveat: `ctx.inject_message` requires a `_cli_ref`. In
+gateway mode it returns False and logs "no CLI reference"; the
+stop-nudge is a no-op there. Deny gate is unaffected.
 
-Session-id handling: `pre_tool_call` receives `task_id` (the hermes
-session identifier), not `session_id`. We stash the session id from
-`on_session_start` / `pre_llm_call` so `pre_tool_call` can resolve which
-session record to update. Single hermes process = single active session
-at a time, so this is safe; for subagents that fork their own session,
-the parent's drain remains correct because `pre_tool_call` only fires
-for the current agent's tools.
-
-In-process function calls; no fork+exec. We don't use the marker
-fast-path optimization because the cost of reading the queue file is
-already sub-millisecond and far below model RTT.
+Session-id handling: `pre_tool_call` receives `task_id`, not
+`session_id`. We stash the session id from `on_session_start` /
+`pre_llm_call` so `pre_tool_call` can resolve the right session
+record.
 
 See notes/cross-host-inject-design.md.
 """
@@ -70,6 +43,7 @@ from evo.inject.queue import read_events_after, read_offset, write_offset
 from evo.inject.registry import get_session, register_session
 from evo.inject.drain import (
     _POLICY_NUDGE_TEMPLATE,
+    _STOP_NUDGE_TEMPLATE,
     _is_denied_in_optimize_mode,
     _maybe_mark_optimize_from_prompt,
     _read_policy_state,
@@ -147,37 +121,19 @@ def _stash_session(session_id: str | None) -> None:
         _LAST_SESSION_ID = session_id
 
 
-def _record_violation(root: Path, session_id: str, tool_name: str | None) -> None:
-    """Increment the per-session violation counter and mark a pending
-    nudge. Called from `pre_tool_call` for denied tools under optimize_mode.
-
-    Storage: piggybacks on the same `_policy_state_file` used by
-    claude-code/cursor/codex so cadence and counter shape stay
-    consistent across hosts.
+def _record_violation_and_should_block(
+    root: Path, session_id: str, tool_name: str | None,
+) -> bool:
+    """Increment the per-session violation counter; return True on every
+    odd-numbered violation (1, 3, 5, …). Mirrors `_should_policy_block`
+    in drain.py — same cadence and state shape across hosts.
     """
     state = _read_policy_state(root, session_id)
     count = int(state.get("violation_count", 0)) + 1
     state["violation_count"] = count
     state["last_violation_tool"] = tool_name or ""
-    state["nudge_pending"] = True
     _write_policy_state(root, session_id, state)
-
-
-def _consume_pending_nudge(root: Path, session_id: str) -> str | None:
-    """At `pre_llm_call`, return the policy nudge banner IF a violation
-    is pending AND the current count satisfies the alternating cadence
-    (odd-numbered violations nudge; even ones pass silently). Resets
-    `nudge_pending` after.
-    """
-    state = _read_policy_state(root, session_id)
-    if not state.get("nudge_pending"):
-        return None
-    count = int(state.get("violation_count", 0))
-    state["nudge_pending"] = False
-    _write_policy_state(root, session_id, state)
-    if count % 2 == 1:
-        return _POLICY_NUDGE_TEMPLATE
-    return None
+    return count % 2 == 1
 
 
 def _on_session_start(session_id: str | None = None, **kwargs):
@@ -194,13 +150,7 @@ def _on_session_start(session_id: str | None = None, **kwargs):
 
 
 def _on_pre_llm_call(session_id: str | None = None, **kwargs):
-    """Per-turn drain + policy nudge delivery.
-
-    Two channels combined into the `{"context": ...}` injection:
-      1. Policy nudge banner — if `pre_tool_call` recorded a denied-tool
-         violation since the last pre_llm_call AND the count satisfies
-         the alternating cadence, prepend the EVO POLICY banner.
-      2. Pending directives (`evo direct`) — appended.
+    """Per-turn drain of pending `evo direct` events.
 
     Also auto-arms `optimize_mode` if the user's prompt looks like
     `/optimize`. Hermes has no UserPromptSubmit hook; pre_llm_call is
@@ -213,26 +163,14 @@ def _on_pre_llm_call(session_id: str | None = None, **kwargs):
     if root is None:
         return None
     _ensure_registered(root, session_id)
-    # Auto-arm optimize_mode on /optimize. Synthetic event name so the
-    # shared matcher (which gates on hook_event ∈ prompt_events) accepts.
     _maybe_mark_optimize_from_prompt(
         root, session_id, "hermes", "userPromptSubmit", kwargs,
     )
 
-    nudge = _consume_pending_nudge(root, session_id)
     directive_text = _compute_drain_text(root, session_id)
-
-    if not nudge and not directive_text:
+    if not directive_text:
         return None
-    # Banner first so it stays visible even if context is truncated.
-    parts: list[str] = []
-    if nudge:
-        parts.append("--- evo policy ---")
-        parts.append(nudge)
-    if directive_text:
-        parts.append("--- evo directive ---")
-        parts.append(directive_text)
-    return {"context": "\n\n".join(parts)}
+    return {"context": f"--- evo directive ---\n\n{directive_text}"}
 
 
 def _on_pre_tool_call(
@@ -241,13 +179,10 @@ def _on_pre_tool_call(
     task_id: str | None = None,
     **kwargs,
 ):
-    """Observer for tool calls. Hermes ignores the return value, so we
-    can't block here — we record the violation so the next `pre_llm_call`
-    can deliver the nudge.
-
-    Fires once per tool execution (verified against hermes-agent
-    `model_tools.py#handle_function_call`). Parallel tool calls fire it
-    N times.
+    """Synchronous deny gate. On odd-numbered violations, return
+    `{"action": "block", "message": ...}` — hermes short-circuits the
+    tool and feeds the message back to the model as the tool error
+    (hermes_cli/plugins.py:88-90, model_tools.py:60-62).
     """
     session_id = kwargs.get("session_id") or _LAST_SESSION_ID
     if not session_id:
@@ -264,18 +199,44 @@ def _on_pre_tool_call(
         return None
     if not _is_denied_in_optimize_mode(tool_name, args):
         return None
-    _record_violation(root, session_id, tool_name)
+    if _record_violation_and_should_block(root, session_id, tool_name):
+        return {"action": "block", "message": _POLICY_NUDGE_TEMPLATE}
+    return None
+
+
+# Plugin context, stashed at register() so `on_session_end` can call
+# `ctx.inject_message(...)` to push a follow-up user message back into
+# the CLI's `_pending_input` queue.
+_PLUGIN_CTX = None
+
+
+def _on_session_end(session_id: str | None = None, **kwargs):
+    """Stop nudge — enqueue a follow-up user turn so the `/optimize`
+    loop keeps running. CLI mode only (gateway has no `_cli_ref`).
+    """
+    if not session_id or _PLUGIN_CTX is None:
+        return None
+    root = _resolve_root()
+    if root is None:
+        return None
+    sess = get_session(root, session_id)
+    if not sess:
+        return None
+    if sess.get("exp_id"):
+        return None  # subagent — not our session to force-continue
+    if not sess.get("optimize_mode"):
+        return None
+    try:
+        _PLUGIN_CTX.inject_message(_STOP_NUDGE_TEMPLATE, role="user")
+    except Exception:
+        pass
     return None
 
 
 def register(ctx) -> None:
-    """Hermes plugin entry point — invoked once at plugin load.
-
-    Only hooks listed in hermes-agent's `VALID_HOOKS` are registered.
-    `transform_tool_result` (used by older evo versions) is NOT a real
-    hermes hook and was silently dropped — confirmed against
-    hermes-agent 0.10's `hermes_cli/plugins.py`.
-    """
+    global _PLUGIN_CTX
+    _PLUGIN_CTX = ctx
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("on_session_end", _on_session_end)
