@@ -215,23 +215,20 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
             )
             return 2
 
-    # Marketplace name: codex names a marketplace differently per source.
-    #   - `codex plugin marketplace add evo-hq/evo` (PyPI/GitHub shorthand)
-    #     → name = `evo-hq` (the owner)
-    #   - `codex plugin marketplace add <local-dir>` (local)
-    #     → name = marketplace.json's top-level `"name"` field (`evo-hq-evo`)
-    # When --from-path is given we're in local mode; otherwise PyPI mode
-    # and we use the cache dir's basename (which codex assigned).
+    # Marketplace name: ALWAYS read marketplace.json's top-level `"name"`
+    # field (`evo-hq-evo`) regardless of install mode. The previous
+    # logic split on PyPI vs --from-path and used the cache dir basename
+    # (`evo-hq` — codex's owner-based naming) in PyPI mode, which caused
+    # the two install modes to register the plugin under DIFFERENT names.
+    # Users who upgraded across modes ended up with two parallel
+    # `[plugins."evo@<X>"]` entries and exit-127 errors from the orphaned
+    # one. Migration of pre-fix installs runs at the end of install().
     try:
         mkt = _json.loads(marketplace_json.read_text())
     except (OSError, _json.JSONDecodeError) as exc:
         print(f"✗ could not parse {marketplace_json}: {exc}", file=_sys.stderr)
         return 2
-    if from_path:
-        mkt_name = mkt.get("name") or "evo-hq-evo"
-    else:
-        # PyPI mode: cache dir is `~/.codex/.tmp/marketplaces/<owner>/`
-        mkt_name = mkt_root.name  # e.g. "evo-hq"
+    mkt_name = mkt.get("name") or "evo-hq-evo"
     try:
         manifest = _json.loads(codex_manifest.read_text())
         version = manifest.get("version") or "0.0.0"
@@ -300,7 +297,84 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
             "  - Re-run: evo install codex --trust-hooks  "
             "(skips the codex security review)"
         )
+
+    _cleanup_legacy_codex_registrations(target_mkt=mkt_name)
     return 0
+
+
+def _cleanup_legacy_codex_registrations(target_mkt: str) -> None:
+    """Remove leftover `evo@<other-mkt>` entries from codex's config.toml
+    that don't match the canonical marketplace name.
+
+    Codex installer pre-fix used `mkt_root.name` (the GitHub owner,
+    `evo-hq`) for PyPI installs and marketplace.json's `"name"`
+    (`evo-hq-evo`) for `--from-path` installs. Users who hit both code
+    paths ended up with two parallel `[plugins."evo@<X>"]` blocks. Both
+    are enabled, both fire on every event, the old one fails exit 127
+    because its cache dir is missing the binary that only the most
+    recent install staged.
+
+    This cleanup runs at the end of every codex install and removes:
+      - `[plugins."evo@<other>"]` blocks and their `enabled` lines
+      - `[hooks.state."evo@<other>:..."]` trust entries
+      - `[marketplaces.<other>]` blocks ONLY when the corresponding
+        evo@<other> plugin entry was also removed (other plugins may
+        share that marketplace)
+      - `~/.codex/plugins/cache/<other>/` cache directories
+    """
+    import re
+    import shutil
+    cfg_path = _codex_base() / "config.toml"
+    if not cfg_path.exists():
+        return
+    text = cfg_path.read_text()
+
+    plugin_header = re.compile(r'^\[plugins\."evo@([^"]+)"\]\s*$')
+    hooks_header = re.compile(r'^\[hooks\.state\."evo@([^:]+):[^"]+"\]\s*$')
+    mkt_header = re.compile(r'^\[marketplaces\.([^\]\s]+)\]\s*$')
+    any_section = re.compile(r'^\[')
+
+    lines = text.splitlines(keepends=True)
+    legacy_mkts: set[str] = set()
+    for line in lines:
+        m = plugin_header.match(line.lstrip())
+        if m and m.group(1) != target_mkt:
+            legacy_mkts.add(m.group(1))
+    if not legacy_mkts:
+        return
+
+    new_lines: list[str] = []
+    skip = False
+    for line in lines:
+        stripped = line.lstrip()
+        if any_section.match(stripped):
+            skip = False
+            mp = plugin_header.match(stripped)
+            mh = hooks_header.match(stripped)
+            mm = mkt_header.match(stripped)
+            if mp and mp.group(1) in legacy_mkts:
+                skip = True
+                continue
+            if mh and mh.group(1) in legacy_mkts:
+                skip = True
+                continue
+            if mm and mm.group(1) in legacy_mkts:
+                skip = True
+                continue
+        if skip:
+            continue
+        new_lines.append(line)
+
+    cfg_path.write_text("".join(new_lines))
+    print(
+        f"removed legacy evo registrations in {cfg_path}: "
+        f"{', '.join(sorted(f'evo@{m}' for m in legacy_mkts))}"
+    )
+    for mkt in legacy_mkts:
+        stale_cache = _codex_base() / "plugins" / "cache" / mkt
+        if stale_cache.exists():
+            shutil.rmtree(stale_cache)
+            print(f"removed legacy cache: {stale_cache}")
 
 
 def _hook_event_label(event_name: str) -> str | None:
