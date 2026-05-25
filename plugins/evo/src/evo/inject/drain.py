@@ -1212,9 +1212,9 @@ If subagents are done and you have unread results: read `evo scratchpad`,
 update annotations as needed, and plan + spawn the next round.
 
 Call `evo exit-optimize-mode` to end the loop when ANY of these are true:
-  - the last 3+ committed experiments show no improvement over the
-    current best (the search has plateaued),
-  - `evo status` shows the budget exhausted or you've hit the stall limit,
+  - `evo status` shows the budget exhausted or the stall limit hit
+    (the configured way to encode "we've plateaued" — tune via
+    `/optimize [stall=N]` if N feels too tight or too loose),
   - the user's stated objective has been met (e.g. a target score was
     reached, or the directive's task is complete).
 Print a final summary first when you exit.

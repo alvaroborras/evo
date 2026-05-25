@@ -351,7 +351,7 @@ class _Harness:
 def sandbox(fixture_repo_tarball, evo_local_tarball):
     _gate_release_smoke()
     from e2b import Sandbox
-    sbx = Sandbox.create(timeout=1800)
+    sbx = Sandbox.create(timeout=3600)
     h = _Harness(sbx, fixture_repo_tarball, evo_local_tarball)
     try:
         h.install_base_deps()
@@ -610,15 +610,64 @@ def _drive_smoke(
     )
     directive_id = _parse_directive_id(direct_out)
 
-    # Wait for the agent to exit naturally (or timeout). 30 minutes upper
-    # bound — round 2 should finish well within that.
-    h.run(
-        "for i in $(seq 1 60); do "
-        "  if ! kill -0 $(cat /tmp/agent.pid) 2>/dev/null; then break; fi; "
-        "  sleep 30; "
-        "done",
-        timeout=2000,
-    )
+    # Harness-side poll with hard ceilings. e2b kills long-lived HTTP/2
+    # streams server-side regardless of heartbeat output (verified v17/v18),
+    # so we do many short `kill -0` calls instead of one long bash loop.
+    # Two ceilings: wall clock and committed-experiment count. Either one
+    # triggers a clean kill so we always reach the assertion phase.
+    POLL_MAX_SECONDS = 900   # 15 min after directive injection
+    POLL_MAX_EXPERIMENTS = 8  # safety net: planned A/B/C/D + slack
+    poll_start = time.time()
+    poll_iter = 0
+    last_exp_count = -1
+    final_state = "unknown"
+    while time.time() - poll_start < POLL_MAX_SECONDS:
+        poll_iter += 1
+        # Single shell call returns both liveness and experiment count.
+        out = h.run(
+            "kill -0 $(cat /tmp/agent.pid) 2>/dev/null "
+            "&& echo alive || echo dead; "
+            f"find {ws_root}/run_*/experiments -mindepth 1 -maxdepth 1 "
+            "-type d 2>/dev/null | wc -l",
+            must_succeed=False, timeout=15,
+        ).strip().splitlines()
+        alive = (out[0].strip() == "alive") if out else False
+        exp_count = int(out[1].strip()) if len(out) > 1 and out[1].strip().isdigit() else 0
+        elapsed = int(time.time() - poll_start)
+        if exp_count != last_exp_count or not alive:
+            print(f"  [wait] iter={poll_iter} elapsed={elapsed}s "
+                  f"experiments={exp_count} agent={'alive' if alive else 'dead'}",
+                  flush=True)
+            last_exp_count = exp_count
+        if not alive:
+            final_state = f"exited naturally after {elapsed}s, {exp_count} experiments"
+            break
+        if exp_count >= POLL_MAX_EXPERIMENTS:
+            final_state = f"hit max_experiments={POLL_MAX_EXPERIMENTS} at {elapsed}s — killing"
+            print(f"  [wait] {final_state}", flush=True)
+            h.run(
+                "pkill -TERM -P $(cat /tmp/agent.pid) 2>/dev/null; "
+                "kill $(cat /tmp/agent.pid) 2>/dev/null; true",
+                must_succeed=False, timeout=10,
+            )
+            break
+        # Dump agent.log tail every 5 minutes for forensic visibility.
+        if poll_iter % 10 == 0:
+            h.run(
+                "echo '--- agent.log tail (last 60 lines) ---'; "
+                "tail -60 /tmp/agent.log 2>&1 || true",
+                must_succeed=False, timeout=20,
+            )
+        time.sleep(30)
+    else:
+        final_state = f"hit max_seconds={POLL_MAX_SECONDS}s — killing"
+        print(f"  [wait] {final_state}", flush=True)
+        h.run(
+            "pkill -TERM -P $(cat /tmp/agent.pid) 2>/dev/null; "
+            "kill $(cat /tmp/agent.pid) 2>/dev/null; true",
+            must_succeed=False, timeout=10,
+        )
+    print(f"  [wait] final: {final_state}", flush=True)
 
     # ---------- assertions ----------
     # Every assertion below globs across ALL `ws_root/run_*` rather than
@@ -752,6 +801,53 @@ def _shell_quote(s: str) -> str:
 
 def _read_prompt() -> str:
     return FIXTURE_PROMPT.read_text()
+
+
+# Pty driver for `hermes chat` (interactive). `-q -Q` non-interactive mode
+# was the original driver but it has no `process_loop`, so the plugin's
+# `inject_message`-based stop-nudge and autonomous continuation don't fire
+# (verified — see plugins/evo/src/evo/hermes_plugin/__init__.py docstring).
+# Driving interactive `hermes chat` via a pty gives us a real REPL with
+# `process_loop` running, so mid-run inject and stop-nudge work the same
+# way as on the other hosts. Reads the prompt from `/tmp/hermes-prompt.txt`
+# and the model from `/tmp/hermes-model.txt` so we don't have to bash-quote
+# them into the Python source.
+_HERMES_PTY_DRIVER = r'''
+import os, pty, select, subprocess, sys, time
+prompt = open("/tmp/hermes-prompt.txt").read()
+model = open("/tmp/hermes-model.txt").read().strip()
+log = open("/tmp/agent.log", "wb", buffering=0)
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    ["hermes", "chat", "--provider", "anthropic", "-m", model],
+    stdin=slave, stdout=slave, stderr=slave,
+    start_new_session=True,
+)
+os.close(slave)
+# Wait for the REPL prompt to be ready. Hermes prints a banner + ">" before
+# accepting input; if we write too early the keystrokes hit a buffer that
+# hasn't started reading yet.
+time.sleep(5)
+os.write(master, prompt.encode())
+# Single \r submits the multi-line prompt. Embedded \n stay as literal
+# newlines in the input buffer — hermes accepts multi-line input in REPL.
+os.write(master, b"\r")
+deadline = time.time() + 2400  # 40 min — must be less than the sandbox's 3600s so we exit cleanly and the test reaches its assertions instead of timing out at the e2b layer
+while proc.poll() is None:
+    if time.time() > deadline:
+        proc.terminate()
+        break
+    try:
+        r, _, _ = select.select([master], [], [], 0.5)
+        if r:
+            data = os.read(master, 4096)
+            if data:
+                log.write(data)
+    except OSError:
+        break
+proc.wait()
+log.close()
+'''
 
 
 # ---------------------------------------------------------------------------
@@ -1011,8 +1107,26 @@ def test_hermes(sandbox):
         else ""
     )
 
-    # Prepend hermes's `/optimize` to fire the auto-arm regex.
-    prompt = _shell_quote("/optimize\n\n" + _read_prompt())
+    # Upload the pty driver script + prompt + model to /tmp so the
+    # drive_cmd is a clean one-liner. Interactive `hermes chat` (not
+    # `-q -Q`) is the only mode with a `process_loop` for autonomous
+    # continuation. See _HERMES_PTY_DRIVER for the full rationale.
+    sandbox.sbx.files.write(
+        "/tmp/hermes-pty-driver.py",
+        _HERMES_PTY_DRIVER,
+    )
+    sandbox.sbx.files.write(
+        "/tmp/hermes-prompt.txt",
+        "/optimize\n\n" + _read_prompt(),
+    )
+    sandbox.sbx.files.write(
+        "/tmp/hermes-model.txt",
+        # claude-haiku-4-5 follows the directive (creates exp_D with the
+        # marker tag) but implements the O(n) hash-map incorrectly — score
+        # caps ~16x. claude-sonnet-4-5 produces a correct O(n) impl.
+        "anthropic/claude-sonnet-4-5\n",
+    )
+
     _drive_smoke(
         sandbox,
         host="hermes",
@@ -1028,13 +1142,7 @@ def test_hermes(sandbox):
         ],
         drive_cmd=(
             "export PATH=$HOME/.local/bin:$PATH; "
-            # claude-haiku-4-5 follows the directive (creates exp_D with
-            # the marker tag) but implements the O(n) hash-map
-            # incorrectly — actual score caps at ~16x baseline instead
-            # of the expected 100x+, tripping the score-ratio assertion.
-            # claude-sonnet-4-5 produces a correct O(n) implementation.
-            f"nohup hermes chat -q {prompt} -Q --provider anthropic "
-            f"-m anthropic/claude-sonnet-4-5 "
+            "nohup python3 /tmp/hermes-pty-driver.py "
             "> /tmp/agent.log 2>&1 & echo $! > /tmp/agent.pid"
         ),
         env_keys={"ANTHROPIC_API_KEY": anthropic_key},
@@ -1051,7 +1159,7 @@ def sandbox_4g(fixture_repo_tarball, evo_local_tarball):
     """
     _gate_release_smoke()
     from e2b import Sandbox
-    sbx = Sandbox.create(template="evo-test-4g", timeout=1800)
+    sbx = Sandbox.create(template="evo-test-4g", timeout=3600)
     h = _Harness(sbx, fixture_repo_tarball, evo_local_tarball)
     try:
         h.install_base_deps()
