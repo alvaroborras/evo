@@ -151,22 +151,53 @@ class TestEvoWait(unittest.TestCase):
             finally:
                 os.chdir(self.root)
 
-    def test_subagent_dispatch_into_running_experiment_also_wakes_wait(self):
-        """A subagent in optimize spawns a new experiment dir (mkdir of
-        experiments/<id>/) before outcome.json appears. wait should detect
-        that too — orchestrator wants to know experiments started, not
-        just concluded."""
+    def test_bare_experiment_dir_creation_does_not_wake_wait(self):
+        """A bare `mkdir experiments/<id>/` (subagent allocating a worktree
+        before benchmarking) must NOT wake the wait. The orchestrator only
+        cares about terminal transitions; per-task traces, attempt-state
+        pings, and pre-benchmark dir creation are in-flight noise. (The
+        snapshot tracks outcome.json files, not bare dirs.)"""
         def starter() -> None:
             time.sleep(0.5)
             (self.run_dir / "experiments" / "exp_0099").mkdir(parents=True)
 
         t = threading.Thread(target=starter, daemon=True)
         t.start()
+        rc, _ = self._run_wait(timeout=2.0)
+        t.join(timeout=2)
+
+        self.assertEqual(rc, 124, "bare dir creation is in-flight noise; must time out, not wake")
+
+    def test_discarded_experiment_wakes_wait_and_names_it(self):
+        """`evo discard` deletes the experiment dir wholesale, so its
+        outcome.json key disappears from the snapshot. wait must wake on
+        that deletion (terminal transition) and the summary must name the
+        discarded exp_id — not fall through to a generic message."""
+        exp_dir = self.run_dir / "experiments" / "exp_0007"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        outcome = exp_dir / "outcome.json"
+        outcome.write_text(json.dumps({"outcome": "committed", "score": 0.4}))
+        # Backdate so the baseline picks it up before we delete.
+        old_t = time.time() - 60
+        os.utime(outcome, (old_t, old_t))
+
+        def discarder() -> None:
+            time.sleep(0.5)
+            import shutil
+            shutil.rmtree(exp_dir)
+
+        t = threading.Thread(target=discarder, daemon=True)
+        t.start()
         rc, out = self._run_wait(timeout=10.0)
         t.join(timeout=2)
 
-        self.assertEqual(rc, 0)
-        self.assertIn("exp_0099", out)
+        self.assertEqual(rc, 0, f"discard must wake the wait; got {rc}, out={out!r}")
+        self.assertIn("exp_0007", out,
+                      "summary must name the discarded experiment, not "
+                      "fall through to a generic 'experiments dir changed'")
+        self.assertIn("discarded", out.lower(),
+                      "summary must say the transition type so the orchestrator "
+                      "can branch on it without parsing the exp dir state")
 
 
 if __name__ == "__main__":

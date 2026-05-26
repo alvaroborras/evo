@@ -254,16 +254,21 @@ evo infra log [--limit N]                          # read recorded events
 ## Loop control (for the /optimize orchestrator)
 
 ```bash
-evo wait [--timeout SEC]      # block until any experiment under
-                              # experiments/ is created or updated.
+evo wait [--timeout SEC]      # block until any experiment reaches a
+                              # terminal state (committed / evaluated /
+                              # failed / discarded). Per-task traces and
+                              # other in-flight writes are ignored.
                               # default 3600, capped at 3600 (1h).
-                              # exit 0 on change, 124 on timeout.
+                              # exit 0 with one-line summary on transition,
+                              # 124 on timeout.
 
-evo exit-optimize-mode        # clear the optimize_mode flag on this
-                              # session — disables the policy nudge
-                              # and the stop-hook self-continuation.
-                              # Use only when stepping out of /optimize
-                              # for a legitimate one-off.
+evo exit-optimize-mode        # halt the optimize-mode protocol for this
+                              # session: clears the safety nudge flag,
+                              # discards any `active` experiments, reports
+                              # orphan `evo run` PIDs, and prints the
+                              # remaining halt steps (host TaskStop for
+                              # subagents — evo can't reach the host
+                              # runtime — and any leftover stragglers).
 ```
 
 `evo wait` is the primitive the orchestrator uses to block on subagent

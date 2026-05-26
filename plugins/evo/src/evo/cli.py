@@ -4062,6 +4062,14 @@ def _describe_change(before: dict[str, float], after: dict[str, float]) -> str:
         first = sorted(new_keys)[0]
         exp_id = first.split("/", 1)[0]
         return f"new experiment activity: {exp_id}"
+    # Deletions catch `evo discard`: the experiment dir is removed wholesale,
+    # so its outcome.json key vanishes from the snapshot. Check before
+    # `changed` so a discard wave is named even if other experiments are
+    # concurrently updating.
+    deleted = set(before) - set(after)
+    if deleted:
+        exp_id = sorted(deleted)[0].split("/", 1)[0]
+        return f"discarded experiment: {exp_id}"
     changed = [k for k in after if k in before and after[k] > before[k]]
     if changed:
         outcomes = sorted(k for k in changed if k.endswith("outcome.json"))
@@ -4218,15 +4226,19 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
 
 
 def cmd_wait(args: argparse.Namespace) -> int:
-    """Block until an experiment under <run_dir>/experiments/ is created
-    or updated, or until --timeout (default 3600, capped at 3600s).
+    """Block until any experiment reaches a terminal state, or --timeout.
 
-    Returns 0 on detected change with a one-line summary on stdout,
+    Wakes on outcome.json appearing (committed / evaluated / failed) or
+    an experiment dir vanishing (discarded). Per-task trace flushes and
+    other in-flight writes are ignored — only terminal transitions count.
+
+    Returns 0 on detected transition with a one-line summary on stdout,
     124 (POSIX timeout convention) on timeout. Polls every 1s.
 
-    Intended for the optimize orchestrator: after spawning subagents in
-    the background, call `evo wait` to block until any of them produces
-    a result instead of writing ad-hoc polling loops.
+    Intended for the optimize orchestrator: after spawning N subagents in
+    parallel, call `evo wait` to block until any of them finishes (commit,
+    discard, fail — whichever happens first surfaces) instead of writing
+    ad-hoc polling loops.
     """
     try:
         root = repo_root()
@@ -5169,11 +5181,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     wait_p = sub.add_parser(
         "wait",
-        help="Block until an experiment is created/updated, or until --timeout (max 1h)",
+        help="Block until any experiment reaches a terminal state, or until --timeout (max 1h)",
         description=(
-            "Polls <run_dir>/experiments/ for any new or updated experiment "
-            "directory. Returns exit code 0 with a one-line summary on the "
-            "first detected change, 124 on timeout. Intended for /optimize "
+            "Polls <run_dir>/experiments/ for terminal-state transitions on "
+            "any experiment in the active run — outcome.json appearing "
+            "(committed / evaluated / failed) or an experiment dir vanishing "
+            "(discarded). Per-task trace writes and other in-flight activity "
+            "are ignored. Returns exit code 0 with a one-line summary on the "
+            "first detected transition, 124 on timeout. Intended for /optimize "
             "orchestrators to block on subagent results instead of writing "
             "ad-hoc bash polling loops."
         ),
