@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import weakref
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,6 +13,27 @@ from ._backend import Backend, default_backend
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Belt-and-suspenders against concurrent in-process Runs for the same
+# experiment. The harness-level guard (evo run's PID stamp) catches the
+# common case where a second `evo run` is invoked while the first driver
+# is alive; this registry catches the rarer in-process variant where a
+# single benchmark accidentally instantiates two Run() objects with the
+# same EVO_EXPERIMENT_ID (e.g. test-runner re-import, shared eval loop).
+# Without it, both Run instances would write the same EVO_RESULT_PATH;
+# the second would raise via emit_result's O_EXCL, but only after both
+# benchmarks finished and discovered the collision at the very end.
+_ACTIVE_RUNS: set[str] = set()
+_ACTIVE_RUNS_LOCK = threading.Lock()
+
+
+def _release_active_run(experiment_id: str) -> None:
+    """Release a registry slot. Wired via weakref.finalize so it runs even
+    if the Run is gc'd without finish()/__exit__ (e.g. an exception path
+    that leaks the object). Idempotent — finish()/__exit__ also discard."""
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS.discard(experiment_id)
 
 
 class Run:
@@ -46,6 +68,19 @@ class Run:
             experiment_id
             or os.environ.get("EVO_EXPERIMENT_ID")
             or "unknown"
+        )
+        with _ACTIVE_RUNS_LOCK:
+            if self._experiment_id in _ACTIVE_RUNS:
+                raise RuntimeError(
+                    f"Run({self._experiment_id!r}) is already active in this "
+                    f"process. Only one Run per experiment_id at a time; "
+                    f"finish() or exit the existing context first."
+                )
+            _ACTIVE_RUNS.add(self._experiment_id)
+        # Safety net: if the caller leaks this Run (no finish(), no `with`),
+        # release the slot when the object is gc'd so a retry isn't blocked.
+        self._finalizer = weakref.finalize(
+            self, _release_active_run, self._experiment_id
         )
         self._backend = backend or default_backend()
         self._backend.setup(
@@ -157,23 +192,26 @@ class Run:
         if self._finished:
             return {}
         self._finished = True
+        try:
+            if score is None:
+                if not self._tasks:
+                    score = 0.0
+                else:
+                    score = sum(self._tasks.values()) / len(self._tasks)
 
-        if score is None:
-            if not self._tasks:
-                score = 0.0
-            else:
-                score = sum(self._tasks.values()) / len(self._tasks)
-
-        result: dict[str, Any] = {
-            "score": round(score, 4),
-            "tasks": dict(self._tasks),
-            "started_at": self._started_at,
-            "ended_at": _utc_now(),
-        }
-        if self._task_meta:
-            result["tasks_meta"] = {k: dict(v) for k, v in self._task_meta.items()}
-        self._backend.emit_result(result)
-        return result
+            result: dict[str, Any] = {
+                "score": round(score, 4),
+                "tasks": dict(self._tasks),
+                "started_at": self._started_at,
+                "ended_at": _utc_now(),
+            }
+            if self._task_meta:
+                result["tasks_meta"] = {k: dict(v) for k, v in self._task_meta.items()}
+            self._backend.emit_result(result)
+            return result
+        finally:
+            with _ACTIVE_RUNS_LOCK:
+                _ACTIVE_RUNS.discard(self._experiment_id)
 
     # -- context manager --------------------------------------------------
 
@@ -183,3 +221,8 @@ class Run:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if exc_type is None and not self._finished:
             self.finish()
+        elif not self._finished:
+            # Exception path -- finish() never called and won't be. Release
+            # the registry slot so a retry in the same process isn't blocked.
+            with _ACTIVE_RUNS_LOCK:
+                _ACTIVE_RUNS.discard(self._experiment_id)

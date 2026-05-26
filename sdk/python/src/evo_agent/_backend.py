@@ -61,9 +61,33 @@ class LocalBackend:
         try:
             os.close(os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
         except FileExistsError:
-            raise RuntimeError(
-                f"{target} already exists; only one Run.finish() / write_result() per attempt"
-            ) from None
+            # Forensic sidecar: stderr may be captured/redirected by the
+            # harness, so write the diagnostic to a stable filesystem
+            # location too. Lets the post-mortem distinguish "benchmark
+            # crashed before writing" from "concurrent writer collided".
+            error_payload = {
+                "error": "result_path_collision",
+                "target": str(target),
+                "pid": os.getpid(),
+                "experiment_id": os.environ.get("EVO_EXPERIMENT_ID"),
+                "message": (
+                    f"{target} already exists; only one Run.finish() / "
+                    f"write_result() per attempt"
+                ),
+            }
+            try:
+                target.with_suffix(target.suffix + ".error").write_text(
+                    json.dumps(error_payload, indent=2), encoding="utf-8"
+                )
+            except OSError:
+                pass
+            print(
+                f"evo SDK: refusing to overwrite existing {target} "
+                f"(concurrent attempt or stale leftover)",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise RuntimeError(error_payload["message"]) from None
         tmp = target.with_name(target.name + ".tmp")
         tmp.write_text(payload, encoding="utf-8")
         os.replace(tmp, target)
