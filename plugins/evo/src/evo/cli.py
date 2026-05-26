@@ -4066,18 +4066,95 @@ def _describe_change(before: dict[str, float], after: dict[str, float]) -> str:
     return "experiments dir changed"
 
 
+def _halt_discard_active(root: Path) -> tuple[list[str], list[tuple[str, str]]]:
+    """Discard every `active` experiment in the workspace.
+
+    Returns (discarded_ids, skipped) where `skipped` is a list of
+    (exp_id, reason) for nodes the halt couldn't safely discard
+    (e.g. live children). Halt collateral; the caller surfaces them.
+    """
+    graph = load_graph(root)
+    discarded: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    for exp_id, node in graph.get("nodes", {}).items():
+        if node.get("status") != "active":
+            continue
+        live_children = [
+            cid for cid in node.get("children", [])
+            if cid in graph["nodes"]
+            and graph["nodes"][cid].get("status") != "discarded"
+        ]
+        if live_children:
+            skipped.append((exp_id, f"has {len(live_children)} live child(ren)"))
+            continue
+        try:
+            def _mark(current_node: dict, _graph: dict) -> None:
+                current_node["status"] = "discarded"
+                current_node["discard_reason"] = "halt: exit-optimize-mode"
+            update_node(root, exp_id, _mark)
+            node_after = _read_node(root, exp_id)
+            _finalize_result(
+                root, exp_id, node_after, node_after.get("score"),
+                "discarded", {"reason": "halt: exit-optimize-mode"},
+            )
+            delete_discarded_experiment(root, node_after)
+            discarded.append(exp_id)
+        except Exception as exc:  # noqa: BLE001
+            skipped.append((exp_id, f"discard failed: {exc}"))
+    return discarded, skipped
+
+
+def _scan_orphan_evo_runs() -> list[tuple[int, str]]:
+    """Best-effort ps-grep for `evo run` processes, excluding self/parent.
+
+    Returns [(pid, cmdline)]. Returns [] on Windows or if `ps` is
+    unavailable — the report is informational, not the primary halt
+    mechanism. Match is by substring on the command line; false
+    positives are acceptable since we only report, never kill.
+    """
+    own = {os.getpid(), os.getppid()}
+    if os.name == "nt":
+        return []
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    results: list[tuple[int, str]] = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cmd = parts[1]
+        if pid in own:
+            continue
+        if "evo run" not in cmd:
+            continue
+        if "exit-optimize-mode" in cmd:
+            continue
+        results.append((pid, cmd))
+    return results
+
+
 def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
-    """Clear the optimize_mode flag on the current session.
+    """Halt the optimize-mode protocol for the current session.
 
-    Used by agents that need to step out of `/optimize` protocol for a
-    legitimate one-off (e.g. the user explicitly asked for a manual edit,
-    or the experiment loop is genuinely done and the agent wants the
-    nudges off).
-
-    Resolves the session via the host's session-id env var (same set
-    that detect_session uses). Errors cleanly if no host session is
-    detected — the command doesn't make sense outside a registered
-    session.
+    Clears the optimize-mode safety nudges, discards `active` experiments
+    in this workspace, reports any orphan `evo run` subprocess trees, and
+    prints the host-specific follow-up steps the orchestrator must take
+    (stopping subagents is a host-runtime concern this command cannot
+    reach).
     """
     from .inject.registry import detect_session, unmark_optimize_mode
     try:
@@ -4103,6 +4180,32 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
         print(f"optimize_mode cleared for session {sid}")
     else:
         print(f"optimize_mode was already off for session {sid}")
+
+    discarded, skipped = _halt_discard_active(root)
+    for exp_id in discarded:
+        print(f"DISCARDED active {exp_id} (reason: halt: exit-optimize-mode)")
+    for exp_id, why in skipped:
+        print(f"SKIPPED  active {exp_id} ({why})", file=sys.stderr)
+
+    orphans = _scan_orphan_evo_runs()
+    if orphans:
+        print("")
+        print(f"Orphan `evo run` processes ({len(orphans)}):")
+        for pid, cmd in orphans:
+            print(f"  pid {pid}  {cmd}")
+
+    print("")
+    print("To complete the halt:")
+    print("1. Stop any running subagents using your host's stop API")
+    print("   (claude-code: TaskStop on the agentId; codex: equivalent).")
+    print("   evo cannot reach the host runtime from here.")
+    step = 2
+    if orphans:
+        print(f"{step}. Decide per PID above: `kill <pid>` to abort, or let it finish.")
+        step += 1
+    print(f"{step}. Re-run `evo status` and confirm no experiment shows `active`.")
+    print(f"   `evo discard <id> --force --reason \"manual halt\"` cleans any stragglers.")
+
     return 0
 
 

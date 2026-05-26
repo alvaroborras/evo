@@ -354,6 +354,47 @@ class TestExitOptimizeModeCli(unittest.TestCase):
         self.assertNotEqual(rc, 0,
                             "no host session detected → must report error, not silently succeed")
 
+    def test_discards_active_experiments(self):
+        """The halt must transition `active` nodes to `discarded` so they
+        don't linger as ghosts after the orchestrator stops driving them."""
+        from evo.cli import cmd_exit_optimize_mode
+        from evo.core import load_graph, save_graph
+        from evo.inject.registry import mark_optimize_mode
+
+        register_session(self.root, "halt_sid", "claude-code")
+        mark_optimize_mode(self.root, "halt_sid")
+
+        # Inject an active node directly (avoids spinning up a real
+        # worktree); patch the worktree-cleanup seam so the test stays
+        # filesystem-pure.
+        graph = load_graph(self.root)
+        graph["nodes"]["exp_0000"] = {
+            "id": "exp_0000", "parent": "root", "children": [],
+            "status": "active", "score": None, "hypothesis": "halt-test",
+            "branch": "evo/run_0000/exp_0000", "commit": None,
+            "worktree": None,
+        }
+        graph["nodes"]["root"]["children"] = ["exp_0000"]
+        save_graph(self.root, graph)
+
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "halt_sid"}, clear=False), \
+             patch("evo.cli.delete_discarded_experiment", lambda *_a, **_k: None):
+            _clear_host_env()
+            os.environ["CLAUDE_CODE_SESSION_ID"] = "halt_sid"
+            with patch("sys.stdout", buf):
+                rc = cmd_exit_optimize_mode(argparse.Namespace())
+
+        self.assertEqual(rc, 0)
+        graph_after = load_graph(self.root)
+        self.assertEqual(graph_after["nodes"]["exp_0000"]["status"], "discarded",
+                         "active node must be discarded as part of the halt")
+        out = buf.getvalue()
+        self.assertIn("DISCARDED active exp_0000", out)
+        self.assertIn("To complete the halt:", out,
+                      "must print follow-up steps inline — host stop API is not "
+                      "something this command can reach")
+
 
 if __name__ == "__main__":
     unittest.main()
