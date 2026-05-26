@@ -285,7 +285,7 @@ If the selected benchmark is new, build it in the worktree. See `references/cons
 - Design the scoring function (range, direction, meaningful-improvement threshold)
 - Assemble test cases (10-20 for programmatic, 15-30 for fuzzy, realistic workload for perf)
 - Write the runnable harness (helper/SDK writes the score JSON to `$EVO_RESULT_PATH`; stdout and stderr are free for user output)
-- Goodhart check (document gaming strategies, mitigate each with a gate or held-out slice)
+- Goodhart check (document concrete gaming strategies and mitigation). Include validation/gold-answer leakage explicitly: assume subagents can see benchmark traces and gold answers, so detection is the defense, not concealment. Prefer a crisp deterministic cheat-check gate, such as a workspace-specific script that greps the target/worktree for exact validation strings and exits non-zero on a match; register it with `evo gate add ... --phase pre` only after the user explicitly opts in. Mention expected cost for any LLM-judge variant and reserve it for paraphrase cases because it is flakier than exact-string checks.
 - Held-out validation slice (60/70 training, 30/40 held-out) if the benchmark is hand-written
 
 Do not run separate determinism checks during setup. Note the benchmark's determinism property in `project.md` (step 12) and move on. Variance surfaces during optimization itself, where it can be handled with real evidence rather than guessed at during setup.

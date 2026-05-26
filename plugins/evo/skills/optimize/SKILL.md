@@ -225,7 +225,7 @@ Pick a faster model for straightforward briefs and a stronger model for harder o
 
 Each subagent prompt MUST start with the literal sentence:
 
-> "First, load and follow the **evo subagent skill** (named `subagent` under the evo plugin in your host's skill registry — use your host's skill loader, not a filesystem path). Allocate your experiment via `evo new --parent <id>`, edit inside the returned worktree, evaluate via `evo run <exp_id>`. Do not skip these steps even if the brief looks simple."
+> "First, load and follow the **evo subagent skill** (named `subagent` under the evo plugin in your host's skill registry — use your host's skill loader, not a filesystem path). Allocate your experiment via `evo new --parent <id>`, edit inside the returned worktree, evaluate via `evo run <exp_id>`. Do not skip these steps even if the brief looks simple. If `evo run` exits `GATE_FAILED`, fix the edit so it satisfies the inherited gate; do not weaken, bypass, delete, or argue with the gate unless the orchestrator explicitly changes the brief."
 
 Then append:
 - The four-field brief verbatim (objective, parent, boundaries/anti-patterns, pointer traces)

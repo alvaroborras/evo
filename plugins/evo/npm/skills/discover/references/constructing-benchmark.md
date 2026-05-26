@@ -93,12 +93,16 @@ Common pairings:
 
 | Benchmark style | Minimum paired gate |
 |---|---|
-| Hand-written task pass rate | Held-out slice (other tasks, not visible during optimization) |
+| Hand-written task pass rate | Validation-slice score threshold; add an exact-leakage pre-gate when validation strings or gold answers could be copied into the target |
 | Latency / performance | Correctness test (the optimized code must still produce the same outputs) |
-| LLM-as-judge rating | Structural validity check (output parses / is well-formed) |
+| LLM-as-judge rating | Structural validity check; optional LLM-judge cheat gate only for paraphrase leakage risks |
 | Quality-of-output score | Sanity assertion that catches degenerate outputs (empty, constant, out-of-range) |
 
-Add the gate via `evo gate add root --name <name> --command <command>` during the discover flow. The gate runs alongside every experiment. An experiment that breaks a gate is not committed even if the benchmark score improves; it remains an evaluated node until an agent fixes and reruns it or explicitly discards it.
+Add gates with an explicit phase. Use `--phase pre` for gates that detect invalid edits before benchmark spend, including cheat-detection checks for leaked validation strings; use the default/post phase for benchmark-derived score-threshold gates that need scoring. For any gate that costs money, especially LLM-judge cheat checks, ask the user before registering it and state the expected per-check cost.
+
+For artifact-evolution runs, assume validation tasks and gold answers may be visible in traces. Do not describe held-out data as secret. Defense is detection: prefer a workspace-specific deterministic gate that greps exact validation strings, gold answers, or unique rubric phrases in the target/worktree and exits non-zero on a match. Use LLM-judge gates only when paraphrase leakage is a real risk; label them opt-in, more expensive, and more prone to false positives.
+
+The gate runs alongside every experiment. An experiment that breaks a gate is not committed even if the benchmark score improves; it remains an evaluated node until an agent fixes and reruns it or explicitly discards it.
 
 **The gate command must exit non-zero on regression.** `evo run` checks exit code, not stdout. A bare `python3 benchmark.py --task-ids 5,6,9` always exits 0 because the benchmark script's contract is "exit 0 unless infrastructure broke" -- it prints a low score but never fails. To make a benchmark-derived gate actually catch regressions, the benchmark needs a `--min-score <threshold>` flag (or equivalent) that:
 
