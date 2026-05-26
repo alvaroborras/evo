@@ -151,6 +151,18 @@ function registerSession(runDir, sid, host, expId = null) {
   atomicWriteJson(p, rec);
   initOffsetToLatest(runDir, sid);
 }
+function markEngaged(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (rec.has_evo_engaged)
+    return false;
+  rec.has_evo_engaged = true;
+  rec.engaged_at = nowIso();
+  atomicWriteJson(p, rec);
+  return true;
+}
 function initOffsetToLatest(runDir, sid) {
   const wsPath = workspaceEventsPath(runDir);
   let latest = null;
@@ -686,6 +698,9 @@ var native_default = {
         const expId = process.env.EVO_EXP_ID || null;
         registerSession(runDir, sid, "openclaw", expId);
         log(`registered session ${sid} in ${runDir}${expId ? " (exp_id=" + expId + ")" : ""}`);
+        if (markEngaged(runDir, sid)) {
+          initOffsetToLatest(runDir, sid);
+        }
       }
       return { runDir, sid };
     };

@@ -108,7 +108,22 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
     }
 
     api.on("session_start", () => {
-      ensureRegistered()
+      const ctx = ensureRegistered()
+      if (!ctx) return
+      // Engage the session immediately at startup. The original
+      // scan-based engagement (in before_provider_request below) only
+      // flipped the flag when the orchestrator's outbound LLM payload
+      // contained an `evo …` tool call. For pi orchestrators that
+      // dispatch all evo work to subagents (claude-sonnet-4-5 commonly
+      // does this) the parent's own payload never contains `evo`, so it
+      // stayed unengaged forever and `evo direct` fell through with
+      // fanout=0 / skipped_unengaged=1. The engagement gate exists to
+      // filter stale registered-but-inactive sessions, but for pi/
+      // openclaw the host process IS the orchestrator — its existence
+      // is the engagement signal.
+      if (markEngaged(ctx.runDir, ctx.sid)) {
+        initOffsetToLatest(ctx.runDir, ctx.sid)
+      }
     })
 
     // Best-effort engagement detection: scan the outbound LLM payload's
@@ -191,13 +206,11 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       const promptText = extractLatestUserText(event.payload)
       maybeMarkOptimizeFromPrompt(ctx.runDir, ctx.sid, host, promptText)
 
-      // Engagement detection — flip the flag if the outbound payload
-      // shows the agent has been running `evo` commands.
-      if (scanForEvoCommands(event.payload)) {
-        if (markEngaged(ctx.runDir, ctx.sid)) {
-          initOffsetToLatest(ctx.runDir, ctx.sid)
-        }
-      }
+      // Engagement is now flipped at session_start (see above) so we
+      // don't need to scan-then-engage here. Scanning still useful for
+      // future heuristics; for now, it's a no-op since the session is
+      // already engaged.
+      scanForEvoCommands(event.payload)
 
       // Drain any new on-disk events (advances offset → consumed_by++).
       const result = drainSession(ctx.runDir, ctx.sid)

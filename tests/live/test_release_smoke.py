@@ -624,13 +624,22 @@ def _drive_smoke(
     while time.time() - poll_start < POLL_MAX_SECONDS:
         poll_iter += 1
         # Single shell call returns both liveness and experiment count.
-        out = h.run(
-            "kill -0 $(cat /tmp/agent.pid) 2>/dev/null "
-            "&& echo alive || echo dead; "
-            f"find {ws_root}/run_*/experiments -mindepth 1 -maxdepth 1 "
-            "-type d 2>/dev/null | wc -l",
-            must_succeed=False, timeout=15,
-        ).strip().splitlines()
+        # Wrapped in try/except so a transient e2b slowness on one poll
+        # doesn't abort the whole wait — verified pi v22 failure where
+        # one kill -0 timed out at 15s and crashed the loop.
+        try:
+            out = h.run(
+                "kill -0 $(cat /tmp/agent.pid) 2>/dev/null "
+                "&& echo alive || echo dead; "
+                f"find {ws_root}/run_*/experiments -mindepth 1 -maxdepth 1 "
+                "-type d 2>/dev/null | wc -l",
+                must_succeed=False, timeout=30,
+            ).strip().splitlines()
+        except Exception as e:  # noqa: BLE001 — e2b/httpcore exceptions vary
+            print(f"  [wait] iter={poll_iter} poll error: {type(e).__name__}; "
+                  f"sleeping 30s and retrying", flush=True)
+            time.sleep(30)
+            continue
         alive = (out[0].strip() == "alive") if out else False
         exp_count = int(out[1].strip()) if len(out) > 1 and out[1].strip().isdigit() else 0
         elapsed = int(time.time() - poll_start)
@@ -645,11 +654,7 @@ def _drive_smoke(
         if exp_count >= POLL_MAX_EXPERIMENTS:
             final_state = f"hit max_experiments={POLL_MAX_EXPERIMENTS} at {elapsed}s — killing"
             print(f"  [wait] {final_state}", flush=True)
-            h.run(
-                "pkill -TERM -P $(cat /tmp/agent.pid) 2>/dev/null; "
-                "kill $(cat /tmp/agent.pid) 2>/dev/null; true",
-                must_succeed=False, timeout=10,
-            )
+            _best_effort_kill(h)
             break
         # Dump agent.log tail every 5 minutes for forensic visibility.
         if poll_iter % 10 == 0:
@@ -662,11 +667,7 @@ def _drive_smoke(
     else:
         final_state = f"hit max_seconds={POLL_MAX_SECONDS}s — killing"
         print(f"  [wait] {final_state}", flush=True)
-        h.run(
-            "pkill -TERM -P $(cat /tmp/agent.pid) 2>/dev/null; "
-            "kill $(cat /tmp/agent.pid) 2>/dev/null; true",
-            must_succeed=False, timeout=10,
-        )
+        _best_effort_kill(h)
     print(f"  [wait] final: {final_state}", flush=True)
 
     # ---------- assertions ----------
@@ -801,6 +802,23 @@ def _shell_quote(s: str) -> str:
 
 def _read_prompt() -> str:
     return FIXTURE_PROMPT.read_text()
+
+
+def _best_effort_kill(h: _Harness) -> None:
+    """Kill the agent process inside the sandbox. Swallows transport
+    failures (httpcore timeouts during extended e2b outages) — by the
+    time we're calling this, the wait loop has already exited and we
+    want the test to proceed to assertion regardless. The sandbox
+    teardown will kill the agent eventually anyway."""
+    try:
+        h.run(
+            "pkill -TERM -P $(cat /tmp/agent.pid) 2>/dev/null; "
+            "kill $(cat /tmp/agent.pid) 2>/dev/null; true",
+            must_succeed=False, timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"  [wait] kill failed ({type(e).__name__}); "
+              "sandbox teardown will clean up", flush=True)
 
 
 # Pty driver for `hermes chat` (interactive). `-q -Q` non-interactive mode
@@ -1216,7 +1234,14 @@ def test_openclaw(sandbox_4g):
             # not main (which lags behind alpha tags).
             f"openclaw plugins install evo --marketplace "
             f"{sandbox_4g.marketplace_source_url} 2>&1 | tail -3",
-            "export PATH=$HOME/.local/bin:$PATH; evo install openclaw",
+            # In local-source mode, suppress the CLI auto-sync's default
+            # `uv tool install --force evo-hq-cli` (which pulls PyPI's
+            # last published version, currently behind the local tree).
+            # Pass --from-path so the sync routine recognizes we're
+            # already on a local CLI and skips.
+            "export PATH=$HOME/.local/bin:$PATH; evo install openclaw "
+            + ("--from-path /tmp/evo-local-repo"
+               if sandbox_4g.marketplace_source.startswith("/") else ""),
         ],
         drive_cmd=(
             "export PATH=$HOME/.local/bin:$PATH; "

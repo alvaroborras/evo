@@ -693,7 +693,12 @@ function makeRegister(host) {
       }
     };
     api.on("session_start", () => {
-      ensureRegistered();
+      const ctx = ensureRegistered();
+      if (!ctx)
+        return;
+      if (markEngaged(ctx.runDir, ctx.sid)) {
+        initOffsetToLatest(ctx.runDir, ctx.sid);
+      }
     });
     const scanForEvoCommands = (payload) => {
       try {
@@ -761,11 +766,7 @@ function makeRegister(host) {
         return;
       const promptText = extractLatestUserText(event.payload);
       maybeMarkOptimizeFromPrompt(ctx.runDir, ctx.sid, host, promptText);
-      if (scanForEvoCommands(event.payload)) {
-        if (markEngaged(ctx.runDir, ctx.sid)) {
-          initOffsetToLatest(ctx.runDir, ctx.sid);
-        }
-      }
+      scanForEvoCommands(event.payload);
       const result = drainSession(ctx.runDir, ctx.sid);
       if (result.text)
         drainedTexts.push(result.text);

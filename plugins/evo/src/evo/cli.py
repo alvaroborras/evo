@@ -69,6 +69,7 @@ from .core import (
     render_git_diff,
 )
 from .locking import advisory_lock
+from .report import build_report
 from .scratchpad import build_scratchpad
 
 
@@ -3206,6 +3207,65 @@ def cmd_scratchpad(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    root = repo_root()
+    use_color: bool | None = None
+    if getattr(args, "color", None) == "always":
+        use_color = True
+    elif getattr(args, "color", None) == "never":
+        use_color = False
+    w = getattr(args, "width", None)
+    h = getattr(args, "height", None)
+    margin = getattr(args, "margin", None)
+    dots = getattr(args, "dots", None)
+    if dots == "auto":
+        dots = None
+    watch = getattr(args, "watch", None)
+
+    def _render_once() -> str:
+        size: tuple[int, int] | None = None
+        if w or h:
+            from .report import _detect_terminal_size
+            det_w, det_h = _detect_terminal_size()
+            size = (w or det_w, h or det_h)
+        return build_report(
+            root, use_color=use_color, size=size, margin=margin, dots=dots,
+        )
+
+    if watch is None:
+        sys.stdout.write(_render_once())
+        return 0
+
+    # nvidia-smi style live refresh. Cursor-home + clear-to-end on every
+    # tick so the new render overwrites the old without a visible blank.
+    # Hide the cursor during refresh so the user doesn't see it skipping
+    # around mid-redraw; restore on exit (including Ctrl-C).
+    interval = max(0.25, float(watch))
+    use_ansi = (use_color is True) or (use_color is None and sys.stdout.isatty())
+    HIDE, SHOW = "\033[?25l", "\033[?25h"
+    HOME_CLEAR = "\033[H\033[J"
+
+    if use_ansi:
+        sys.stdout.write(HIDE)
+        sys.stdout.flush()
+    try:
+        while True:
+            ts = time.strftime("%H:%M:%S")
+            banner = f"evo report — live · refresh every {interval:g}s · {ts}   (Ctrl-C to exit)\n"
+            if use_ansi:
+                sys.stdout.write(HOME_CLEAR + banner + _render_once())
+            else:
+                sys.stdout.write(banner + _render_once() + "\n")
+            sys.stdout.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        if use_ansi:
+            sys.stdout.write(SHOW + "\n")
+            sys.stdout.flush()
+
+
 def cmd_awaiting(args: argparse.Namespace) -> int:
     """List evaluated-but-not-decided nodes (the Awaiting Decision drill-down)."""
     root = repo_root()
@@ -3957,12 +4017,12 @@ def _experiments_dir_snapshot(run_dir: Path) -> dict[str, float]:
     """Snapshot outcome.json mtimes under experiments/ — the terminal-state signal.
 
     outcome.json is written atomically by _write_attempt_outcome when an
-    attempt reaches a terminal state (committed / evaluated / failed).
-    Per-task trace files, heartbeats, and other in-flight writes are
-    intentionally ignored — `evo wait` exists to wake the orchestrator
+    attempt reaches a terminal state (success / committed / evaluated /
+    failed). Per-task trace files, heartbeats, and other in-flight writes
+    are intentionally ignored — `evo wait` exists to wake the orchestrator
     when an experiment attempt finishes, not on every byte of in-flight
-    work. Tracking those caused spurious wake-ups: a 20-task bench that
-    writes one trace per task would fire 20 wait events per attempt.
+    work. Tracking those would cause spurious wake-ups: a 20-task bench
+    that writes one trace per task would fire 20 wait events per attempt.
     """
     out: dict[str, float] = {}
     exp_root = run_dir / "experiments"
@@ -4577,6 +4637,46 @@ def build_parser() -> argparse.ArgumentParser:
 
     scratchpad_p = sub.add_parser("scratchpad")
     scratchpad_p.set_defaults(func=cmd_scratchpad)
+
+    report_p = sub.add_parser(
+        "report",
+        help="print the dashboard dot chart (score over experiment order) "
+             "for every run, sized to the current terminal",
+        description="Terminal version of the web dashboard's scatter plot. "
+                    "Renders one chart per run, stacked, with status colors, "
+                    "best dot highlighted, spine ringed, and a cumulative-best "
+                    "stair line. Adapts width and height to the current TTY.",
+    )
+    report_p.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="control ANSI color output (default: auto — color when stdout is a TTY)",
+    )
+    report_p.add_argument(
+        "--width", type=int,
+        help="override terminal width in columns (default: auto-detect from /dev/tty)",
+    )
+    report_p.add_argument(
+        "--height", type=int,
+        help="override terminal height in rows (default: auto-detect from /dev/tty)",
+    )
+    report_p.add_argument(
+        "--margin", type=int,
+        help="extra right-side margin in columns to leave for host framing "
+             "(default: 6 under Claude Code, 0 elsewhere; pass 0 to reclaim all width)",
+    )
+    report_p.add_argument(
+        "--dots", choices=("auto", "compact", "standard"), default="auto",
+        help="dot-glyph tier: 'compact' (•·*) for narrow/dense charts, "
+             "'standard' (●○★) for normal charts (default: auto)",
+    )
+    report_p.add_argument(
+        "--watch", nargs="?", const=2.0, type=float, default=None, metavar="SECONDS",
+        help="live-refresh the report every SECONDS (default 2). Ctrl-C to exit. "
+             "Like `nvidia-smi -l`: re-reads the workspace and redraws in place.",
+    )
+    report_p.set_defaults(func=cmd_report)
 
     awaiting_p = sub.add_parser(
         "awaiting",

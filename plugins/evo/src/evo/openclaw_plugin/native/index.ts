@@ -34,7 +34,9 @@ import {
   STOP_NUDGE_TEMPLATE,
   drainSession,
   findEvoRunDir,
+  initOffsetToLatest,
   isRegistered,
+  markEngaged,
   maybeMarkOptimizeFromPrompt,
   maybeStopNudgeText,
   registerSession,
@@ -122,6 +124,20 @@ export default {
         const expId = process.env.EVO_EXP_ID || null
         registerSession(runDir, sid, "openclaw", expId)
         log(`registered session ${sid} in ${runDir}${expId ? " (exp_id=" + expId + ")" : ""}`)
+        // Engage the session immediately. The original
+        // scan-the-LLM-payload engagement signal doesn't work for
+        // openclaw orchestrators that dispatch all evo work to
+        // subagents (claude-sonnet-4-5 commonly does this) — the
+        // parent's own payload never contains `evo …` so it stays
+        // unengaged forever and `evo direct` falls through with
+        // fanout=0 / skipped_unengaged=1. The engagement gate exists
+        // to filter stale registered-but-inactive sessions; for
+        // openclaw the host process IS the orchestrator, so its
+        // existence is the engagement signal. Same fix shape as the
+        // pi-extension bundle (see factory.ts).
+        if (markEngaged(runDir, sid)) {
+          initOffsetToLatest(runDir, sid)
+        }
       }
       return { runDir, sid }
     }
