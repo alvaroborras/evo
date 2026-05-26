@@ -3954,30 +3954,28 @@ def _wait_timeout_seconds(raw: float | int) -> int:
 
 
 def _experiments_dir_snapshot(run_dir: Path) -> dict[str, float]:
-    """Snapshot the experiments/ tree as {relative_path: mtime}. Used by
-    cmd_wait to detect any change (new experiment dir, outcome.json
-    written or updated, or any other file under experiments/).
+    """Snapshot outcome.json mtimes under experiments/ — the terminal-state signal.
+
+    outcome.json is written atomically by _write_attempt_outcome when an
+    attempt reaches a terminal state (committed / evaluated / failed).
+    Per-task trace files, heartbeats, and other in-flight writes are
+    intentionally ignored — `evo wait` exists to wake the orchestrator
+    when an experiment attempt finishes, not on every byte of in-flight
+    work. Tracking those caused spurious wake-ups: a 20-task bench that
+    writes one trace per task would fire 20 wait events per attempt.
     """
     out: dict[str, float] = {}
     exp_root = run_dir / "experiments"
     if not exp_root.is_dir():
         return out
     try:
-        for child in exp_root.iterdir():
-            if not child.is_dir():
-                continue
-            # Track the dir itself (so an empty new exp dir counts as a change)
-            try:
-                out[child.name] = child.stat().st_mtime
-            except OSError:
-                continue
-            # And any files inside it (outcome.json mtime is the key signal)
-            for sub in child.rglob("*"):
-                if sub.is_file():
-                    try:
-                        out[f"{child.name}/{sub.relative_to(child)}"] = sub.stat().st_mtime
-                    except OSError:
-                        pass
+        for outcome in exp_root.rglob("outcome.json"):
+            if outcome.is_file():
+                try:
+                    rel = outcome.relative_to(exp_root)
+                    out[str(rel)] = outcome.stat().st_mtime
+                except OSError:
+                    pass
     except OSError:
         pass
     return out
