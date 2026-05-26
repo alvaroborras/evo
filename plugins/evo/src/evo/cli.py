@@ -141,42 +141,80 @@ def _pick_free_port(preferred: int, max_tries: int = 20) -> int:
 
 
 def _start_dashboard_background(root: Path, port: int = 8080) -> None:
-    """Start the dashboard as a background process.
+    """Start the dashboard via the supervisor as a detached subprocess.
+
+    Spawns `python -m evo.dashboard_supervisor` rather than the dashboard
+    directly. The supervisor owns the dashboard's lifecycle: captures
+    stdout/stderr to a rotated log file, respawns on crash with capped
+    backoff, gives up cleanly after a crash-on-startup loop.
 
     Probes for a free port starting at *port* (auto-increments on collision),
     writes the actual port to .evo/dashboard.port, and prints a clickable URL.
     """
-    pid_file = evo_dir(root) / "dashboard.pid"
-    port_file = evo_dir(root) / "dashboard.port"
+    edir = evo_dir(root)
+    pid_file = edir / "dashboard.pid"
+    supervisor_pid_file = edir / "supervisor.pid"
+    port_file = edir / "dashboard.port"
 
-    # If already running, surface the existing URL instead of starting a second.
-    if pid_file.exists():
+    # If a supervisor (or a bare dashboard from an older install) is already
+    # running, surface the existing URL instead of starting a second.
+    for candidate in (supervisor_pid_file, pid_file):
+        if not candidate.exists():
+            continue
         try:
-            pid = int(pid_file.read_text().strip())
+            pid = int(candidate.read_text().strip())
             os.kill(pid, 0)
             existing = port_file.read_text().strip() if port_file.exists() else str(port)
-            print(f"Dashboard live: http://127.0.0.1:{existing} (pid {pid})")
+            label = "supervisor" if candidate is supervisor_pid_file else "pid"
+            print(f"Dashboard live: http://127.0.0.1:{existing} ({label} {pid})")
             return
         except (OSError, ValueError):
-            pid_file.unlink(missing_ok=True)
+            candidate.unlink(missing_ok=True)
 
     actual_port = _pick_free_port(port)
 
     env = os.environ.copy()
     env["EVO_DASHBOARD_PORT"] = str(actual_port)
+    env["EVO_SUPERVISOR_ROOT"] = str(root)
 
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "evo.dashboard"],
-        cwd=root,
+    # Cross-platform detach so the supervisor outlives the `evo init`
+    # process and the calling terminal. POSIX uses `setsid` via
+    # start_new_session; Windows needs explicit creation flags
+    # (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW) —
+    # `start_new_session` is silently ignored there.
+    spawn_kwargs: dict = dict(
+        cwd=str(root),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        stdin=subprocess.DEVNULL,
         env=env,
     )
-    pid_file.write_text(str(proc.pid))
+    if os.name == "nt":
+        # creationflags values per Windows API; integers because
+        # subprocess.DETACHED_PROCESS etc. are only defined on Windows.
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        CREATE_NO_WINDOW = 0x08000000
+        spawn_kwargs["creationflags"] = (
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        )
+        spawn_kwargs["close_fds"] = True
+    else:
+        spawn_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "evo.dashboard_supervisor"],
+        **spawn_kwargs,
+    )
+    # The supervisor writes its own pid file once it acquires the lock.
+    # We don't write dashboard.pid here — the supervisor does, after it
+    # spawns the actual dashboard child.
     port_file.write_text(str(actual_port))
     note = "" if actual_port == port else f" (port {port} busy, bumped to {actual_port})"
-    print(f"Dashboard live: http://127.0.0.1:{actual_port} (pid {proc.pid}){note}")
+    print(
+        f"Dashboard live: http://127.0.0.1:{actual_port} "
+        f"(supervisor pid {proc.pid}){note}"
+    )
 
 
 def _parse_provider_config_arg(raw: str | None) -> dict[str, str]:
@@ -3232,17 +3270,30 @@ def cmd_gc(args: argparse.Namespace) -> int:
 
 
 def _stop_dashboard(root: Path) -> None:
-    """Stop the background dashboard if running."""
-    pid_file = evo_dir(root) / "dashboard.pid"
-    port_file = evo_dir(root) / "dashboard.port"
-    if pid_file.exists():
+    """Stop the background dashboard if running.
+
+    Signals the supervisor first so it doesn't respawn the dashboard
+    mid-stop, then SIGTERMs the dashboard directly as a fallback (in
+    case the supervisor crashed but the dashboard is still up — e.g.
+    older install without a supervisor).
+    """
+    import signal as _signal
+    edir = evo_dir(root)
+    supervisor_pid_file = edir / "supervisor.pid"
+    pid_file = edir / "dashboard.pid"
+    port_file = edir / "dashboard.port"
+    dead_sentinel = edir / "dashboard.dead"
+    for pidfile in (supervisor_pid_file, pid_file):
+        if not pidfile.exists():
+            continue
         try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, 15)  # SIGTERM
+            pid = int(pidfile.read_text().strip())
+            os.kill(pid, _signal.SIGTERM)
         except (OSError, ValueError):
             pass
-        pid_file.unlink(missing_ok=True)
+        pidfile.unlink(missing_ok=True)
     port_file.unlink(missing_ok=True)
+    dead_sentinel.unlink(missing_ok=True)
 
 
 def cmd_reset(args: argparse.Namespace) -> int:

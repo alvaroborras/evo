@@ -359,6 +359,38 @@ remote containers; there is no safe default active experiment.
 For local worktree/pool backends, native file tools are fine if you use the
 actual worktree path returned by `evo new`.
 
+## Dashboard
+
+`evo init` spawns a supervisor subprocess that owns the Flask dashboard's
+lifecycle. The supervisor:
+
+- Captures dashboard stdout/stderr to `.evo/dashboard.log` via a size-rotated
+  handler (5 MB × 3 backups). When the dashboard dies, the log has the
+  traceback.
+- Respawns the dashboard on unexpected exit with capped exponential
+  backoff (1, 2, 4, 8, 16, 30 seconds).
+- Bails out after 5 rapid failures within 60s of startup and writes
+  `.evo/dashboard.dead` with a one-line diagnostic. Tail
+  `.evo/dashboard.log` for the underlying error.
+- Logs its own activity to `.evo/supervisor.log` (rotated, 512 KB × 2).
+
+State files under `.evo/`:
+
+| File | Owner | Lifetime |
+|---|---|---|
+| `supervisor.pid` | supervisor | written on lock acquire; removed on clean shutdown |
+| `supervisor.lock` | supervisor | held for lifetime; flock released on exit |
+| `supervisor.log` | supervisor | append-only, rotated |
+| `dashboard.pid` | supervisor | rewritten on each respawn; removed on clean shutdown |
+| `dashboard.port` | `evo init` | actual bound port (may differ from requested if 8080 was busy) |
+| `dashboard.log` | supervisor | dashboard stdout+stderr, rotated |
+| `dashboard.dead` | supervisor | written only when backoff gives up; check this on "dashboard didn't come back" |
+
+`_stop_dashboard` (run on `evo reset` etc.) signals the supervisor first
+so it doesn't respawn the dashboard mid-stop. Cross-platform: POSIX
+`setsid` via `start_new_session`, Windows
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`.
+
 ## Common Mistakes
 
 - Do not hand-edit config JSON; use `evo config ...`, `evo env ...`, or
