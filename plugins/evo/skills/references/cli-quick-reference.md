@@ -170,7 +170,7 @@ evo run <exp_id> [--timeout <seconds>]
 evo run <exp_id> --check [--timeout <seconds>]
 evo done <exp_id> --score <float> [--traces <dir>] [--no-compare]
 evo discard <exp_id> --reason "<why>" [--force]
-evo prune <exp_id> --reason "<why>"
+evo prune <exp_id> [--reason "<why>"]
 evo restore <exp_id>
 evo gc
 ```
@@ -182,6 +182,9 @@ Lifecycle command rules:
   `--force`. Refuses any node with non-discarded children.
 - `evo prune` accepts `committed` or `evaluated` nodes. Marks the lineage
   exhausted; the result stays available for `evo restore` later.
+  `--reason` is optional — omit it for routine round-N cleanups (a stderr
+  warning notes the omission); pass one for one-off prunes whose context
+  isn't obvious from the parent prune.
 - `evo restore` reverts a prune or discard. Discarded nodes can be
   restored as long as the result hasn't been garbage-collected; if it
   has, the error message tells you where to find the saved diff.
