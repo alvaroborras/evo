@@ -1913,6 +1913,73 @@ def _inherited_gate_specs(config: dict, graph: dict, parent_id: str) -> tuple[li
     return inherited_gates, gate_origins
 
 
+def _split_gates_by_phase(gates: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Partition gates into (pre, post). Missing `phase` defaults to "post"
+    so gates registered before the pre/post split was introduced keep their
+    original behavior (run after the benchmark)."""
+    pre = [g for g in gates if g.get("phase", "post") == "pre"]
+    post = [g for g in gates if g.get("phase", "post") != "pre"]
+    return pre, post
+
+
+def _run_gate_batch(
+    gates: list[dict],
+    *,
+    gate_origins: dict[str, str],
+    config: dict,
+    target: Path,
+    worktree: Path,
+    run_cwd: Any,
+    gate_env: dict[str, str],
+    timeout: float | None,
+    log_dir: Path,
+    executor: Any,
+    mirror_dirs: list | None = None,
+    phase: str,
+    raise_on_timeout: bool,
+) -> tuple[list[dict], list[str]]:
+    """Run a list of gates; return (records, failures).
+
+    `raise_on_timeout=True` matches the real-run path: a timeout aborts
+    the run immediately (hard fail). `raise_on_timeout=False` matches
+    --check: timeout is recorded as a failure but the batch continues so
+    all gate issues surface in a single check.
+    """
+    records: list[dict] = []
+    failures: list[str] = []
+    for g in gates:
+        gate_cmd = _apply_runtime_prefix(
+            config,
+            fill_command_template(g["command"], target=target, worktree=worktree),
+        )
+        log_file = log_dir / f"gate_{g['name']}.log"
+        result = executor.stream(
+            ["sh", "-c", gate_cmd],
+            cwd=run_cwd, env=gate_env, timeout=timeout,
+            stdout_path=log_file, stderr_path=log_file,
+            mirror_dirs=mirror_dirs,
+        )
+        if result.timed_out:
+            records.append({
+                "name": g["name"], "from": gate_origins.get(g["name"], "config"),
+                "command": gate_cmd, "phase": phase,
+                "passed": False, "returncode": None, "error": "gate_timeout",
+            })
+            if raise_on_timeout:
+                raise RuntimeError(f"gate_timeout:{g['name']}")
+            failures.append(g["name"])
+            continue
+        passed = (result.exit_code or 0) == 0
+        records.append({
+            "name": g["name"], "from": gate_origins.get(g["name"], "config"),
+            "command": gate_cmd, "phase": phase,
+            "passed": passed, "returncode": result.exit_code,
+        })
+        if not passed:
+            failures.append(g["name"])
+    return records, failures
+
+
 def _cmd_run_check(
     args: argparse.Namespace,
     root: Path,
@@ -1995,6 +2062,25 @@ def _cmd_run_check(
             if record is not None:
                 runtime_records.append(record)
 
+        # Split gates by phase up front so pre-gates can run before the
+        # benchmark fires. A pre-gate failure aborts the check with no
+        # spend on the benchmark itself.
+        inherited_gates, gate_origins = _inherited_gate_specs(config, graph, node["parent"])
+        pre_gates, post_gates = _split_gates_by_phase(inherited_gates)
+        gate_env = {k: v for k, v in env.items() if not k.startswith("EVO_")}
+
+        if pre_gates:
+            pre_records, pre_failures = _run_gate_batch(
+                pre_gates, gate_origins=gate_origins, config=config,
+                target=target, worktree=worktree, run_cwd=run_cwd,
+                gate_env=gate_env, timeout=args.timeout,
+                log_dir=check_dir, executor=executor,
+                phase="pre", raise_on_timeout=False,
+            )
+            gate_records.extend(pre_records)
+            if pre_failures:
+                raise RuntimeError(f"pre_gate_failed:{','.join(pre_failures)}")
+
         bench = executor.stream(
             ["sh", "-c", benchmark_cmd],
             cwd=run_cwd, env=env, timeout=args.timeout,
@@ -2020,35 +2106,16 @@ def _cmd_run_check(
         score, parsed = load_result(result_path, bench.stdout)
         benchmark_record = {"command": benchmark_cmd, "returncode": 0, "result": parsed}
 
-        inherited_gates, gate_origins = _inherited_gate_specs(config, graph, node["parent"])
-        gate_env = {k: v for k, v in env.items() if not k.startswith("EVO_")}
-        gate_failures: list[str] = []
-        for g in inherited_gates:
-            gate_cmd = _apply_runtime_prefix(
-                config,
-                fill_command_template(g["command"], target=target, worktree=worktree),
-            )
-            gate_log_file = check_dir / f"gate_{g['name']}.log"
-            gate_result = executor.stream(
-                ["sh", "-c", gate_cmd],
-                cwd=run_cwd, env=gate_env, timeout=args.timeout,
-                stdout_path=gate_log_file, stderr_path=gate_log_file,
-            )
-            passed = not gate_result.timed_out and (gate_result.exit_code or 0) == 0
-            record = {
-                "name": g["name"],
-                "from": gate_origins.get(g["name"], "config"),
-                "command": gate_cmd,
-                "passed": passed,
-                "returncode": gate_result.exit_code,
-            }
-            if gate_result.timed_out:
-                record["error"] = "gate_timeout"
-            gate_records.append(record)
-            if not passed:
-                gate_failures.append(g["name"])
-        if gate_failures:
-            raise RuntimeError(f"gate_failed:{','.join(gate_failures)}")
+        post_records, post_failures = _run_gate_batch(
+            post_gates, gate_origins=gate_origins, config=config,
+            target=target, worktree=worktree, run_cwd=run_cwd,
+            gate_env=gate_env, timeout=args.timeout,
+            log_dir=check_dir, executor=executor,
+            phase="post", raise_on_timeout=False,
+        )
+        gate_records.extend(post_records)
+        if post_failures:
+            raise RuntimeError(f"gate_failed:{','.join(post_failures)}")
         status = "passed"
         print(f"CHECK_PASSED {args.exp_id} score={score} artifacts={check_dir}")
         return 0
@@ -2307,6 +2374,32 @@ def _cmd_run_impl(
                 phase=phase_name, status="completed", started_at=started_at,
             )
 
+        # Split gates by phase up front so pre-gates can run before the
+        # benchmark. A pre-gate failure aborts the run before any
+        # benchmark spend — useful for cheap-detectable issues
+        # (cheat checks, file-hash checks, eval-data presence guards).
+        inherited_gates, gate_origins = _inherited_gate_specs(config, graph, node["parent"])
+        pre_gates, post_gates = _split_gates_by_phase(inherited_gates)
+        gate_env = {k: v for k, v in env.items() if not k.startswith("EVO_")}
+
+        if pre_gates and not benchmark_completed:
+            _write_attempt_state(
+                root, args.exp_id, attempt_n,
+                phase="pre_gates", status="running", started_at=started_at,
+            )
+            pre_records, pre_failures = _run_gate_batch(
+                pre_gates, gate_origins=gate_origins, config=config,
+                target=target, worktree=worktree, run_cwd=run_cwd,
+                gate_env=gate_env, timeout=args.timeout,
+                log_dir=a_dir, executor=executor,
+                mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
+                phase="pre", raise_on_timeout=True,
+            )
+            gate_records.extend(pre_records)
+            if pre_failures:
+                print(f"PRE_GATE_FAILED {' '.join(pre_failures)}")
+                raise RuntimeError(f"pre_gate_failed:{','.join(pre_failures)}")
+
         # Run benchmark via sh -c so the user-provided command string
         # (with placeholders interpolated) executes through a shell, same
         # semantics as before.
@@ -2401,52 +2494,20 @@ def _cmd_run_impl(
             extra={"score": score},
         )
 
-        gate_passed = True
-        gate_failures: list[str] = []
-
-        inherited_gates, gate_origins = _inherited_gate_specs(config, graph, node["parent"])
-
-        # Strip EVO_* so an SDK-using gate can't clobber result.json or
-        # the benchmark's task_*.json traces.
-        gate_env = {k: v for k, v in env.items() if not k.startswith("EVO_")}
-
         _write_attempt_state(
             root, args.exp_id, attempt_n,
             phase="gates", status="running", started_at=started_at,
         )
-        for g in inherited_gates:
-            gate_cmd = _apply_runtime_prefix(
-                config,
-                fill_command_template(g["command"], target=target, worktree=worktree),
-            )
-            gate_log_file = a_dir / f"gate_{g['name']}.log"
-            gate_result = executor.stream(
-                ["sh", "-c", gate_cmd],
-                cwd=run_cwd, env=gate_env, timeout=args.timeout,
-                stdout_path=gate_log_file, stderr_path=gate_log_file,
-                mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
-            )
-            if gate_result.timed_out:
-                gate_records.append({
-                    "name": g["name"],
-                    "from": gate_origins.get(g["name"], "config"),
-                    "command": gate_cmd,
-                    "passed": False,
-                    "returncode": None,
-                    "error": "gate_timeout",
-                })
-                raise RuntimeError(f"gate_timeout:{g['name']}")
-            passed = (gate_result.exit_code or 0) == 0
-            gate_records.append({
-                "name": g["name"],
-                "from": gate_origins.get(g["name"], "config"),
-                "command": gate_cmd,
-                "passed": passed,
-                "returncode": gate_result.exit_code,
-            })
-            if not passed:
-                gate_failures.append(g["name"])
-                gate_passed = False
+        post_records, gate_failures = _run_gate_batch(
+            post_gates, gate_origins=gate_origins, config=config,
+            target=target, worktree=worktree, run_cwd=run_cwd,
+            gate_env=gate_env, timeout=args.timeout,
+            log_dir=a_dir, executor=executor,
+            mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
+            phase="post", raise_on_timeout=True,
+        )
+        gate_records.extend(post_records)
+        gate_passed = not gate_failures
 
         if gate_failures:
             print(f"GATE_FAILED {' '.join(gate_failures)}")
@@ -3590,7 +3651,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
     config, graph = _require_workspace(root)
 
     if args.gate_action == "add":
-        entry = add_gate(root, args.exp_id, args.name, args.command)
+        entry = add_gate(
+            root, args.exp_id, args.name, args.command,
+            phase=getattr(args, "phase", "post"),
+        )
         print(json.dumps(entry, indent=2))
         return 0
 
@@ -3611,6 +3675,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
             output.append({
                 "name": g["name"],
                 "command": g["command"],
+                "phase": g.get("phase", "post"),
                 "from": node_gates_map.get(g["name"], "unknown"),
             })
         print(json.dumps(output, indent=2))
@@ -4924,6 +4989,15 @@ def build_parser() -> argparse.ArgumentParser:
     gate_add_p.add_argument("exp_id")
     gate_add_p.add_argument("--name", required=True)
     gate_add_p.add_argument("--command", required=True)
+    gate_add_p.add_argument(
+        "--phase", choices=("pre", "post"), default="post",
+        help="when the gate runs relative to the benchmark. "
+             "'pre' = before benchmark (failure aborts the run with no "
+             "benchmark spend; use for cheat checks, file-hash checks, "
+             "anything decidable from the worktree alone). "
+             "'post' = after benchmark (default; use for score-regression, "
+             "output-schema, or anything that needs benchmark output).",
+    )
     gate_add_p.set_defaults(func=cmd_gate)
 
     gate_list_p = gate_sub.add_parser("list")

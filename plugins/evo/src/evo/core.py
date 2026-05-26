@@ -1055,9 +1055,24 @@ def collect_gates_from_path(graph: dict[str, Any], node_id: str) -> list[dict[st
     return gates
 
 
-def add_gate(root: Path, exp_id: str, name: str, command: str) -> dict[str, str]:
-    """Add a named gate to a node. Returns the gate entry."""
-    gate_entry = {"name": name, "command": command, "added_at": utc_now()}
+def add_gate(
+    root: Path, exp_id: str, name: str, command: str, *, phase: str = "post",
+) -> dict[str, str]:
+    """Add a named gate to a node. Returns the gate entry.
+
+    `phase` is one of:
+      - "pre"  : runs before the benchmark. A failure aborts the run with
+                 no benchmark fired — saves spend on cheap-detectable
+                 issues (e.g. cheat checks, file-hash checks).
+      - "post" : runs after the benchmark. Needs benchmark output to
+                 evaluate (e.g. score regression, output schema validity).
+                 Default; preserves pre-phase-split behavior.
+    """
+    if phase not in ("pre", "post"):
+        raise ValueError(f"phase must be 'pre' or 'post', got {phase!r}")
+    gate_entry = {
+        "name": name, "command": command, "phase": phase, "added_at": utc_now(),
+    }
 
     def _add(current_node: dict, _graph: dict) -> None:
         existing = current_node.setdefault("gates", [])

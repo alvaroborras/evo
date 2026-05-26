@@ -201,19 +201,25 @@ Outcomes:
 ## Gates
 
 ```bash
-evo gate add <node_id> --name <name> --command "<cmd>"
+evo gate add <node_id> --name <name> --command "<cmd>" [--phase pre|post]
 evo gate list <node_id>
 evo gate remove <node_id> --name <name>
 evo gate check <node_id> [--timeout <seconds>]
 ```
 
 - Gates are node-scoped policy and inherit to descendants.
-- `evo run exp_N` evaluates gates inherited from the parent path.
-- Gate pass/fail is exit-code based only. A command that prints a low score and
-  exits 0 passes. Use tests or `--min-score` style gates that exit non-zero on
-  regression.
-- `evo gate check` validates gates without running the benchmark and does
-  not mutate node state.
+- `--phase pre` runs the gate before the benchmark. Failure aborts the
+  run with no benchmark spend. Use for checks decidable from the
+  worktree alone (cheat detection, file-hash invariants, eval-data
+  presence). Default is `post` (after benchmark; needs benchmark
+  output to evaluate — e.g. score regression, output schema).
+- `evo run exp_N` evaluates inherited gates: pre-gates before the
+  benchmark, post-gates after.
+- Gate pass/fail is exit-code based only. A command that prints a low
+  score and exits 0 passes. Use tests or `--min-score` style gates that
+  exit non-zero on regression.
+- `evo gate check` runs all gates regardless of phase (forensic) and
+  does not mutate node state.
 
 ## Inspection
 
