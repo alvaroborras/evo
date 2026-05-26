@@ -290,7 +290,18 @@ If the selected benchmark is new, build it in the worktree. See `references/cons
 
 Do not run separate determinism checks during setup. Note the benchmark's determinism property in `project.md` (step 12) and move on. Variance surfaces during optimization itself, where it can be handled with real evidence rather than guessed at during setup.
 
-### 10b. Apply instrumentation
+### 10b. Audit the harness for amortizable wins
+
+Apply any change that preserves what we measure -- descendants inherit it. Changes that could move the score (including for a different target) belong in `/evo:optimize`, not here.
+
+Patterns to scan for:
+
+- Serial loop over independent tasks -> thread/process pool
+- Constant prefix across tasks -> prompt cache
+- Per-task setup that could be one-time -> hoist out of the loop
+- Transport errors (429/5xx) counted as task failures -> retry
+
+### 10c. Apply instrumentation
 
 Based on the instrumentation mode passed to `evo init`:
 
@@ -301,7 +312,7 @@ Paths below are relative to this `SKILL.md` file (resolve them against the skill
 
 The wire protocol is the same either way: `task_<id>.json` written to `$EVO_TRACES_DIR`, score JSON written to `$EVO_RESULT_PATH`. Stdout is free for user output.
 
-### 10c. Cheap validation run
+### 10d. Cheap validation run
 
 Before the full baseline, validate the toolchain with the cheapest possible end-to-end run (single task, smallest split, dry-run flag -- whatever is fastest). Run the check from the main repo root:
 
@@ -322,7 +333,7 @@ The check asserts `result.json` exists, is non-empty, and is a JSON object with 
 
 Fix any issues and re-validate before proceeding.
 
-### 10d. Commit inside the worktree
+### 10e. Commit inside the worktree
 
 Logical commits are ideal but not required. Minimal acceptable:
 
@@ -343,7 +354,7 @@ dist/
 build/
 ```
 
-Otherwise, running the benchmark once before committing will drag bytecode caches, `.pytest_cache/`, or stray `.evo/` writes into the experiment's tree and pollute every descendant branch. Belt-and-suspenders with step 10c's "run from main repo root" rule: even if cwd slips, the ignore catches it.
+Otherwise, running the benchmark once before committing will drag bytecode caches, `.pytest_cache/`, or stray `.evo/` writes into the experiment's tree and pollute every descendant branch. Belt-and-suspenders with step 10d's "run from main repo root" rule: even if cwd slips, the ignore catches it.
 
 ## 11. Run the baseline
 
