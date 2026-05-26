@@ -2879,7 +2879,15 @@ def cmd_prune(args: argparse.Namespace) -> int:
         current_node["pruned_reason"] = args.reason
 
     update_node(root, args.exp_id, _mark)
-    print(f"PRUNED {args.exp_id}: {args.reason}")
+    if args.reason is None:
+        print(
+            f"WARNING: pruning {args.exp_id} without a reason "
+            f"— pass `--reason \"...\"` to record one.",
+            file=sys.stderr,
+        )
+        print(f"PRUNED {args.exp_id}")
+    else:
+        print(f"PRUNED {args.exp_id}: {args.reason}")
     return 0
 
 
@@ -4696,7 +4704,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     prune_p = sub.add_parser("prune")
     prune_p.add_argument("exp_id")
-    prune_p.add_argument("--reason", required=True)
+    prune_p.add_argument(
+        "--reason", default=None,
+        help="why this lineage is being pruned (optional; omit for routine "
+             "round-N cleanups where the parent prune already explained the why)",
+    )
     prune_p.set_defaults(func=cmd_prune)
 
     restore_p = sub.add_parser(

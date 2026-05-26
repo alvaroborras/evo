@@ -414,6 +414,33 @@ class TestPruneAcceptsEvaluated(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self._run_prune(root, "exp_0001")
 
+    def test_prune_without_reason_succeeds_and_warns(self):
+        """--reason is optional. The flip still happens; pruned_reason stays
+        None (matching the initial state and what `evo restore` resets to);
+        stderr warns so the omission is visible without breaking the call."""
+        import io
+        from unittest.mock import patch
+        from evo import core
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _init_git_repo(root)
+            _build_graph_workspace(root, {
+                "exp_0001": _make_node("exp_0001", "root", "committed",
+                                       score=0.7, commit="abc"),
+            })
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = self._run_prune(root, "exp_0001", reason=None)
+            self.assertEqual(rc, 0)
+
+            graph = core.load_graph(root)
+            self.assertEqual(graph["nodes"]["exp_0001"]["status"], "pruned")
+            self.assertIsNone(graph["nodes"]["exp_0001"]["pruned_reason"],
+                              "empty state must be None — all readers truthy-check, "
+                              "so a sentinel string would falsely render in dashboards")
+            self.assertIn("WARNING", err.getvalue())
+            self.assertIn("exp_0001", err.getvalue())
+
 
 class TestRestore(unittest.TestCase):
     """Stage 3c: evo restore covers pruned→committed and discarded→committed."""
