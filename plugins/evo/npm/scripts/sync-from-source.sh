@@ -22,7 +22,7 @@ cp "$SRC/src/evo/openclaw_plugin/pi.bundle.js" "$PKG/extensions/evo/index.js"
 echo "synced extension: $PKG/extensions/evo/index.js (host=pi)"
 
 # Skills — pi discovers each subdir under skills/ as a separate skill.
-for name in discover optimize subagent infra-setup; do
+for name in discover optimize subagent infra-setup report; do
     dest="$PKG/skills/$name"
     rm -rf "$dest"
     mkdir -p "$dest"
