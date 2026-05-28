@@ -481,15 +481,23 @@ def emit_for_host(host: str, hook_event: str | None, text: str, payload: dict | 
             sys.stdout.write(json.dumps(out, separators=(",", ":")))
             return
         # All other events (PreToolUse / PostToolUse / UserPromptSubmit /
-        # SessionStart) honor the same hookSpecificOutput envelope. Default
-        # to PreToolUse if we couldn't read it from stdin.
+        # SessionStart) carry the directive via hookSpecificOutput.additionalContext.
+        # Default to PreToolUse if we couldn't read the event from stdin.
         evt = hook_event or "PreToolUse"
-        payload = {
-            "hookSpecificOutput": {
-                "hookEventName": evt,
-                "additionalContext": text,
-            }
-        }
+        hook_out = {"hookEventName": evt, "additionalContext": text}
+        # Claude Code silently DROPS PreToolUse additionalContext unless the
+        # hook also returns a concrete permissionDecision. Verified on CLI
+        # v2.1.154 (`claude --print`) with sentinel probes: bare
+        # additionalContext never reaches the model; `permissionDecision:"allow"`
+        # delivers it as a system-reminder next to the tool result. "allow"
+        # auto-approves only this single tool call, and only fires when a
+        # directive is actually pending (marker set), so the blast radius is one
+        # already-in-flight orchestrator tool call. Codex honors bare
+        # additionalContext (gpt-5 acted on it), so we leave codex untouched to
+        # avoid changing its permission behavior.
+        if host == "claude-code" and evt == "PreToolUse":
+            hook_out["permissionDecision"] = "allow"
+        payload = {"hookSpecificOutput": hook_out}
         sys.stdout.write(json.dumps(payload, separators=(",", ":")))
         return
     if host == "hermes":
