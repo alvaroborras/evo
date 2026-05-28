@@ -131,11 +131,15 @@ def _bump_skill_frontmatter(name: str, new: str) -> None:
 
 
 def _bump_body_literals(path: Path, old: str, new: str) -> None:
-    """Replace exact `old` occurrences with `new` inside the file body.
-    Frontmatter already handled separately, but the regex is exact-match
-    on the version string so re-running with the same OLD is a no-op."""
+    """Replace `old` version literals with `new` inside the file body.
+
+    Matches `old` only as a complete version token (not when it's the
+    prefix of a longer version). A blind str.replace would re-expand the
+    suffix when bumping to a pre-release of the same base — 0.4.4 ->
+    0.4.4-alpha.1 would corrupt the frontmatter line this script just
+    wrote into 0.4.4-alpha.1-alpha.1."""
     text = path.read_text()
-    new_text = text.replace(old, new)
+    new_text = re.sub(re.escape(old) + r"(?![\w.+-])", new, text)
     path.write_text(new_text)
 
 
@@ -149,6 +153,10 @@ def _verify_no_leftover(old: str, new: str) -> list[Path]:
     version literal as a standalone version (not as part of a longer
     string like a changelog entry)."""
     leftover: list[Path] = []
+    # Match OLD only as a complete token so a pre-release bump of the same
+    # base (0.4.4 -> 0.4.4-alpha.1) doesn't flag every file just because
+    # NEW contains OLD as a prefix.
+    old_token = re.compile(re.escape(old) + r"(?![\w.+-])")
     candidates = [
         PLUGIN_ROOT / "pyproject.toml",
         PLUGIN_ROOT / "src" / "evo" / "__init__.py",
@@ -165,7 +173,7 @@ def _verify_no_leftover(old: str, new: str) -> list[Path]:
     for p in candidates:
         if not p.exists():
             continue
-        if old in p.read_text():
+        if old_token.search(p.read_text()):
             leftover.append(p)
     return leftover
 
