@@ -123,6 +123,20 @@ def _hook_event_from_payload(payload: dict) -> str | None:
     return payload.get("hook_event_name") or payload.get("hookEventName")
 
 
+def _payload_is_subagent(payload: dict | None) -> bool:
+    """Mirror the Rust binary's `is_subagent_context`: claude-code (and
+    codex) include a non-empty `agent_id` in hook payloads triggered by
+    subagent (Task tool) activity; the orchestrator's own events omit it.
+    Used to refuse engaging the parent when a SessionStart-class event
+    actually originates from a subagent. Defensive — the Rust binary
+    already fast-exits on subagent PreToolUse before handoff, but the
+    Python drain may run SessionStart registration directly."""
+    if not payload:
+        return False
+    aid = payload.get("agent_id") or payload.get("agentId")
+    return bool(aid)
+
+
 def _resolve_root_from_payload(payload: dict) -> Path | None:
     """Locate the workspace root (dir containing `.evo/`) for hosts whose
     hook command runs from outside the project. Cursor's user-level
@@ -540,6 +554,27 @@ def drain_session(root: Path, session_id: str, host: str | None = None, hook_eve
     if host == "unknown":
         host = "claude-code"
     exp_id = sess.get("exp_id")
+
+    # Orchestrator engagement on SessionStart. For hook hosts
+    # (claude-code/codex) the host process that fired SessionStart IS the
+    # orchestrator, so SessionStart is the engagement signal — same as the
+    # in-process JS plugins (pi/openclaw) marking engaged at session_start.
+    # Under /optimize the orchestrator dispatches every `evo` command to
+    # subagents, so it never runs `evo` itself and `auto_register_from_env`
+    # never flips engagement; without this, `evo direct` filters the
+    # orchestrator out (skipped_unengaged) and the directive never lands.
+    # Guarded: never engage a subagent-originated event, never engage a
+    # record carrying an exp_id. This handles the case where the published
+    # Rust binary predates the SessionStart-engage fix.
+    if (
+        hook_event in _SESSION_START_EVENTS
+        and not exp_id
+        and not _payload_is_subagent(payload)
+    ):
+        from .registry import mark_engaged
+        if mark_engaged(root, session_id):
+            queue.init_offset_to_latest(root, session_id)
+            sess = get_session(root, session_id) or sess
 
     # Seed offset to the current queue tail for sessions that don't yet
     # have an offset file. Closes the SessionStart-unconditional-drain

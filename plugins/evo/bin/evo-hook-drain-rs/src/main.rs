@@ -176,7 +176,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-fn register_session(run_dir: &Path, sid: &str, host: &str) -> io::Result<()> {
+fn register_session(run_dir: &Path, sid: &str, host: &str, engage: bool) -> io::Result<()> {
     let sessions_dir = run_dir.join("inject").join("sessions");
     fs::create_dir_all(&sessions_dir)?;
     let now = iso8601_utc_now();
@@ -185,18 +185,39 @@ fn register_session(run_dir: &Path, sid: &str, host: &str) -> io::Result<()> {
     // chooses workspace-vs-exp based on `sess.exp_id`). Without this,
     // a directive queued by `evo direct --to exp_id` BEFORE the Python
     // `auto_register_from_env` merge can be missed.
-    let exp_id_json = match env::var("EVO_EXP_ID") {
-        Ok(v) if !v.is_empty() => format!(r#""{}""#, escape_json_str(&v)),
-        _ => "null".to_string(),
+    let exp_id = match env::var("EVO_EXP_ID") {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    };
+    let exp_id_json = match &exp_id {
+        Some(v) => format!(r#""{}""#, escape_json_str(v)),
+        None => "null".to_string(),
+    };
+    // Engage the orchestrator at SessionStart. The hook-host process that
+    // fired SessionStart IS the orchestrator, so SessionStart is its
+    // engagement signal — same as the in-process JS plugins (pi/openclaw)
+    // marking engaged at session_start. Under /optimize the orchestrator
+    // dispatches every `evo` command to subagents, so it never runs `evo`
+    // itself; without engaging here, the Python `evo direct` broadcast
+    // filters it out (skipped_unengaged) and mid-run directives never
+    // land. NEVER engage a subagent registration (EVO_EXP_ID set) — a
+    // subagent must not engage the workspace loop on its own.
+    let engaged = engage && exp_id.is_none();
+    let (engaged_json, engaged_at_json) = if engaged {
+        ("true".to_string(), format!(r#""{}""#, now))
+    } else {
+        ("false".to_string(), "null".to_string())
     };
     let payload = format!(
-        r#"{{"schema_version":1,"session_id":"{}","host":"{}","pid":{},"registered_at":"{}","last_seen_at":"{}","exp_id":{},"parent_session_id":null}}"#,
+        r#"{{"schema_version":1,"session_id":"{}","host":"{}","pid":{},"registered_at":"{}","last_seen_at":"{}","exp_id":{},"parent_session_id":null,"has_evo_engaged":{},"engaged_at":{},"optimize_mode":false,"optimize_mode_at":null}}"#,
         sid,
         host,
         process::id(),
         now,
         now,
         exp_id_json,
+        engaged_json,
+        engaged_at_json,
     );
     fs::write(sessions_dir.join(format!("{}.json", sid)), payload)
 }
@@ -409,7 +430,10 @@ fn main() {
 
     if hook_event == "SessionStart" {
         if !sessions_file.is_file() {
-            let _ = register_session(&run_dir, &sid, host);
+            // engage=true: SessionStart on the hook host IS the orchestrator
+            // engagement signal. register_session refuses to engage if
+            // EVO_EXP_ID is set (subagent context).
+            let _ = register_session(&run_dir, &sid, host, true);
         }
         // Plugin root = parent of the directory containing this executable.
         let exe = env::current_exe().ok();
@@ -432,7 +456,12 @@ fn main() {
     // /optimize matcher in Python actually has a session record to flip.
     if !sessions_file.is_file() {
         if hook_event == "UserPromptSubmit" {
-            let _ = register_session(&run_dir, &sid, host);
+            // A resumed orchestrator's first prompt. Engage unless this is
+            // a subagent-originated prompt (agent_id present) — a subagent
+            // must not engage the workspace loop on its own. register_session
+            // additionally refuses to engage when EVO_EXP_ID is set.
+            let engage = !is_subagent_context(&stdin_buf);
+            let _ = register_session(&run_dir, &sid, host, engage);
         } else {
             emit_ok();
         }

@@ -448,6 +448,19 @@ def _parse_directive_id(direct_output: str) -> str:
     return m.group(1)
 
 
+def _parse_fanout(direct_output: str) -> tuple[int, int]:
+    """Parse `fanout=N sessions, skipped_unengaged=M` from the workspace
+    `evo direct` line. Returns (fanout, skipped_unengaged). Returns
+    (-1, -1) if the line isn't the workspace broadcast form (e.g. an
+    exp-targeted `directive queued (exp=..., woken=N)` form, which has
+    no fanout field)."""
+    fm = re.search(r"fanout=(\d+)", direct_output)
+    sm = re.search(r"skipped_unengaged=(\d+)", direct_output)
+    if not fm or not sm:
+        return (-1, -1)
+    return (int(fm.group(1)), int(sm.group(1)))
+
+
 def _verify_directive_consumed(h: _Harness, ws_root: str, directive_id: str) -> int:
     """Count sessions (across ALL run_* dirs) whose offset file matches
     the directive id. Cross-run because the agent can re-`evo init`
@@ -609,6 +622,29 @@ def _drive_smoke(
         f"evo direct {_shell_quote(directive_text)}"
     )
     directive_id = _parse_directive_id(direct_out)
+
+    # Engagement-regression early-catch. The orchestrator session must be
+    # engaged at SessionStart (hook hosts via the Rust binary / Python
+    # drain; hermes via on_session_start; pi/openclaw via their JS
+    # plugins) so `evo direct` fans the directive out to it. Under
+    # /optimize the orchestrator dispatches every `evo` command to
+    # subagents and never runs `evo` itself, so the env-var engagement
+    # path never fires — SessionStart is the only signal. If fanout=0 /
+    # skipped_unengaged>=1 here, the directive was filtered out and
+    # consumed_by would be 0 after a 15-minute poll. Fail fast instead.
+    fanout, skipped_unengaged = _parse_fanout(direct_out)
+    if fanout >= 0:  # workspace broadcast form (not exp-targeted)
+        assert fanout >= 1, (
+            f"[{host}] evo direct fanout={fanout} skipped_unengaged="
+            f"{skipped_unengaged}: orchestrator session not engaged — "
+            f"mid-run directive filtered out before delivery. "
+            f"direct output: {direct_out!r}"
+        )
+        assert skipped_unengaged == 0, (
+            f"[{host}] evo direct skipped_unengaged={skipped_unengaged}: "
+            f"an orchestrator session registered but was not engaged at "
+            f"SessionStart. direct output: {direct_out!r}"
+        )
 
     # Harness-side poll with hard ceilings. e2b kills long-lived HTTP/2
     # streams server-side regardless of heartbeat output (verified v17/v18),

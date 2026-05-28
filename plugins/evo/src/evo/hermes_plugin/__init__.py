@@ -40,7 +40,7 @@ from evo.core import repo_root
 from evo.inject import marker
 from evo.inject.paths import inject_root, exp_events_path, workspace_events_path
 from evo.inject.queue import read_events_after, read_offset, write_offset
-from evo.inject.registry import get_session, register_session
+from evo.inject.registry import get_session, mark_engaged, register_session
 from evo.inject.drain import (
     _POLICY_NUDGE_TEMPLATE,
     _STOP_NUDGE_TEMPLATE,
@@ -66,9 +66,26 @@ def _resolve_root() -> Path | None:
 
 
 def _ensure_registered(root: Path, session_id: str) -> None:
-    """Register the hermes session if not already in the registry."""
+    """Register the hermes session if not already in the registry, and
+    mark it as evo-engaged.
+
+    The hermes plugin process IS the orchestrator — there is no separate
+    `evo`-command engagement signal (under /optimize the orchestrator
+    dispatches every evo command to subagents, so `auto_register_from_env`
+    never flips engagement). Without engaging here, `evo direct` filters
+    this session out (skipped_unengaged) and mid-run directives never
+    reach hermes. Hermes uses no Rust binary, so this is its only
+    engagement path. `register_session(engage=True)` engages a fresh
+    record; `mark_engaged` covers an existing record that registered
+    before this fix. Both refuse to engage a subagent (exp_id-bearing)
+    record. On the false→true transition the offset is seeded to the
+    queue tail so pre-engagement directives don't replay."""
     if get_session(root, session_id) is None:
-        register_session(root, session_id, "hermes")
+        register_session(root, session_id, "hermes", engage=True)
+        return
+    from evo.inject.queue import init_offset_to_latest
+    if mark_engaged(root, session_id):
+        init_offset_to_latest(root, session_id)
 
 
 def _compute_drain_text(root: Path, session_id: str) -> str | None:
