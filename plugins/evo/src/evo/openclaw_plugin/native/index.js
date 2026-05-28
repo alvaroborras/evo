@@ -104,7 +104,7 @@ function formatDirectiveText(events) {
     if (id) {
       lines.push(`[EVO DIRECTIVE id=${id}]`);
       lines.push(ev.text);
-      lines.push(`[END EVO DIRECTIVE — when done, run: evo ack ${id}]`);
+      lines.push(`[END EVO DIRECTIVE — run \`evo ack ${id}\` to confirm you have received this message, then proceed]`);
     } else {
       lines.push("[EVO DIRECTIVE]");
       lines.push(ev.text);

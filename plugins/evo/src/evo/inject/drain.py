@@ -410,8 +410,11 @@ def format_directive_text(events: list[dict]) -> str:
     injection. Without the banner, models like gpt-5 / opus-4-7 may
     refuse the directive as suspicious.
 
-    The trailing `evo ack <id>` instruction tells the agent how to ack
-    the directive after acting on it; the CLI command writes
+    The trailing `evo ack <id>` instruction tells the agent to ack the
+    directive ON RECEIPT — immediately, before acting on it — then proceed.
+    Ack-on-receipt (not ack-when-done) makes the ack a reliable delivery
+    signal: it confirms the directive text reached the model, independent
+    of whether the requested work is finished. The CLI command writes
     inject/acks/<id>.json which `evo direct status` and `evo direct --wait`
     surface. Acks are best-effort — models sometimes forget — but presence
     of an ack is a positive signal that the directive landed.
@@ -425,7 +428,10 @@ def format_directive_text(events: list[dict]) -> str:
         if ev_id:
             lines.append(f"[EVO DIRECTIVE id={ev_id}]")
             lines.append(text)
-            lines.append(f"[END EVO DIRECTIVE — when done, run: evo ack {ev_id}]")
+            lines.append(
+                f"[END EVO DIRECTIVE — run `evo ack {ev_id}` to confirm "
+                f"you have received this message, then proceed]"
+            )
         else:
             # Legacy fallback for events without an id (shouldn't occur
             # with the current queue, but be defensive).

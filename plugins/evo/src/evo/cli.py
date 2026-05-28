@@ -5490,7 +5490,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ack_p = sub.add_parser(
         "ack",
-        help="Acknowledge an evo directive (called by agents after acting on a [EVO DIRECTIVE id=…] banner)",
+        help="Acknowledge an evo directive (run by agents to confirm receipt of an [EVO DIRECTIVE id=…] banner)",
         description=(
             "Records that the directive identified by <event_id> has been "
             "processed. Writes inject/acks/<event_id>.json. Surfaces via "

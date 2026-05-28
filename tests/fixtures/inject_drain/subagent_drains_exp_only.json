@@ -24,7 +24,7 @@
   "offsets": {},
   "markers": ["sub1"],
   "expected": {
-    "text": "[EVO DIRECTIVE id=01EXP00000000000000000001]\nsubagent focus\n[END EVO DIRECTIVE — when done, run: evo ack 01EXP00000000000000000001]",
+    "text": "[EVO DIRECTIVE id=01EXP00000000000000000001]\nsubagent focus\n[END EVO DIRECTIVE — run `evo ack 01EXP00000000000000000001` to confirm you have received this message, then proceed]",
     "newWorkspaceOffset": null,
     "newExpOffset": "01EXP00000000000000000001",
     "marker_after": false,

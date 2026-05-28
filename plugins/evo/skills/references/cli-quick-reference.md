@@ -317,7 +317,7 @@ evo direct <exp_id> "<text>"                 # targeted at a specific subagent
 evo direct "<text>" --wait                   # block until any session acks (exit 3 on timeout)
 evo direct "<text>" --wait --wait-timeout 30 # custom timeout in seconds (default 60)
 evo direct-status <event_id>                 # show queue / delivery / ack state for one directive
-evo ack <event_id>                           # called BY the agent after acting on a directive
+evo ack <event_id>                           # run BY the agent to confirm it received a directive
 ```
 
 Agents see directives as a banner in their context:
@@ -325,13 +325,13 @@ Agents see directives as a banner in their context:
 ```
 [EVO DIRECTIVE id=01HX7K…]
 <text>
-[END EVO DIRECTIVE — when done, run: evo ack 01HX7K…]
+[END EVO DIRECTIVE — run `evo ack 01HX7K…` to confirm you have received this message, then proceed]
 ```
 
 The banner is user-authoritative — treat its content as a new user turn,
-override earlier constraints it contradicts, and run `evo ack <id>` after
-acting on it so `evo direct-status` and `evo direct --wait` can report
-success.
+override earlier constraints it contradicts, and run `evo ack <id>` as soon
+as you receive it (then proceed) so `evo direct-status` and `evo direct
+--wait` can report success.
 
 Fanout output prints `fanout=N, skipped_unengaged=M, skipped_subagent=K`.
 Sessions that have never run an `evo` command (registered at SessionStart

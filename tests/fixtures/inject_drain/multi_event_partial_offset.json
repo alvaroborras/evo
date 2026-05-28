@@ -30,7 +30,7 @@
   },
   "markers": ["orch2"],
   "expected": {
-    "text": "[EVO DIRECTIVE id=01EVENT0000000000000000C]\nthird\n[END EVO DIRECTIVE — when done, run: evo ack 01EVENT0000000000000000C]\n[EVO DIRECTIVE id=01EVENT0000000000000000D]\nfourth\n[END EVO DIRECTIVE — when done, run: evo ack 01EVENT0000000000000000D]",
+    "text": "[EVO DIRECTIVE id=01EVENT0000000000000000C]\nthird\n[END EVO DIRECTIVE — run `evo ack 01EVENT0000000000000000C` to confirm you have received this message, then proceed]\n[EVO DIRECTIVE id=01EVENT0000000000000000D]\nfourth\n[END EVO DIRECTIVE — run `evo ack 01EVENT0000000000000000D` to confirm you have received this message, then proceed]",
     "newWorkspaceOffset": "01EVENT0000000000000000D",
     "newExpOffset": null,
     "marker_after": false,
