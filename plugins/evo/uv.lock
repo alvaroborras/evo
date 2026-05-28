@@ -810,7 +810,7 @@ wheels = [
 
 [[package]]
 name = "evo-hq-cli"
-version = "0.4.4a1"
+version = "0.4.4a2"
 source = { editable = "." }
 dependencies = [
     { name = "flask" },
