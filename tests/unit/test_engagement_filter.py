@@ -563,5 +563,194 @@ class TestSessionStartDoesNotBackfill(unittest.TestCase):
         assert offset == post_id
 
 
+# ---------------------------------------------------------------------------
+# SessionStart engages the orchestrator (hook hosts + hermes)
+#
+# Regression for the release-smoke failure: claude-code/codex/hermes
+# delivered fanout=0 / skipped_unengaged=1 under /optimize because the
+# orchestrator dispatches every `evo` command to subagents, so its own
+# session never ran `evo` and `auto_register_from_env` never engaged it.
+# SessionStart (the hook host) / on_session_start (hermes) IS the
+# orchestrator's engagement signal and must flip has_evo_engaged true.
+# ---------------------------------------------------------------------------
+
+class TestSessionStartEngagesOrchestrator(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        _make_workspace(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_register_session_engage_flag_marks_engaged(self):
+        register_session(self.root, "orch", "claude-code", engage=True)
+        rec = _read_record(self.root, "orch")
+        assert rec["has_evo_engaged"] is True
+        assert rec.get("engaged_at") is not None
+
+    def test_register_session_engage_refused_for_subagent(self):
+        # A subagent registration (exp_id set) must never engage even if
+        # the engage flag is passed.
+        register_session(self.root, "sub", "claude-code", exp_id="exp_0001", engage=True)
+        rec = _read_record(self.root, "sub")
+        assert rec["has_evo_engaged"] is False
+
+    def test_drain_session_sessionstart_engages_orchestrator(self):
+        # Rust binary registered at SessionStart (unengaged, e.g. a
+        # published binary predating the engage fix), then handed off to
+        # the Python drain on the SessionStart event. The Python drain
+        # must engage the orchestrator.
+        register_session(self.root, "orch2", "claude-code")
+        assert _read_record(self.root, "orch2")["has_evo_engaged"] is False
+        from evo.inject.drain import drain_session
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            drain_session(
+                self.root, "orch2",
+                host="claude-code", hook_event="SessionStart",
+                payload={"hook_event_name": "SessionStart", "session_id": "orch2"},
+            )
+        rec = _read_record(self.root, "orch2")
+        assert rec["has_evo_engaged"] is True, (
+            "SessionStart drain must engage the orchestrator so `evo direct` "
+            "fanout reaches it"
+        )
+
+    def test_drain_session_sessionstart_does_not_engage_subagent(self):
+        # A SessionStart-class event carrying agent_id originates from a
+        # subagent — must not engage.
+        register_session(self.root, "orch3", "claude-code")
+        from evo.inject.drain import drain_session
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            drain_session(
+                self.root, "orch3",
+                host="claude-code", hook_event="SessionStart",
+                payload={
+                    "hook_event_name": "SessionStart",
+                    "session_id": "orch3",
+                    "agent_id": "subagent-xyz",
+                },
+            )
+        assert _read_record(self.root, "orch3")["has_evo_engaged"] is False
+
+    def test_engaged_orchestrator_receives_direct_fanout(self):
+        # End-to-end: SessionStart engagement makes `evo direct` deliver.
+        register_session(self.root, "orch4", "claude-code")
+        from evo.inject.drain import drain_session
+        with patch("sys.stdout", io.StringIO()):
+            drain_session(
+                self.root, "orch4",
+                host="claude-code", hook_event="SessionStart",
+                payload={"hook_event_name": "SessionStart", "session_id": "orch4"},
+            )
+        old_cwd = Path.cwd()
+        os.chdir(self.root)
+        try:
+            from evo.cli import cmd_direct
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                cmd_direct(_build_args("mid-run directive"))
+            out = buf.getvalue()
+        finally:
+            os.chdir(old_cwd)
+        assert marker.exists(self.root, "orch4"), (
+            "engaged orchestrator must receive the directive marker"
+        )
+        assert "fanout=1" in out
+        assert "skipped_unengaged=0" in out
+
+
+class TestHermesEngagesOnSessionStart(unittest.TestCase):
+    """The hermes plugin process IS the orchestrator; on_session_start /
+    pre_llm_call must engage it (hermes uses no Rust binary)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        _make_workspace(self.root)
+        self._old_cwd = Path.cwd()
+        os.chdir(self.root)
+
+    def tearDown(self):
+        os.chdir(self._old_cwd)
+        self._tmp.cleanup()
+
+    def test_on_session_start_marks_engaged(self):
+        from evo.hermes_plugin import _on_session_start
+        _on_session_start(session_id="hermes_sid")
+        rec = _read_record(self.root, "hermes_sid")
+        assert rec is not None, "on_session_start must register the hermes session"
+        assert rec["has_evo_engaged"] is True, (
+            "hermes orchestrator must be engaged at session start"
+        )
+
+    def test_engaged_hermes_session_receives_direct_fanout(self):
+        from evo.hermes_plugin import _on_session_start
+        _on_session_start(session_id="hermes_sid2")
+        from evo.cli import cmd_direct
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            cmd_direct(_build_args("hermes directive"))
+        out = buf.getvalue()
+        assert marker.exists(self.root, "hermes_sid2")
+        assert "fanout=1" in out
+
+
+class TestInheritedSessionIdNotMisclassified(unittest.TestCase):
+    """claude-code/codex inherit the parent's session-id env var when
+    spawning subagents. A subagent's auto_register_from_env then resolves
+    to the ORCHESTRATOR's sid with EVO_EXP_ID set — register_session must
+    NOT stamp that exp_id onto the engaged orchestrator record (which would
+    make `evo direct` skip it as skipped_subagent)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        _make_workspace(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_exp_id_not_stamped_onto_engaged_orchestrator(self):
+        # Orchestrator registered + engaged at SessionStart.
+        register_session(self.root, "orch_sid", "claude-code", engage=True)
+        rec = _read_record(self.root, "orch_sid")
+        assert rec["has_evo_engaged"] is True
+        # Subagent dispatch leaks EVO_EXP_ID; subagent runs `evo` and
+        # auto_register_from_env resolves to the inherited orchestrator sid.
+        register_session(self.root, "orch_sid", "claude-code", exp_id="exp_0007")
+        rec = _read_record(self.root, "orch_sid")
+        assert rec["exp_id"] is None, (
+            "subagent exp_id must not be stamped onto the engaged "
+            "orchestrator record"
+        )
+        # And the orchestrator still receives direct fanout.
+        old_cwd = Path.cwd()
+        os.chdir(self.root)
+        try:
+            from evo.cli import cmd_direct
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                cmd_direct(_build_args("directive"))
+            out = buf.getvalue()
+        finally:
+            os.chdir(old_cwd)
+        assert marker.exists(self.root, "orch_sid")
+        assert "fanout=1" in out
+        assert "skipped_subagent=0" in out
+
+    def test_exp_id_still_merges_onto_unengaged_subagent_first_record(self):
+        # Genuine subagent-first registration: Rust registered at the
+        # subagent's SessionStart with exp_id=null (pre-fix binary) and
+        # unengaged; the later Python merge must still stamp exp_id.
+        register_session(self.root, "sub_sid", "claude-code")  # unengaged
+        register_session(self.root, "sub_sid", "claude-code", exp_id="exp_0123")
+        rec = _read_record(self.root, "sub_sid")
+        assert rec["exp_id"] == "exp_0123"
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -710,6 +710,64 @@ def test_legacy_session_record_exp_id_is_NOT_auto_migrated(tmp_path):
     )
 
 
+def test_session_start_engages_orchestrator(tmp_path):
+    """SessionStart on a hook host IS the orchestrator engagement signal.
+    The Rust register_session must write has_evo_engaged: true so the
+    Python `evo direct` broadcast doesn't filter the orchestrator out as
+    skipped_unengaged. Regression for the release-smoke fanout=0 failure
+    on claude-code/codex under /optimize."""
+    sid = "orch-engage-cc"
+    run = tmp_path / ".evo" / "run_test"
+    (run / "inject" / "sessions").mkdir(parents=True)
+
+    fake_bin = tmp_path / "fake-bin"
+    _write_fake_drain(fake_bin)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{_path_separator()}{_base_path()}"
+    env.pop("EVO_EXP_ID", None)
+
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=f'{{"session_id":"{sid}","hook_event_name":"SessionStart"}}'.encode(),
+        cwd=str(tmp_path), env=env, capture_output=True, timeout=10,
+    )
+    assert r.returncode == 0
+    import json
+    rec = json.loads((run / "inject" / "sessions" / f"{sid}.json").read_text())
+    assert rec.get("has_evo_engaged") is True, (
+        f"Rust register_session must engage the orchestrator at SessionStart; "
+        f"got {rec!r}"
+    )
+    assert rec.get("engaged_at") is not None
+
+
+def test_session_start_does_not_engage_subagent(tmp_path):
+    """A subagent registration (EVO_EXP_ID set) must NOT engage — a
+    subagent never joins the workspace loop on its own."""
+    sid = "sub-no-engage-cc"
+    run = tmp_path / ".evo" / "run_test"
+    (run / "inject" / "sessions").mkdir(parents=True)
+
+    fake_bin = tmp_path / "fake-bin"
+    _write_fake_drain(fake_bin)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{_path_separator()}{_base_path()}"
+    env["EVO_EXP_ID"] = "exp_0042"
+
+    r = subprocess.run(
+        [str(HOOK_PATH)],
+        input=f'{{"session_id":"{sid}","hook_event_name":"SessionStart"}}'.encode(),
+        cwd=str(tmp_path), env=env, capture_output=True, timeout=10,
+    )
+    assert r.returncode == 0
+    import json
+    rec = json.loads((run / "inject" / "sessions" / f"{sid}.json").read_text())
+    assert rec.get("exp_id") == "exp_0042"
+    assert rec.get("has_evo_engaged") is False, (
+        f"subagent registration must not engage; got {rec!r}"
+    )
+
+
 def test_session_start_writes_null_exp_id_without_env(tmp_path):
     """No EVO_EXP_ID env → exp_id stays null (orchestrator-class)."""
     sid = "orchestrator-cc"

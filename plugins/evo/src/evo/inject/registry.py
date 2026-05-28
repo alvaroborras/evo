@@ -66,15 +66,31 @@ def register_session(
     *,
     exp_id: str | None = None,
     parent_session_id: str | None = None,
+    engage: bool = False,
 ) -> None:
     """Idempotent: write `<inject>/sessions/<sid>.json` if absent;
     update `last_seen_at` if present.
 
-    Merges non-null `exp_id` / `parent_session_id` into an existing
-    record when those fields are currently empty — covers the case
-    where the Rust binary registered at SessionStart with `exp_id=null`
-    and a later Python `auto_register_from_env` call sees `EVO_EXP_ID`
-    set (subagent dispatched into an experiment after registration).
+    Merges non-null `parent_session_id` into an existing record when
+    that field is currently empty.
+
+    `exp_id` merge is restricted: a non-null `exp_id` is only merged
+    onto a record that is NOT an engaged orchestrator. claude-code and
+    codex inherit the parent's CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID
+    when spawning subagents, so a subagent's `auto_register_from_env`
+    resolves to the orchestrator's sid and would otherwise stamp
+    `EVO_EXP_ID` onto the orchestrator record — re-classifying it as a
+    subagent and making `evo direct` skip it (cli.py skipped_subagent).
+    Only stamp `exp_id` when the existing record never engaged (so it's
+    a genuine subagent-first registration), never onto an engaged
+    orchestrator.
+
+    `engage=True` marks the session as evo-engaged at registration — used
+    by the SessionStart / orchestrator-process registration paths (Rust
+    binary, hermes plugin) where the registering process IS the
+    orchestrator. Engagement is refused for subagent registrations
+    (non-null `exp_id`): a subagent must never engage the loop on its own.
+
     Never clobbers a non-null existing value.
 
     Caller is responsible for only calling this when there's an active
@@ -83,6 +99,7 @@ def register_session(
     ensure_dirs(root)
     path = session_file(root, session_id)
     now = _now_iso()
+    is_subagent = exp_id is not None
     if path.exists():
         try:
             data = json.loads(path.read_text())
@@ -90,20 +107,48 @@ def register_session(
             data = None
         if data is not None:
             data["last_seen_at"] = now
-            # Merge-only: fill in fields that are currently null.
-            if exp_id is not None and not data.get("exp_id"):
-                data["exp_id"] = exp_id
-            if parent_session_id is not None and not data.get("parent_session_id"):
-                data["parent_session_id"] = parent_session_id
             # Ensure engagement + optimize_mode fields exist on records
             # written by older code paths (e.g. the Rust binary's v1
-            # schema without these fields).
+            # schema without these fields). Do this BEFORE the exp_id
+            # merge so the engaged-orchestrator guard below sees the
+            # real value.
             data.setdefault("has_evo_engaged", False)
             data.setdefault("engaged_at", None)
             data.setdefault("optimize_mode", False)
             data.setdefault("optimize_mode_at", None)
+            # Merge-only: fill in fields that are currently null.
+            # exp_id is special: never stamp a subagent's exp_id onto an
+            # already-engaged orchestrator record (the inherited-session-id
+            # case). That would mis-classify the orchestrator as a
+            # subagent and make `evo direct` skip it.
+            if (
+                exp_id is not None
+                and not data.get("exp_id")
+                and not data.get("has_evo_engaged")
+            ):
+                data["exp_id"] = exp_id
+            if parent_session_id is not None and not data.get("parent_session_id"):
+                data["parent_session_id"] = parent_session_id
+            # Orchestrator engagement on a re-registration (e.g. a resumed
+            # chat whose SessionStart re-fires). Only engage genuine
+            # orchestrators — never a record carrying an exp_id, and never
+            # the incoming subagent registration.
+            transitioned = False
+            if (
+                engage
+                and not is_subagent
+                and not data.get("exp_id")
+                and not data.get("has_evo_engaged")
+            ):
+                data["has_evo_engaged"] = True
+                data["engaged_at"] = now
+                transitioned = True
             atomic_write_json(path, data)
+            if transitioned:
+                from .queue import init_offset_to_latest
+                init_offset_to_latest(root, session_id)
             return
+    engaged = bool(engage and not is_subagent)
     data = {
         "schema_version": REGISTRY_SCHEMA_VERSION,
         "session_id": session_id,
@@ -113,8 +158,8 @@ def register_session(
         "last_seen_at": now,
         "exp_id": exp_id,
         "parent_session_id": parent_session_id,
-        "has_evo_engaged": False,
-        "engaged_at": None,
+        "has_evo_engaged": engaged,
+        "engaged_at": now if engaged else None,
         # v0.4.5+: optimize_mode tags a session as the orchestrator
         # currently driving /evo:optimize. Set automatically when the
         # user invokes /optimize (UserPromptSubmit pattern-match in
@@ -247,6 +292,8 @@ def mark_engaged(root: Path, session_id: str) -> bool:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return False
+    if data.get("exp_id"):
+        return False  # subagent — never engage the loop on its own
     if data.get("has_evo_engaged"):
         return False
     data["has_evo_engaged"] = True
