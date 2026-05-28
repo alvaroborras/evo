@@ -61,6 +61,14 @@ HEALTHY_UPTIME_SECONDS = 120
 # Wait this long for the child to exit after SIGTERM before SIGKILL.
 SHUTDOWN_GRACE_SECONDS = 5.0
 
+# Portable stop signal. A caller drops this file under <root>/.evo/ to ask
+# the supervisor to shut down cleanly. Needed because on Windows an external
+# signal is an uncatchable hard kill (TerminateProcess) — the SIGTERM handler
+# never runs, so without the sentinel the supervisor can't tear its child
+# down and remove its pid files on Windows.
+SHUTDOWN_SENTINEL_NAME = "supervisor.shutdown"
+SHUTDOWN_POLL_SECONDS = 0.25
+
 
 _shutdown_requested = threading.Event()
 
@@ -126,6 +134,21 @@ def _handle_shutdown_signal(_signum, _frame) -> None:
             pass
 
 
+def _watch_shutdown_sentinel(sentinel: Path) -> None:
+    """Trigger a clean shutdown when the sentinel file appears.
+
+    This is the cross-platform stop path. On POSIX the SIGTERM/SIGINT
+    handlers already cover it; on Windows they can't (an external signal is
+    a hard TerminateProcess that bypasses Python handlers), so this watcher
+    is what lets the supervisor run its cleanup and exit 0 on Windows.
+    """
+    while not _shutdown_requested.is_set():
+        if sentinel.exists():
+            _handle_shutdown_signal(None, None)
+            return
+        time.sleep(SHUTDOWN_POLL_SECONDS)
+
+
 def _resolve_root() -> Path:
     raw = os.environ.get("EVO_SUPERVISOR_ROOT") or os.getcwd()
     return Path(raw).resolve()
@@ -153,6 +176,7 @@ def main() -> int:
     dashboard_dead = edir / "dashboard.dead"
     dashboard_log = edir / "dashboard.log"
     supervisor_log = edir / "supervisor.log"
+    shutdown_sentinel = edir / SHUTDOWN_SENTINEL_NAME
 
     # Single-supervisor guard via the workspace's existing lock pattern.
     # If acquisition times out, another supervisor is already running.
@@ -178,10 +202,18 @@ def main() -> int:
             sup_logger.info(f"supervisor starting pid={os.getpid()} root={root}")
             supervisor_pid_file.write_text(str(os.getpid()), encoding="utf-8")
             dashboard_dead.unlink(missing_ok=True)
+            # Clear any stale sentinel from a previous run so the watcher
+            # below doesn't shut us down the instant we start.
+            shutdown_sentinel.unlink(missing_ok=True)
 
             signal.signal(signal.SIGTERM, _handle_shutdown_signal)
             if os.name != "nt":
                 signal.signal(signal.SIGINT, _handle_shutdown_signal)
+            threading.Thread(
+                target=_watch_shutdown_sentinel,
+                args=(shutdown_sentinel,),
+                daemon=True,
+            ).start()
 
             failure_count = 0
             first_failure_at = 0.0
@@ -290,6 +322,7 @@ def main() -> int:
                         sup_logger.error(f"error stopping dashboard: {exc}")
                 dashboard_pid_file.unlink(missing_ok=True)
                 supervisor_pid_file.unlink(missing_ok=True)
+                shutdown_sentinel.unlink(missing_ok=True)
                 sup_logger.info("supervisor exiting")
             return 0
     except LockTimeoutError:

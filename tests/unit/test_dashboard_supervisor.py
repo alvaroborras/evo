@@ -73,13 +73,37 @@ def _wait_for(predicate, timeout: float = 5.0) -> bool:
     return False
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Hard-kill a process and its children — last-resort teardown. On
+    Windows terminating a parent doesn't kill its children, so use
+    `taskkill /T` to take down the whole tree (otherwise the dashboard
+    grandchild keeps the temp dir's log file open and rmtree fails)."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 class TestSupervisorLifecycle(unittest.TestCase):
     """Spawn supervisor, verify it spawns dashboard + writes logs + cleans
     up on SIGTERM. Each test gets a fresh workspace + port so they can
     run in parallel."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors: belt-and-suspenders on Windows, where a
+        # lingering child handle would otherwise make rmtree raise at
+        # teardown. _shutdown() should release handles first; this keeps a
+        # stray one from failing an otherwise-passing test.
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self._tmp.name).resolve()
         _make_workspace(self.root)
         self.port = _pick_free_port()
@@ -87,12 +111,26 @@ class TestSupervisorLifecycle(unittest.TestCase):
 
     def tearDown(self):
         if self._sup_proc and self._sup_proc.poll() is None:
-            self._sup_proc.terminate()
-            try:
-                self._sup_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._sup_proc.kill()
+            self._shutdown(self._sup_proc)
         self._tmp.cleanup()
+
+    def _shutdown(self, proc: subprocess.Popen, timeout: float = 10.0) -> int | None:
+        """Clean cross-platform stop: drop the shutdown sentinel so the
+        supervisor tears down its child dashboard and exits 0. Falls back to
+        a process-tree kill if it doesn't exit in time. Returns the exit
+        code (or None if it had to be force-killed)."""
+        from evo.dashboard_supervisor import SHUTDOWN_SENTINEL_NAME
+        try:
+            (self.root / ".evo" / SHUTDOWN_SENTINEL_NAME).write_text(
+                "stop\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            return proc.poll()
 
     def _start_supervisor(self) -> subprocess.Popen:
         env = {
@@ -123,13 +161,34 @@ class TestSupervisorLifecycle(unittest.TestCase):
         self.assertTrue(_wait_for(
             lambda: (edir / "dashboard.log").stat().st_size > 0
         ))
-        sup.terminate()
-        sup.wait(timeout=5)
+        self._shutdown(sup)
 
+    def test_shutdown_sentinel_cleans_up_pid_files(self):
+        """Dropping the shutdown sentinel → child terminated → finally block
+        runs → pid files removed, exit 0. This is the portable stop path —
+        the only one that works on Windows, where an external signal is an
+        uncatchable hard kill (TerminateProcess)."""
+        sup = self._start_supervisor()
+        edir = self.root / ".evo"
+        self.assertTrue(_wait_for_file(edir / "supervisor.pid"))
+        self.assertTrue(_wait_for_file(edir / "dashboard.pid"))
+        rc = self._shutdown(sup)
+        self.assertEqual(rc, 0)
+        self.assertFalse((edir / "supervisor.pid").exists(),
+                         "supervisor.pid must be removed on clean shutdown")
+        self.assertFalse((edir / "dashboard.pid").exists(),
+                         "dashboard.pid must be removed on clean shutdown")
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows can't deliver a catchable SIGTERM to another process "
+        "(TerminateProcess is a hard kill); the sentinel path above covers "
+        "clean shutdown cross-platform.",
+    )
     def test_sigterm_cleans_up_pid_files(self):
-        """SIGTERM to supervisor → child terminated → finally block runs
-        → pid files removed. The lock file stays (it's the file the
-        portalocker context manager held; flock auto-released)."""
+        """POSIX: SIGTERM → handler sets the flag + terminates the child →
+        finally block runs → pid files removed, exit 0. The lock file stays
+        (the portalocker context manager held it; flock auto-released)."""
         sup = self._start_supervisor()
         edir = self.root / ".evo"
         self.assertTrue(_wait_for_file(edir / "supervisor.pid"))
@@ -167,8 +226,7 @@ class TestSupervisorLifecycle(unittest.TestCase):
 
         # First supervisor unaffected.
         self.assertIsNone(sup1.poll(), "first supervisor must keep running")
-        sup1.terminate()
-        sup1.wait(timeout=5)
+        self._shutdown(sup1)
 
 
 class TestSupervisorBackoffOnCrashLoop(unittest.TestCase):

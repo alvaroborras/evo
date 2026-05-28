@@ -978,9 +978,37 @@ def _read_status(root: Path, exp_id: str) -> str:
     return p.read_text(encoding="utf-8").strip()
 
 
+def _win_pid_alive(pid: int) -> bool:
+    """Windows liveness probe. os.kill(pid, 0) is unusable here — signal 0
+    is CTRL_C_EVENT on Windows, not a "does this process exist" check — so
+    query the OS directly: open the process and ask whether its handle is
+    still un-signaled (WAIT_TIMEOUT) vs. signaled/exited (WAIT_OBJECT_0)."""
+    import ctypes
+
+    SYNCHRONIZE = 0x00100000
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    WAIT_TIMEOUT = 0x102
+    ERROR_ACCESS_DENIED = 5
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+    if not handle:
+        # Can't open: access-denied means the process exists but isn't ours
+        # (alive); anything else (e.g. invalid parameter) means no such pid.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -990,8 +1018,6 @@ def _is_pid_alive(pid: int) -> bool:
         # pid exists but isn't ours — treat as alive
         return True
     except OSError:
-        # Windows: os.kill(pid, 0) on a dead pid raises generic OSError
-        # (errno EINVAL from OpenProcess), not ProcessLookupError.
         return False
 
 
@@ -1339,7 +1365,10 @@ def cmd_abort(args: argparse.Namespace) -> int:
     if not _is_pid_alive(pid):
         print(f"{args.exp_id}: driver PID {pid} already not alive")
         return 0
-    sig = signal.SIGKILL if args.force else signal.SIGTERM
+    # Windows has no SIGKILL; there os.kill(pid, SIGTERM) already maps to
+    # TerminateProcess (a hard kill), so SIGTERM is the forceful signal.
+    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+    sig = sigkill if args.force else signal.SIGTERM
     try:
         os.kill(pid, sig)
     except ProcessLookupError:
@@ -1362,7 +1391,7 @@ def cmd_abort(args: argparse.Namespace) -> int:
             return 0
         _time.sleep(0.25)
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, sigkill)
         print(
             f"{args.exp_id}: driver PID {pid} did not exit in {args.timeout}s; "
             f"escalated to SIGKILL"
@@ -3272,28 +3301,60 @@ def cmd_gc(args: argparse.Namespace) -> int:
 def _stop_dashboard(root: Path) -> None:
     """Stop the background dashboard if running.
 
-    Signals the supervisor first so it doesn't respawn the dashboard
-    mid-stop, then SIGTERMs the dashboard directly as a fallback (in
-    case the supervisor crashed but the dashboard is still up — e.g.
-    older install without a supervisor).
+    Asks the supervisor to shut down via the shutdown sentinel first — the
+    only portable mechanism, since on Windows an external SIGTERM is an
+    uncatchable hard kill that would orphan the dashboard child. On POSIX
+    also sends SIGTERM as a fast path. Falls back to signalling the
+    dashboard directly if the supervisor already died (older installs).
     """
     import signal as _signal
+    import time as _time
+    from .dashboard_supervisor import SHUTDOWN_SENTINEL_NAME
+
     edir = evo_dir(root)
     supervisor_pid_file = edir / "supervisor.pid"
     pid_file = edir / "dashboard.pid"
     port_file = edir / "dashboard.port"
     dead_sentinel = edir / "dashboard.dead"
-    for pidfile in (supervisor_pid_file, pid_file):
-        if not pidfile.exists():
-            continue
+    shutdown_sentinel = edir / SHUTDOWN_SENTINEL_NAME
+
+    sup_pid = None
+    if supervisor_pid_file.exists():
         try:
-            pid = int(pidfile.read_text().strip())
-            os.kill(pid, _signal.SIGTERM)
+            sup_pid = int(supervisor_pid_file.read_text().strip())
+        except (OSError, ValueError):
+            sup_pid = None
+
+    if sup_pid:
+        # Clean shutdown: the supervisor watches this file, kills its child,
+        # and removes its own pid files — same path on every OS.
+        try:
+            shutdown_sentinel.write_text("stop\n", encoding="utf-8")
+        except OSError:
+            pass
+        if os.name != "nt":
+            try:
+                os.kill(sup_pid, _signal.SIGTERM)
+            except OSError:
+                pass
+        deadline = _time.time() + 6.0
+        while _time.time() < deadline and _is_pid_alive(sup_pid):
+            _time.sleep(0.1)
+        if _is_pid_alive(sup_pid):
+            try:  # last resort so it can't keep respawning the dashboard
+                os.kill(sup_pid, getattr(_signal, "SIGKILL", _signal.SIGTERM))
+            except OSError:
+                pass
+
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), _signal.SIGTERM)
         except (OSError, ValueError):
             pass
-        pidfile.unlink(missing_ok=True)
-    port_file.unlink(missing_ok=True)
-    dead_sentinel.unlink(missing_ok=True)
+
+    for f in (supervisor_pid_file, pid_file, port_file, dead_sentinel,
+              shutdown_sentinel):
+        f.unlink(missing_ok=True)
 
 
 def cmd_reset(args: argparse.Namespace) -> int:

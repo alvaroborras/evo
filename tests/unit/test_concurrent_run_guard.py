@@ -134,7 +134,9 @@ class TestCmdAbort(unittest.TestCase):
         Whether it exits on SIGTERM or gets escalated to SIGKILL after
         the grace period depends on macOS zombie reaping timing; both
         outcomes mean the abort succeeded."""
-        child = subprocess.Popen(["sleep", "30"])
+        # Portable long-lived child (no dependency on a `sleep` binary,
+        # which Windows lacks).
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
             _make_active_node_with_pid(self.root, "exp_0001", 1, child.pid)
             rc, out, _ = self._run_abort("exp_0001", timeout=2.0)
@@ -171,14 +173,36 @@ class TestCmdAbort(unittest.TestCase):
 
     def test_abort_clean_when_pid_already_dead(self):
         """A pre-dead PID — abort reports it and exits 0 (no signal sent)."""
-        # Spawn and kill to get a guaranteed-dead PID.
-        child = subprocess.Popen(["true"])
+        # Spawn a process that exits immediately to get a guaranteed-dead PID
+        # (portable; no dependency on a `true` binary).
+        child = subprocess.Popen([sys.executable, "-c", ""])
         child.wait()
         dead_pid = child.pid
         _make_active_node_with_pid(self.root, "exp_0004", 1, dead_pid)
         rc, out, _ = self._run_abort("exp_0004")
         self.assertEqual(rc, 0)
         self.assertIn("already not alive", out)
+
+
+class TestIsPidAlive(unittest.TestCase):
+    """_is_pid_alive must be correct on every OS. On Windows os.kill(pid, 0)
+    is CTRL_C_EVENT, not a liveness probe, so the helper has a dedicated
+    native path — exercise both live and dead PIDs here on whatever OS runs."""
+
+    def test_live_process_reports_alive(self):
+        from evo.cli import _is_pid_alive
+        self.assertTrue(_is_pid_alive(os.getpid()))
+
+    def test_dead_process_reports_not_alive(self):
+        from evo.cli import _is_pid_alive
+        child = subprocess.Popen([sys.executable, "-c", ""])
+        child.wait()
+        self.assertFalse(_is_pid_alive(child.pid))
+
+    def test_nonpositive_pid_is_not_alive(self):
+        from evo.cli import _is_pid_alive
+        self.assertFalse(_is_pid_alive(0))
+        self.assertFalse(_is_pid_alive(-1))
 
 
 class TestSdkActiveRunsRegistry(unittest.TestCase):
