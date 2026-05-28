@@ -534,6 +534,17 @@ def _drive_smoke(
     # `printenv` / `$VAR` references inside install bash see them. Build
     # env_export once; reuse for drive_cmd below.
     env_export = "".join(f'export {k}="{v}"; ' for k, v in env_keys.items() if v)
+    # DEBUG (opt-in via EVO_RELEASE_SMOKE_INJECT_DEBUG=1 on the host running
+    # pytest): turn on the inject-pipeline trace inside the sandbox so the
+    # agent's hook subprocesses (Rust evo-hook-drain → Python evo-drain) log
+    # every gate/fence/handoff/emit/offset decision to a retrievable file.
+    # Inherited by the agent process from drive_cmd's env_export, hence by
+    # its hook subprocesses.
+    if os.environ.get("EVO_RELEASE_SMOKE_INJECT_DEBUG"):
+        env_export += (
+            'export EVO_DRAIN_DEBUG=1; '
+            'export EVO_DRAIN_DEBUG_LOG=/tmp/evo-drain-debug.log; '
+        )
     for step in install_steps:
         h.run(f"{env_export}{step}", timeout=600)
 
@@ -746,6 +757,15 @@ def _drive_smoke(
         h.run("echo '--- agent.log size + tail 100 ---'; "
               "wc -l /tmp/agent.log; "
               "echo; tail -100 /tmp/agent.log",
+              must_succeed=False, timeout=10)
+
+    # DEBUG: dump the inject-pipeline trace from inside the sandbox so we can
+    # see, hook-by-hook, why the directive did or didn't drain (Rust gate/
+    # fence/handoff + Python emit/offset). Always runs when debug is on,
+    # regardless of pass/fail, so a failing run still yields the trace.
+    if os.environ.get("EVO_RELEASE_SMOKE_INJECT_DEBUG"):
+        h.run(f"echo '=== INJECT DEBUG TRACE [{host}] (/tmp/evo-drain-debug.log) ==='; "
+              "cat /tmp/evo-drain-debug.log 2>&1 || echo '(no debug log — hooks never fired with EVO_DRAIN_DEBUG)'",
               must_succeed=False, timeout=10)
 
     consumed_by = _verify_directive_consumed(h, ws_root, directive_id)

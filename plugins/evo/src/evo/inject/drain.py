@@ -45,17 +45,24 @@ _SESSION_START_EVENTS = ("SessionStart", "sessionStart")
 
 
 def _drain_debug(**fields) -> None:
-    """Append a diagnostic line to ~/.cursor/evo-drain.log, but only when the
-    opt-in sentinel ~/.cursor/.evo-drain-debug exists (or EVO_DRAIN_DEBUG is
-    set). Used to diagnose why a directive isn't reaching a Cursor IDE
-    session — shows the hook payload shape and where the drain decided to
-    bail. Never logs in normal operation; failures are swallowed."""
+    """Append a diagnostic JSON line tracing this drain invocation's decisions.
+
+    Opt-in: only writes when EVO_DRAIN_DEBUG is set (non-empty) or the legacy
+    sentinel ~/.cursor/.evo-drain-debug exists. Log path is EVO_DRAIN_DEBUG_LOG
+    or, by default, $HOME/.evo-drain.log — the SAME file the Rust evo-hook-drain
+    binary writes to, so a single tail shows the full per-hook trace across both
+    halves of the pipeline (Rust gate/fence → Python emit/offset). Shows where
+    the drain decided to bail and which envelope it emitted. Never logs in
+    normal operation; failures are swallowed."""
     try:
         sentinel = Path.home() / ".cursor" / ".evo-drain-debug"
         if not sentinel.exists() and not os.environ.get("EVO_DRAIN_DEBUG"):
             return
-        rec = {"ts": dt.datetime.now().isoformat(timespec="seconds"), **fields}
-        log = Path.home() / ".cursor" / "evo-drain.log"
+        log_env = os.environ.get("EVO_DRAIN_DEBUG_LOG")
+        log = Path(log_env) if log_env else (Path.home() / ".evo-drain.log")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        rec = {"ts": dt.datetime.now().isoformat(timespec="seconds"),
+               "src": "python", "pid": os.getpid(), **fields}
         with log.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
     except Exception:  # noqa: BLE001 — diagnostics must never break the hook
@@ -619,6 +626,9 @@ def drain_session(root: Path, session_id: str, host: str | None = None, hook_eve
     # Hard-deny on odd-numbered violations (1, 3, 5, …); even ones pass.
     # Short-circuits the normal emit — agent sees the deny + banner.
     if _should_policy_block(root, session_id, sess, host, hook_event, payload):
+        _drain_debug(stage="policy_block", host=host, hook_event=hook_event,
+                     session=session_id[:12], pending_text_len=len(text),
+                     note="deny emitted; marker+offset preserved (directive NOT delivered)")
         sys.stdout.write(json.dumps(_policy_block_envelope(host), separators=(",", ":")))
         # Don't unlink marker / advance offset on a policy block — the
         # inject directive (if any) hasn't actually been delivered to
@@ -650,8 +660,14 @@ def drain_session(root: Path, session_id: str, host: str | None = None, hook_eve
         # `evo direct` injections aren't dropped when the stop hook
         # fires. The nudge envelope still drives self-continuation.
         combined = (text + "\n\n" + nudge_text) if text else nudge_text
+        _drain_debug(stage="emit", host=host, hook_event=hook_event,
+                     session=session_id[:12], envelope="stop_nudge+directive",
+                     directive_len=len(text), combined_len=len(combined))
         emit_for_host(host, hook_event, combined, payload)
     else:
+        _drain_debug(stage="emit", host=host, hook_event=hook_event,
+                     session=session_id[:12], envelope="directive_only",
+                     directive_len=len(text))
         emit_for_host(host, hook_event, text, payload)
 
     # L1 ACK: record delivery for each event so `evo direct status <id>`
@@ -667,6 +683,9 @@ def drain_session(root: Path, session_id: str, host: str | None = None, hook_eve
             workspace_id=new_workspace_offset,
             exp_id=new_exp_offset,
         )
+        _drain_debug(stage="offset_advanced", host=host, hook_event=hook_event,
+                     session=session_id[:12], workspace_id=new_workspace_offset,
+                     exp_id=new_exp_offset)
     marker.unlink(root, session_id)
     return 0
 

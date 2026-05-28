@@ -25,6 +25,33 @@ fn emit_ok() -> ! {
     process::exit(0);
 }
 
+/// Append a diagnostic JSON line tracing this hook invocation's decisions.
+/// Opt-in: only writes when EVO_DRAIN_DEBUG is set (non-empty). Log path is
+/// EVO_DRAIN_DEBUG_LOG or, by default, $HOME/.evo-drain.log. `fields` is a
+/// JSON fragment WITHOUT the surrounding braces (e.g. `"stage":"gate"`).
+/// Diagnostics must never break the hot path — all failures are swallowed.
+fn debug_log(fields: &str) {
+    if env::var("EVO_DRAIN_DEBUG").map(|v| !v.is_empty()).unwrap_or(false) == false {
+        return;
+    }
+    let path = env::var("EVO_DRAIN_DEBUG_LOG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{}/.evo-drain.log", home)
+        });
+    let line = format!(
+        "{{\"ts\":\"{}\",\"src\":\"rust\",\"pid\":{},{}}}\n",
+        iso8601_utc_now(),
+        process::id(),
+        fields
+    );
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn read_stdin() -> String {
     use std::io::IsTerminal;
     let mut buf = String::new();
@@ -428,6 +455,12 @@ fn main() {
 
     let sessions_file = run_dir.join("inject").join("sessions").join(format!("{}.json", sid));
 
+    let subagent = is_subagent_context(&stdin_buf);
+    debug_log(&format!(
+        "\"stage\":\"entry\",\"sid\":\"{}\",\"host\":\"{}\",\"event\":\"{}\",\"subagent\":{},\"sess_exists\":{}",
+        sid, host, hook_event, subagent, sessions_file.is_file()
+    ));
+
     if hook_event == "SessionStart" {
         if !sessions_file.is_file() {
             // engage=true: SessionStart on the hook host IS the orchestrator
@@ -447,6 +480,7 @@ fn main() {
         }
         // Fall through to handoff: drain seeds offsets + emits empty
         // additionalContext envelope. Cheap and matches prior behavior.
+        debug_log("\"stage\":\"session_start_handoff\"");
         handoff_to_drain(&run_dir, &sid, host, &stdin_buf);
     }
 
@@ -469,7 +503,13 @@ fn main() {
 
     let marker = marker_exists(&run_dir, &sid);
     let opt_flag = optimize_flag_exists(&run_dir, &sid);
-    if !should_handoff(&hook_event, marker, opt_flag) {
+    let handoff = should_handoff(&hook_event, marker, opt_flag);
+    debug_log(&format!(
+        "\"stage\":\"gate\",\"event\":\"{}\",\"marker\":{},\"opt_flag\":{},\"should_handoff\":{}",
+        hook_event, marker, opt_flag, handoff
+    ));
+    if !handoff {
+        debug_log("\"stage\":\"fast_exit\",\"reason\":\"no_handoff\"");
         emit_ok();
     }
 
@@ -491,10 +531,15 @@ fn main() {
     // main-session hook (typically the orchestrator's next Stop or a
     // top-level Bash/Read call) consumes it and delivers as a new
     // user turn / additionalContext.
-    if is_subagent_context(&stdin_buf) {
+    if subagent {
+        debug_log("\"stage\":\"fast_exit\",\"reason\":\"subagent_fence\"");
         emit_ok();
     }
 
+    debug_log(&format!(
+        "\"stage\":\"handoff\",\"event\":\"{}\",\"marker\":{}",
+        hook_event, marker
+    ));
     handoff_to_drain(&run_dir, &sid, host, &stdin_buf);
 }
 
