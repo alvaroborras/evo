@@ -237,39 +237,6 @@ function commitDrainPeek(runDir, sessionId, peek) {
   }
   unlinkIfExists(markerFile(runDir, sessionId));
 }
-function drainSession(runDir, sessionId) {
-  const sess = getSession(runDir, sessionId);
-  if (!sess) {
-    unlinkIfExists(markerFile(runDir, sessionId));
-    return { text: null, newWorkspaceOffset: null, newExpOffset: null };
-  }
-  const expId = sess.exp_id;
-  let events = [];
-  let newWorkspaceOffset = null;
-  let newExpOffset = null;
-  if (expId) {
-    const lastId = readOffset(runDir, sessionId, "exp");
-    const newEvents = readEventsAfter(expEventsPath(runDir, expId), lastId);
-    events = newEvents;
-    if (newEvents.length > 0)
-      newExpOffset = newEvents[newEvents.length - 1].id;
-  } else {
-    const lastId = readOffset(runDir, sessionId, "workspace");
-    const newEvents = readEventsAfter(workspaceEventsPath(runDir), lastId);
-    events = newEvents;
-    if (newEvents.length > 0)
-      newWorkspaceOffset = newEvents[newEvents.length - 1].id;
-  }
-  const text = events.length > 0 ? formatDirectiveText(events) : null;
-  if (newWorkspaceOffset || newExpOffset) {
-    writeOffset(runDir, sessionId, {
-      workspaceId: newWorkspaceOffset,
-      expId: newExpOffset
-    });
-  }
-  unlinkIfExists(markerFile(runDir, sessionId));
-  return { text, newWorkspaceOffset, newExpOffset };
-}
 var POLICY_NUDGE_TEMPLATE = `[EVO POLICY]
 ` + `Preventative block. You may have strayed from /evo:optimize protocol.
 ` + `
@@ -768,21 +735,6 @@ var EvoPlugin = async ({ project, client }) => {
         return;
       const promptText = extractPromptTextFromParts(output?.parts);
       maybeMarkOptimizeFromPrompt(runDir, sessionID, "opencode", promptText);
-      const result = drainSession(runDir, sessionID);
-      if (!result.text)
-        return;
-      if (!Array.isArray(output.parts)) {
-        output.parts = [];
-      }
-      const messageID = input?.messageID ?? output?.message?.id ?? output.parts[0]?.messageID ?? "";
-      const partID = `prt_evo_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-      output.parts.unshift({
-        type: "text",
-        id: partID,
-        sessionID,
-        messageID,
-        text: result.text
-      });
     },
     "tool.execute.before": async (input, output) => {
       const runDir = ensureRegistered(input?.sessionID);
@@ -817,6 +769,32 @@ var EvoPlugin = async ({ project, client }) => {
         throw new Error(POLICY_NUDGE_TEMPLATE);
       }
     },
+    "tool.execute.after": async (input, output) => {
+      const sessionID = input?.sessionID;
+      if (!sessionID)
+        return;
+      const runDir = ensureRegistered(sessionID);
+      if (!runDir)
+        return;
+      const sess = getSession(runDir, sessionID);
+      if (!sess)
+        return;
+      if (!sess.exp_id && !sess.has_evo_engaged)
+        return;
+      const peek = peekDrainSession(runDir, sessionID);
+      if (!peek.text)
+        return;
+      if (typeof output?.output === "string") {
+        output.output = output.output ? output.output + `
+
+` + peek.text : peek.text;
+      } else if (output) {
+        output.output = peek.text;
+      } else {
+        return;
+      }
+      commitDrainPeek(runDir, sessionID, peek);
+    },
     event: async ({ event }) => {
       if (!event || event.type !== "session.idle")
         return;
@@ -827,17 +805,21 @@ var EvoPlugin = async ({ project, client }) => {
       if (!runDir)
         return;
       const sess = getSession(runDir, sessionID);
-      if (!sess || sess.exp_id || !sess.optimize_mode || !sess.autonomous)
+      if (!sess)
+        return;
+      const isSubagent = !!sess.exp_id;
+      if (!isSubagent && !sess.optimize_mode)
         return;
       if (!client || typeof client.session?.prompt !== "function")
         return;
       const peek = peekDrainSession(runDir, sessionID);
-      const nudge = maybeStopNudgeText(runDir, sessionID);
-      if (!nudge)
+      const nudge = isSubagent ? null : maybeStopNudgeText(runDir, sessionID);
+      const blocks = [peek.text, nudge].filter(Boolean);
+      if (blocks.length === 0)
         return;
-      const text = peek.text ? peek.text + `
+      const text = blocks.join(`
 
-` + nudge : nudge;
+`);
       try {
         await client.session.prompt({
           path: { id: sessionID },

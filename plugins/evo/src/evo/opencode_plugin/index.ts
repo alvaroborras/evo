@@ -20,7 +20,6 @@
 import {
   POLICY_NUDGE_TEMPLATE,
   commitDrainPeek,
-  drainSession,
   findEvoRunDir,
   formatDirectiveText,
   getSession,
@@ -93,24 +92,14 @@ export const EvoPlugin = async ({ project, client }: any) => {
       const promptText = extractPromptTextFromParts(output?.parts)
       maybeMarkOptimizeFromPrompt(runDir, sessionID, "opencode", promptText)
 
-      // Drain queued directives. On first fire the marker may not exist
-      // yet (just registered); drainSession is cheap on empty queues.
-      const result = drainSession(runDir, sessionID)
-      if (!result.text) return
-
-      if (!Array.isArray(output.parts)) {
-        output.parts = []
-      }
-      const messageID: string =
-        input?.messageID ?? output?.message?.id ?? output.parts[0]?.messageID ?? ""
-      const partID = `prt_evo_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
-      output.parts.unshift({
-        type: "text",
-        id: partID,
-        sessionID,
-        messageID,
-        text: result.text,
-      })
+      // Directives are NOT drained here. `chat.message` fires only at
+      // user-message creation, never for a mid-run `evo direct`, so the
+      // directive's text would never ride this hook. Worse, a consume-once
+      // drain here advances the offset + unlinks the marker on unrelated
+      // message creations (including subagent prompts), silently discarding
+      // the directive before the model ever sees it. Delivery happens in the
+      // `event` (session.idle) handler via client.session.prompt — the one
+      // channel that reaches the model mid-run — with peek + commit-after-send.
     },
 
     "tool.execute.before": async (input: any, output: any) => {
@@ -163,11 +152,55 @@ export const EvoPlugin = async ({ project, client }: any) => {
       }
     },
 
+    "tool.execute.after": async (input: any, output: any) => {
+      // PRIMARY mid-run directive delivery. In single-shot `opencode run`
+      // the orchestrator runs an entire /optimize round-loop in ONE turn
+      // (plan -> spawn subagents -> `evo wait` -> plan next round), so
+      // session.idle never fires mid-run and can't surface a mid-run
+      // `evo direct`. tool.execute hooks DO fire on every tool call during
+      // the turn — including when `evo wait` returns, exactly when the
+      // orchestrator is about to plan the next round — so we surface queued
+      // directives by appending them to the tool result the model reads next.
+      const sessionID: string | undefined = input?.sessionID
+      if (!sessionID) return
+      const runDir = ensureRegistered(sessionID)
+      if (!runDir) return
+      const sess = getSession(runDir, sessionID) as any
+      if (!sess) return
+      // Deliver to the engaged orchestrator or a subagent with a targeted
+      // directive — the same set `evo direct` fans out to.
+      if (!sess.exp_id && !sess.has_evo_engaged) return
+
+      // Peek (don't pop) so a delivery that never lands isn't lost. Append
+      // the directive (it carries the [EVO DIRECTIVE id=...] banner + the
+      // `evo ack` instruction) to this tool's result, then commit the drain
+      // so it isn't re-appended to every subsequent tool call.
+      const peek = peekDrainSession(runDir, sessionID)
+      if (!peek.text) return
+      if (typeof output?.output === "string") {
+        output.output = output.output
+          ? output.output + "\n\n" + peek.text
+          : peek.text
+      } else if (output) {
+        output.output = peek.text
+      } else {
+        return // nowhere to write — leave queued for the next tool call
+      }
+      commitDrainPeek(runDir, sessionID, peek)
+    },
+
     event: async ({ event }: any) => {
-      // Always-fire stop nudge on session.idle (the opencode analogue of
-      // claude-code Stop). When the orchestrator session is in optimize_mode,
-      // inject a follow-up message via client.session.prompt so the agent
-      // keeps driving the /optimize loop. Escape hatch: `evo exit-optimize-mode`.
+      // session.idle is the opencode turn boundary (the analogue of
+      // claude-code Stop). Two INDEPENDENT jobs, both delivered via
+      // client.session.prompt — the one channel that reaches the model
+      // mid-run (chat.message can't; it fires only at user-message creation):
+      //   1. Deliver queued mid-run directives (steering). Fires whenever the
+      //      engaged orchestrator is in optimize_mode — NOT gated on autonomous,
+      //      and NOT dependent on a nudge being present. A subagent session
+      //      delivers directives targeted at it (its own exp queue), no nudge.
+      //   2. Stop-nudge to keep the /optimize loop going. Orchestrator only,
+      //      and only when autonomous (maybeStopNudgeText self-gates on it).
+      // Escape hatch: `evo exit-optimize-mode`.
       if (!event || event.type !== "session.idle") return
       const sessionID: string | undefined =
         event.properties?.sessionID ?? event.sessionID ?? event.session_id
@@ -175,20 +208,26 @@ export const EvoPlugin = async ({ project, client }: any) => {
       const runDir = findEvoRunDir(project?.directory)
       if (!runDir) return
       const sess = getSession(runDir, sessionID) as any
-      if (!sess || sess.exp_id || !sess.optimize_mode || !sess.autonomous) return
+      if (!sess) return
+      const isSubagent = !!sess.exp_id
+      // A non-optimize-mode orchestrator has nothing to deliver. Subagents
+      // still receive directives targeted at them regardless of the flag.
+      if (!isSubagent && !sess.optimize_mode) return
 
-      // Bail BEFORE any state mutation if we can't actually deliver.
-      // session.prompt is the only delivery channel here; if it's
-      // missing, consuming queued directives would silently lose them.
+      // session.prompt is the only delivery channel here; if it's missing,
+      // peeking-then-committing would silently lose the directive.
       if (!client || typeof client.session?.prompt !== "function") return
 
-      // Peek (don't pop) so a failed injection doesn't consume the
-      // directive. Commit offsets + unlink marker only after the
-      // session.prompt call succeeds.
+      // Peek (don't pop) so a failed send doesn't consume the directive.
+      // Commit offsets + unlink the marker only after the send succeeds.
       const peek = peekDrainSession(runDir, sessionID)
-      const nudge = maybeStopNudgeText(runDir, sessionID)
-      if (!nudge) return
-      const text = peek.text ? peek.text + "\n\n" + nudge : nudge
+      const nudge = isSubagent ? null : maybeStopNudgeText(runDir, sessionID)
+
+      // Deliver if EITHER a directive or a nudge is pending — directive
+      // delivery must not depend on the nudge being present.
+      const blocks = [peek.text, nudge].filter(Boolean)
+      if (blocks.length === 0) return
+      const text = blocks.join("\n\n")
 
       try {
         await client.session.prompt({
@@ -197,11 +236,11 @@ export const EvoPlugin = async ({ project, client }: any) => {
             parts: [{ type: "text", text }],
           },
         })
-        // Success — now commit the drain.
+        // Success — now commit the drain (advance offset, unlink marker).
         commitDrainPeek(runDir, sessionID, peek)
       } catch (_e) {
-        // Don't crash the agent on a stop-nudge failure. Directives
-        // stay queued; next session.idle (or chat.message) will retry.
+        // Don't crash the agent on a delivery failure. Directives stay
+        // queued (not committed); the next session.idle retries.
       }
     },
   }
