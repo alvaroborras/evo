@@ -205,6 +205,8 @@ class TestOpencodeStopNudgeAndPolicyState(unittest.TestCase):
                 unmarkOptimizeMode,
                 markAutonomous,
                 unmarkAutonomous,
+                markSubagentsOnly,
+                unmarkSubagentsOnly,
                 maybeMarkOptimizeFromPrompt,
                 shouldPolicyBlock,
                 maybeStopNudgeText,
@@ -228,6 +230,7 @@ class TestOpencodeStopNudgeAndPolicyState(unittest.TestCase):
         result = self._bun(textwrap.dedent("""
             registerSession(runDir, "oc1", "opencode")
             markOptimizeMode(runDir, "oc1")
+            markSubagentsOnly(runDir, "oc1")  // deny-gate is opt-in
             const outs = []
             for (let i = 0; i < 5; i++) {
                 outs.push(shouldPolicyBlock(runDir, "oc1", "edit_file",
@@ -258,6 +261,19 @@ class TestOpencodeStopNudgeAndPolicyState(unittest.TestCase):
             registerSession(runDir, "oc_casual", "opencode")
             // optimize_mode NOT set
             const out = shouldPolicyBlock(runDir, "oc_casual", "edit_file", {})
+            process.stdout.write(JSON.stringify(out))
+        """))
+        self.assertEqual(result, False)
+
+    def test_optimize_mode_without_subagents_only_allows_edits(self):
+        """Default flip: /optimize alone keeps optimize_mode but allows
+        orchestrator edits. The deny-gate only fires once subagents-only
+        is armed."""
+        result = self._bun(textwrap.dedent("""
+            registerSession(runDir, "oc1", "opencode")
+            markOptimizeMode(runDir, "oc1")
+            // subagents_only NOT armed
+            const out = shouldPolicyBlock(runDir, "oc1", "edit_file", {file_path: "/f"})
             process.stdout.write(JSON.stringify(out))
         """))
         self.assertEqual(result, False)

@@ -118,6 +118,8 @@ def register_session(
             data.setdefault("optimize_mode_at", None)
             data.setdefault("autonomous", False)
             data.setdefault("autonomous_at", None)
+            data.setdefault("subagents_only", False)
+            data.setdefault("subagents_only_at", None)
             # Merge-only: fill in fields that are currently null.
             # exp_id is special: never stamp a subagent's exp_id onto an
             # already-engaged orchestrator record (the inherited-session-id
@@ -175,6 +177,14 @@ def register_session(
         # boundary instead of being force-continued until kill.
         "autonomous": False,
         "autonomous_at": None,
+        # v0.4.5+: subagents_only gates the policy deny (orchestrator can't
+        # edit files / run experiments by hand). Opt-in — set when the
+        # orchestrator runs `evo subagents-only on` (driven by the
+        # `subagents-only` /optimize param). Default off: a plain /optimize
+        # ALLOWS the orchestrator to edit directly; arm this to enforce the
+        # delegate-to-subagents discipline.
+        "subagents_only": False,
+        "subagents_only_at": None,
     }
     atomic_write_json(path, data)
     # Seed the workspace offset to the current queue tail so this session
@@ -339,6 +349,52 @@ def unmark_autonomous(root: Path, session_id: str) -> bool:
         return False
     data["autonomous"] = False
     data["autonomous_at"] = None
+    try:
+        atomic_write_json(path, data)
+    except OSError:
+        return False
+    return True
+
+
+def mark_subagents_only(root: Path, session_id: str) -> bool:
+    """Flip `subagents_only` true — enforce the policy deny so the
+    orchestrator can't edit files / run experiments by hand (only subagents
+    do). Opt-in: set when the orchestrator runs `evo subagents-only on`.
+    Refuses subagents (exp_id). Returns True on the false→true transition."""
+    path = session_file(root, session_id)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if data.get("exp_id"):
+        return False  # subagent — not the orchestrator
+    if data.get("subagents_only"):
+        return False
+    data["subagents_only"] = True
+    data["subagents_only_at"] = _now_iso()
+    try:
+        atomic_write_json(path, data)
+    except OSError:
+        return False
+    return True
+
+
+def unmark_subagents_only(root: Path, session_id: str) -> bool:
+    """Flip `subagents_only` false — allow the orchestrator to edit again.
+    Used by `evo subagents-only off` and `evo exit-optimize-mode`."""
+    path = session_file(root, session_id)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not data.get("subagents_only"):
+        return False
+    data["subagents_only"] = False
+    data["subagents_only_at"] = None
     try:
         atomic_write_json(path, data)
     except OSError:

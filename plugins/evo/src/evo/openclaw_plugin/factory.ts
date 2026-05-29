@@ -45,11 +45,13 @@ import {
   markEngaged,
   parseDirectiveIds,
   markOptimizeMode,
+  markSubagentsOnly,
   maybeMarkOptimizeFromPrompt,
   maybeStopNudgeText,
   peekDrainSession,
   registerSession,
   unmarkAutonomous,
+  unmarkSubagentsOnly,
 } from "../opencode_plugin/drain.js"
 import * as crypto from "crypto"
 
@@ -260,14 +262,21 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       // on the actual command). Runs regardless of optimize_mode state.
       const cmd = (toolInput as any)?.command
       if (typeof cmd === "string") {
-        if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) ||
-            /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+        if (/^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+          unmarkAutonomous(ctx.runDir, ctx.sid)
+          unmarkSubagentsOnly(ctx.runDir, ctx.sid)
+        } else if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd)) {
           unmarkAutonomous(ctx.runDir, ctx.sid)
         } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
           markAutonomous(ctx.runDir, ctx.sid)
+        } else if (/^\s*evo\s+subagents-only\s+off\s*$/.test(cmd)) {
+          unmarkSubagentsOnly(ctx.runDir, ctx.sid)
+        } else if (/^\s*evo\s+subagents-only(\s+on)?\s*$/.test(cmd)) {
+          markSubagentsOnly(ctx.runDir, ctx.sid)
         }
       }
       if (!sess.optimize_mode) return
+      if (!sess.subagents_only) return  // deny-gate is opt-in; default allows
       if (!isDeniedInOptimizeMode(toolName, toolInput)) return
       if (incrementAndShouldBlock(ctx.runDir, ctx.sid, toolName)) {
         return { block: true, reason: POLICY_NUDGE_TEMPLATE }

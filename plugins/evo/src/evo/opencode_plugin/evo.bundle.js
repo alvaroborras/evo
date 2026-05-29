@@ -643,6 +643,32 @@ function unmarkAutonomous(runDir, sid) {
   atomicWriteJson(p, rec);
   return true;
 }
+function markSubagentsOnly(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (rec.exp_id)
+    return false;
+  if (rec.subagents_only)
+    return false;
+  rec.subagents_only = true;
+  rec.subagents_only_at = nowIso();
+  atomicWriteJson(p, rec);
+  return true;
+}
+function unmarkSubagentsOnly(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (!rec.subagents_only)
+    return false;
+  rec.subagents_only = false;
+  rec.subagents_only_at = null;
+  atomicWriteJson(p, rec);
+  return true;
+}
 var OPTIMIZE_PROMPT_RES = {
   opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
   openclaw: [
@@ -689,6 +715,8 @@ function shouldPolicyBlock(runDir, sid, toolName, toolInput) {
   if (sess.exp_id)
     return false;
   if (!sess.optimize_mode)
+    return false;
+  if (!sess.subagents_only)
     return false;
   if (!isDeniedInOptimizeMode(toolName, toolInput))
     return false;
@@ -771,10 +799,17 @@ var EvoPlugin = async ({ project, client }) => {
           if (markEngaged(runDir, sid)) {
             initOffsetToLatest(runDir, sid);
           }
-          if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) || /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+          if (/^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+            unmarkAutonomous(runDir, sid);
+            unmarkSubagentsOnly(runDir, sid);
+          } else if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd)) {
             unmarkAutonomous(runDir, sid);
           } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
             markAutonomous(runDir, sid);
+          } else if (/^\s*evo\s+subagents-only\s+off\s*$/.test(cmd)) {
+            unmarkSubagentsOnly(runDir, sid);
+          } else if (/^\s*evo\s+subagents-only(\s+on)?\s*$/.test(cmd)) {
+            markSubagentsOnly(runDir, sid);
           }
         }
       }

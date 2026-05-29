@@ -390,6 +390,33 @@ Document:
 - Benchmark gaming risks identified during the Goodhart check
 - Future experiment candidates (the non-picked dimensions from step 3)
 
+## 12a. Confirm how the optimize loop should run
+
+Ask the user once how they want `/evo:optimize` to behave. These are run-behavior defaults stored on the workspace; they don't affect discover itself. Ask as a single, light question (use your host's structured multi-choice tool if you have one; otherwise plain text), and make clear both are optional — the defaults apply if the user has no preference:
+
+- **Autonomous loop** — should evo's internal wiring keep the loop running on its own, re-engaging the agent at every turn boundary until the run stalls (`autonomous`)? Default off: evo does not auto-continue the loop.
+- **Orchestrator edits** — push every edit through subagents, steering the orchestrator away from editing directly (`subagents-only`)? Default off: the orchestrator may also edit directly if it chooses.
+
+**Pre-fill from the user's remembered choice.** Before asking, read their cross-project defaults and use each as the suggested answer (so a returning user just confirms):
+
+```bash
+evo defaults get autonomous --json        # → true | false | null
+evo defaults get subagents-only --json
+```
+
+If a value is non-null, present it as the default in the question (e.g. "autonomous was on last time — keep it?"). Always still ask — never apply a remembered value silently.
+
+Persist the answer to both the workspace (this project) and the user-level store (remembered for next project):
+
+```bash
+evo config set default-autonomous on|off
+evo config set default-subagents-only on|off
+evo defaults set autonomous on|off
+evo defaults set subagents-only on|off
+```
+
+If the user has no opinion and no remembered value exists, or you skip the question, leave both off — the defaults: the loop stops naturally after each round, and the orchestrator may edit directly. Do NOT infer these from the user's earlier free-form messages; only set `on` when the user clearly chooses it here. `/evo:optimize` reads these defaults at startup (workspace first, then user-level), and a bare-word `autonomous` / `subagents-only` on the invocation overrides the stored default for that run.
+
 ## 13. Report to the user
 
 End the skill by reporting in chat:

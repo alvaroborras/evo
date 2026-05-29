@@ -282,13 +282,23 @@ evo wait [--timeout SEC]      # block until any experiment reaches a
                               # exit 0 with one-line summary on transition,
                               # 124 on timeout.
 
+evo autonomous on|off         # arm/disarm the stop-nudge (keep-going
+                              # loop). Off by default. Run `on` when
+                              # /optimize was invoked with `autonomous`.
+
+evo subagents-only on|off     # arm/disarm the orchestrator-edit deny-gate.
+                              # Off by default (orchestrator edits allowed).
+                              # Run `on` when /optimize was invoked with
+                              # `subagents-only`.
+
 evo exit-optimize-mode        # halt the optimize-mode protocol for this
-                              # session: clears the safety nudge flag,
-                              # discards any `active` experiments, reports
-                              # orphan `evo run` PIDs, and prints the
-                              # remaining halt steps (host TaskStop for
-                              # subagents — evo can't reach the host
-                              # runtime — and any leftover stragglers).
+                              # session: clears optimize_mode + both opt-in
+                              # flags (autonomous, subagents-only), discards
+                              # any `active` experiments, reports orphan
+                              # `evo run` PIDs, and prints the remaining
+                              # halt steps (host TaskStop for subagents —
+                              # evo can't reach the host runtime — and any
+                              # leftover stragglers).
 ```
 
 `evo wait` is the primitive the orchestrator uses to block on subagent
@@ -296,18 +306,23 @@ results — replaces ad-hoc bash polling loops. `optimize_mode` is set
 automatically when the user invokes `/evo:optimize` (or the host's
 equivalent); no enter command needed.
 
-While `optimize_mode` is active, the runtime enforces:
-- File-mutation tools (Edit / Write / NotebookEdit, etc.) are denied on
+`optimize_mode` runs the protocol but enforces nothing on its own; the
+two enforcement behaviors are separate opt-ins armed by command:
+
+- **Stop-nudge** (after `evo autonomous on`): on `Stop` / `SubagentStop`,
+  the orchestrator is re-prompted with a continuation instruction (use
+  `evo wait` to block, plan the next round, etc.). The loop
+  self-suppresses if no new experiment commits between two consecutive
+  Stop fires (so the agent can actually stop when it's done). Without it,
+  the loop does not force-continue across turn boundaries.
+- **Orchestrator-edit deny-gate** (after `evo subagents-only on`):
+  file-mutation tools (Edit / Write / NotebookEdit, etc.) are denied on
   the 1st violation and every 5th after, with a banner reminding the
-  orchestrator to spawn subagents instead.
-- Bash commands that aren't `evo …`, a host-spawn (claude/codex/cursor-
-  agent/opencode/hermes/pi/openclaw), or read-only inspection (git, ls,
-  cat, find, grep, …) are denied on the same cadence.
-- On `Stop` / `SubagentStop`, the orchestrator is re-prompted with a
-  continuation instruction (use `evo wait` to block, plan the next
-  round, etc.). The loop self-suppresses if no new experiment commits
-  between two consecutive Stop fires (so the agent can actually stop
-  when it's done).
+  orchestrator to spawn subagents instead. Bash commands that aren't
+  `evo …`, a host-spawn (claude/codex/cursor-agent/opencode/hermes/pi/
+  openclaw), or read-only inspection (git, ls, cat, find, grep, …) are
+  denied on the same cadence. Subagent sessions (with an `exp_id`) are
+  never gated. Without it, orchestrator edits are allowed.
 
 ## Mid-run directives
 

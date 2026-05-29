@@ -55,6 +55,7 @@ Pass `optimize` parameters as `key=value` after the skill name:
 
 ```
 /evo:optimize subagents=3 budget=10 stall=3
+/evo:optimize subagents=3 autonomous
 ```
 
 | Parameter | Default | Description |
@@ -62,6 +63,10 @@ Pass `optimize` parameters as `key=value` after the skill name:
 | `subagents` | 5 | Parallel subagents per round |
 | `budget` | 5 | Max iterations each subagent can run within its branch |
 | `stall` | 5 | Consecutive rounds with no improvement before auto-stopping |
+| `autonomous` | off | Bare word. Keep driving the loop at every turn boundary until `stall` or interrupt |
+| `subagents-only` | off | Bare word. Nudge the orchestrator to delegate edits to subagents |
+
+`autonomous` and `subagents-only` are opt-in bare-word flags, not `key=value`. Without `autonomous`, the agent stops at a turn boundary after finishing a round; stop the loop with `evo autonomous off` or `evo exit-optimize-mode`. With `subagents-only`, the orchestrator's file-mutation tools (Edit/Write, mutating Bash) are denied on an alternating cadence — 1st attempt blocked, 2nd allowed, 3rd blocked, and so on — each block nudging it to delegate the edit; it is a nudge, not a hard block, and subagent edits are never gated. Lift it with `evo subagents-only off` or `evo exit-optimize-mode`.
 
 Invocation syntax is host-specific: `/evo:` on Claude Code, `$evo` on Codex, `/` skill menu on Cursor, natural language on Hermes, Opencode, OpenClaw, and Pi.
 

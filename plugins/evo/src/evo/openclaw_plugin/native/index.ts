@@ -39,12 +39,14 @@ import {
   isRegistered,
   markAutonomous,
   markEngaged,
+  markSubagentsOnly,
   maybeMarkOptimizeFromPrompt,
   parseDirectiveIds,
   maybeStopNudgeText,
   registerSession,
   shouldPolicyBlock,
   unmarkAutonomous,
+  unmarkSubagentsOnly,
 } from "../../opencode_plugin/drain.js"
 import * as crypto from "crypto"
 import * as fs from "fs"
@@ -243,11 +245,17 @@ export default {
         // `evo autonomous on|off` / `evo exit-optimize-mode` command.
         const cmd = (toolInput as any)?.command
         if (typeof cmd === "string") {
-          if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) ||
-              /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+          if (/^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+            unmarkAutonomous(ctx.runDir, ctx.sid)
+            unmarkSubagentsOnly(ctx.runDir, ctx.sid)
+          } else if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd)) {
             unmarkAutonomous(ctx.runDir, ctx.sid)
           } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
             markAutonomous(ctx.runDir, ctx.sid)
+          } else if (/^\s*evo\s+subagents-only\s+off\s*$/.test(cmd)) {
+            unmarkSubagentsOnly(ctx.runDir, ctx.sid)
+          } else if (/^\s*evo\s+subagents-only(\s+on)?\s*$/.test(cmd)) {
+            markSubagentsOnly(ctx.runDir, ctx.sid)
           }
         }
         if (shouldPolicyBlock(ctx.runDir, ctx.sid, toolName, toolInput)) {

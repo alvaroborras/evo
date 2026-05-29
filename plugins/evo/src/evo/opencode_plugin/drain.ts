@@ -55,6 +55,8 @@ export interface SessionRecord {
   optimize_mode_at?: string | null
   autonomous?: boolean
   autonomous_at?: string | null
+  subagents_only?: boolean
+  subagents_only_at?: string | null
 }
 
 export interface DrainResult {
@@ -915,6 +917,32 @@ export function unmarkAutonomous(runDir: string, sid: string): boolean {
   return true
 }
 
+/** Arm `subagents_only` (enforce the policy deny — orchestrator may not
+ * edit). Mirrors Python `mark_subagents_only`. Refuses subagents. */
+export function markSubagentsOnly(runDir: string, sid: string): boolean {
+  const p = sessionFile(runDir, sid)
+  const rec = readJsonOrNull<any>(p)
+  if (!rec) return false
+  if (rec.exp_id) return false
+  if (rec.subagents_only) return false
+  rec.subagents_only = true
+  rec.subagents_only_at = nowIso()
+  atomicWriteJson(p, rec)
+  return true
+}
+
+/** Disarm `subagents_only` (allow orchestrator edits). Mirrors Python. */
+export function unmarkSubagentsOnly(runDir: string, sid: string): boolean {
+  const p = sessionFile(runDir, sid)
+  const rec = readJsonOrNull<any>(p)
+  if (!rec) return false
+  if (!rec.subagents_only) return false
+  rec.subagents_only = false
+  rec.subagents_only_at = null
+  atomicWriteJson(p, rec)
+  return true
+}
+
 
 // `/optimize` prompt patterns per host. Mirrors `_OPTIMIZE_INVOCATION_PATTERNS`.
 // The leading `[\s"']*` tolerates wrapping quotes — `opencode run "..."` and
@@ -1007,6 +1035,7 @@ export function shouldPolicyBlock(
   if (!sess) return false
   if (sess.exp_id) return false
   if (!sess.optimize_mode) return false
+  if (!sess.subagents_only) return false  // opt-in: default allows orchestrator edits
   if (!isDeniedInOptimizeMode(toolName, toolInput)) return false
   return incrementAndShouldBlock(runDir, sid, toolName)
 }

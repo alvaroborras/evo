@@ -102,6 +102,7 @@ class TestOpenclawPiDenyGate(unittest.TestCase):
             const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
             const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
             rec.optimize_mode = true
+            rec.subagents_only = true  // deny-gate is opt-in
             fs.writeFileSync(sfile, JSON.stringify(rec))
 
             const ret = await handlers.tool_call(
@@ -152,6 +153,7 @@ class TestOpenclawPiDenyGate(unittest.TestCase):
             const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
             const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
             rec.optimize_mode = true
+            rec.subagents_only = true  // deny-gate is opt-in
             fs.writeFileSync(sfile, JSON.stringify(rec))
 
             const outcomes: boolean[] = []
@@ -299,6 +301,53 @@ class TestOpenclawPiDenyGate(unittest.TestCase):
                         "tool_call observing `evo autonomous on` must arm autonomous")
         self.assertEqual(result["calls_after"], 1,
                          "nudge fires once autonomous is armed")
+
+    def test_tool_call_observes_evo_subagents_only_on_then_denies(self):
+        """End-to-end opt-in: optimize_mode on but subagents_only OFF →
+        an orchestrator edit is ALLOWED; after the tool_call hook OBSERVES
+        `evo subagents-only on` (the in-process arm path, since pi has no
+        session env var), the orchestrator edit is DENIED. Proves
+        command-observation arming, not prompt prose."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            await handlers.session_start({}, {})
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
+            let rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            rec.optimize_mode = true
+            fs.writeFileSync(sfile, JSON.stringify(rec))
+
+            // Edit BEFORE subagents-only armed → allowed (opt-in default).
+            const before = await handlers.tool_call(
+                { toolName: "edit", input: { file_path: "/tmp/x" } }, {}
+            )
+
+            // tool_call OBSERVES `evo subagents-only on` → arms in-process.
+            await handlers.tool_call(
+                { toolName: "bash", input: { command: "evo subagents-only on" } }, {}
+            )
+            rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            const armed = rec.subagents_only === true
+
+            // Edit WITH subagents-only → denied (#1 violation, odd → block).
+            const after = await handlers.tool_call(
+                { toolName: "edit", input: { file_path: "/tmp/x" } }, {}
+            )
+            process.stdout.write(JSON.stringify({
+                blocked_before: before?.block === true,
+                armed,
+                blocked_after: after?.block === true,
+            }))
+        """))
+        self.assertFalse(result["blocked_before"],
+                         "orchestrator edit allowed before subagents-only armed")
+        self.assertTrue(result["armed"],
+                        "tool_call observing `evo subagents-only on` must arm the flag")
+        self.assertTrue(result["blocked_after"],
+                        "orchestrator edit denied once subagents-only is armed")
 
     def test_directive_replay_stops_after_ack(self):
         """The replay cache re-appends a drained directive to every
@@ -483,6 +532,7 @@ class TestOpenclawPiDenyGate(unittest.TestCase):
             const pfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${psid}.json`)
             let prec = JSON.parse(fs.readFileSync(pfile, "utf8"))
             prec.optimize_mode = true
+            prec.subagents_only = true  // deny-gate is opt-in
             fs.writeFileSync(pfile, JSON.stringify(prec))
 
             // Subagent registers with EVO_EXP_ID.

@@ -30,7 +30,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "evo" / "src"))
 
-from evo.inject.registry import register_session, mark_engaged, mark_optimize_mode
+from evo.inject.registry import (
+    register_session, mark_engaged, mark_optimize_mode, mark_subagents_only,
+    mark_autonomous,
+)
 
 
 def _init_git_repo(root: Path) -> None:
@@ -146,6 +149,7 @@ class TestPreToolCallDenies(_Base):
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
+        mark_subagents_only(self.root, "h1")  # deny-gate is opt-in
 
         out = _on_pre_tool_call(
             tool_name="file_write", args={"file_path": "/x"},
@@ -164,6 +168,7 @@ class TestPreToolCallDenies(_Base):
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
+        mark_subagents_only(self.root, "h1")  # deny-gate is opt-in
 
         _on_pre_tool_call(
             tool_name="file_write", args={"file_path": "/x"},
@@ -179,6 +184,7 @@ class TestPreToolCallDenies(_Base):
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
+        mark_subagents_only(self.root, "h1")  # deny-gate is opt-in
 
         # #1 odd → block
         out1 = _on_pre_tool_call(tool_name="file_write", args={"file_path": "/a"},
@@ -204,6 +210,7 @@ class TestPreToolCallDenies(_Base):
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
+        mark_subagents_only(self.root, "h1")  # deny-gate is opt-in
 
         out = _on_pre_tool_call(
             tool_name="terminal", args={"command": "sed -i s/a/b/ f.py"},
@@ -218,6 +225,7 @@ class TestPreToolCallDenies(_Base):
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
+        mark_subagents_only(self.root, "h1")  # deny-gate is opt-in
 
         for tn in ("read_file", "list_dir", "web_search", "grep"):
             out = _on_pre_tool_call(
@@ -238,6 +246,24 @@ class TestPreToolCallDenies(_Base):
             tool_name="file_write", args={}, task_id="h1", session_id="h1",
         )
         self.assertIsNone(out, "no optimize_mode → must not block")
+
+    def test_optimize_mode_without_subagents_only_allows_edits(self):
+        """Default flip: /optimize alone (optimize_mode on, subagents_only
+        off) must NOT block orchestrator edits. The deny-gate is opt-in,
+        armed only by `evo subagents-only on`."""
+        from evo.hermes_plugin import _on_pre_tool_call
+
+        register_session(self.root, "h1", "hermes")
+        mark_engaged(self.root, "h1")
+        mark_optimize_mode(self.root, "h1")
+        # subagents_only NOT armed
+        for _ in range(3):
+            out = _on_pre_tool_call(
+                tool_name="file_write", args={"file_path": "/x"},
+                task_id="h1", session_id="h1",
+            )
+            self.assertIsNone(
+                out, "optimize_mode without subagents_only must allow edits")
 
     def test_subagent_passes(self):
         from evo.hermes_plugin import _on_pre_tool_call
@@ -269,6 +295,7 @@ class TestPreLlmCallDrain(_Base):
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
+        mark_subagents_only(self.root, "h1")  # deny-gate is opt-in
 
         out = _on_pre_llm_call(session_id="h1")
         self.assertIsNone(out, "no queued directive → no injection")
@@ -334,21 +361,37 @@ class TestOnSessionEnd(_Base):
         register(_StubCtx())
         return recorded
 
-    def test_session_end_injects_stop_nudge_in_optimize_mode(self):
+    def test_session_end_injects_stop_nudge_when_autonomous(self):
         from evo.hermes_plugin import _on_session_end
 
         recorded = self._install_stub_ctx()
         register_session(self.root, "h1", "hermes")
         mark_engaged(self.root, "h1")
         mark_optimize_mode(self.root, "h1")
+        mark_autonomous(self.root, "h1")  # stop-nudge is opt-in
 
         _on_session_end(session_id="h1")
         self.assertEqual(len(recorded), 1,
-                         f"optimize_mode session end must inject 1 message; got {recorded!r}")
+                         f"autonomous session end must inject 1 message; got {recorded!r}")
         role, content = recorded[0]
         self.assertEqual(role, "user")
         self.assertIn("EVO LOOP", content,
                       "stop nudge must carry the EVO LOOP banner")
+
+    def test_session_end_without_autonomous_is_noop(self):
+        """optimize_mode on but autonomous NOT armed → no stop nudge. The
+        loop is opt-in; default /optimize lets the agent stop naturally."""
+        from evo.hermes_plugin import _on_session_end
+
+        recorded = self._install_stub_ctx()
+        register_session(self.root, "h1", "hermes")
+        mark_engaged(self.root, "h1")
+        mark_optimize_mode(self.root, "h1")
+        # autonomous NOT armed
+
+        _on_session_end(session_id="h1")
+        self.assertEqual(recorded, [],
+                         "optimize_mode without autonomous → no stop nudge")
 
     def test_session_end_outside_optimize_mode_is_noop(self):
         from evo.hermes_plugin import _on_session_end

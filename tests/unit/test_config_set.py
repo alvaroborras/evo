@@ -115,6 +115,29 @@ class TestConfigSet(unittest.TestCase):
             cmd_config_set(_args("frontier-strategy", "{not valid json"))
         self.assertIn("valid JSON", str(ctx.exception))
 
+    # --- run-behavior defaults (on/off) --------------------------------
+
+    def test_set_default_autonomous_on(self):
+        cmd_config_set(_args("default-autonomous", "on"))
+        self.assertIs(load_config(self.root)["default_autonomous"], True)
+
+    def test_set_default_subagents_only_on(self):
+        cmd_config_set(_args("default-subagents-only", "on"))
+        self.assertIs(load_config(self.root)["default_subagents_only"], True)
+
+    def test_default_flags_accept_off_and_aliases(self):
+        for value in ("off", "false", "no", "0"):
+            cmd_config_set(_args("default-autonomous", value))
+            self.assertIs(load_config(self.root)["default_autonomous"], False)
+        for value in ("on", "true", "yes", "1"):
+            cmd_config_set(_args("default-autonomous", value))
+            self.assertIs(load_config(self.root)["default_autonomous"], True)
+
+    def test_default_flags_reject_non_boolean(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            cmd_config_set(_args("default-subagents-only", "maybe"))
+        self.assertIn("on/off", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

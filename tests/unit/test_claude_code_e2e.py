@@ -106,6 +106,12 @@ class TestClaudeCodeEndToEnd(unittest.TestCase):
         self.assertTrue(self._flag_path(sid).exists(),
                         "/evo:optimize must arm the optimize_mode flag")
 
+        # Arm subagents-only — simulates the agent running `evo subagents-only
+        # on` when /optimize was invoked with the `subagents-only` param. The
+        # orchestrator-edit deny-gate is opt-in; default /optimize allows edits.
+        from evo.inject.registry import mark_subagents_only
+        mark_subagents_only(self.root, sid)
+
         # PreToolUse Edit — must DENY.
         rc, out = self._fire({
             "hook_event_name": "PreToolUse",

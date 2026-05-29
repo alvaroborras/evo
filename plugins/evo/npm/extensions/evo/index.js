@@ -661,6 +661,32 @@ function unmarkAutonomous(runDir, sid) {
   atomicWriteJson(p, rec);
   return true;
 }
+function markSubagentsOnly(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (rec.exp_id)
+    return false;
+  if (rec.subagents_only)
+    return false;
+  rec.subagents_only = true;
+  rec.subagents_only_at = nowIso();
+  atomicWriteJson(p, rec);
+  return true;
+}
+function unmarkSubagentsOnly(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (!rec.subagents_only)
+    return false;
+  rec.subagents_only = false;
+  rec.subagents_only_at = null;
+  atomicWriteJson(p, rec);
+  return true;
+}
 var OPTIMIZE_PROMPT_RES = {
   opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
   openclaw: [
@@ -841,13 +867,22 @@ function makeRegister(host) {
       const toolInput = event?.input ?? {};
       const cmd = toolInput?.command;
       if (typeof cmd === "string") {
-        if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) || /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+        if (/^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+          unmarkAutonomous(ctx.runDir, ctx.sid);
+          unmarkSubagentsOnly(ctx.runDir, ctx.sid);
+        } else if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd)) {
           unmarkAutonomous(ctx.runDir, ctx.sid);
         } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
           markAutonomous(ctx.runDir, ctx.sid);
+        } else if (/^\s*evo\s+subagents-only\s+off\s*$/.test(cmd)) {
+          unmarkSubagentsOnly(ctx.runDir, ctx.sid);
+        } else if (/^\s*evo\s+subagents-only(\s+on)?\s*$/.test(cmd)) {
+          markSubagentsOnly(ctx.runDir, ctx.sid);
         }
       }
       if (!sess.optimize_mode)
+        return;
+      if (!sess.subagents_only)
         return;
       if (!isDeniedInOptimizeMode(toolName, toolInput))
         return;

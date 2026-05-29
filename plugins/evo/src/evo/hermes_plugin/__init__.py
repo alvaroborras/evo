@@ -224,6 +224,8 @@ def _on_pre_tool_call(
         return None  # subagent — exempt
     if not sess.get("optimize_mode"):
         return None
+    if not sess.get("subagents_only"):
+        return None  # deny-gate is opt-in; default /optimize allows edits
     if not _is_denied_in_optimize_mode(tool_name, args):
         return None
     if _record_violation_and_should_block(root, session_id, tool_name):
@@ -253,6 +255,8 @@ def _on_session_end(session_id: str | None = None, **kwargs):
         return None  # subagent — not our session to force-continue
     if not sess.get("optimize_mode"):
         return None
+    if not sess.get("autonomous"):
+        return None  # stop-nudge is opt-in; default lets the agent stop
     try:
         _PLUGIN_CTX.inject_message(_STOP_NUDGE_TEMPLATE, role="user")
     except Exception:

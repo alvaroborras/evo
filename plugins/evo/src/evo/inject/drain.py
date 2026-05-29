@@ -342,13 +342,15 @@ def _maybe_mark_engaged_from_shell(
         queue.init_offset_to_latest(root, session_id)
 
 
-# `evo autonomous on|off` and `evo exit-optimize-mode` — the autonomous
-# arming/disarming commands. Cursor has no session env var, so `evo
-# autonomous on` run from the agent's shell can't self-detect its session
-# via the CLI; we observe the command here instead and arm/disarm the
-# session record directly (same idea as _maybe_mark_engaged_from_shell).
+# evo control commands observed from the agent's shell. Cursor has no
+# session env var, so `evo autonomous on` / `evo subagents-only on` run from
+# the agent's shell can't self-detect its session via the CLI; we observe
+# the command here and arm/disarm the session record directly (same idea as
+# _maybe_mark_engaged_from_shell).
 _AUTONOMOUS_ON_RE = _re.compile(r"^\s*evo\s+autonomous(\s+on)?\s*$")
 _AUTONOMOUS_OFF_RE = _re.compile(r"^\s*evo\s+autonomous\s+off\s*$")
+_SUBAGENTS_ONLY_ON_RE = _re.compile(r"^\s*evo\s+subagents-only(\s+on)?\s*$")
+_SUBAGENTS_ONLY_OFF_RE = _re.compile(r"^\s*evo\s+subagents-only\s+off\s*$")
 _EXIT_OPTIMIZE_RE = _re.compile(r"^\s*evo\s+exit-optimize-mode\b")
 
 
@@ -360,11 +362,11 @@ def _maybe_mark_autonomous_from_shell(
     payload: dict | None,
 ) -> None:
     """For self-contained hosts (currently Cursor): observe the agent's
-    `evo autonomous on|off` (or `evo exit-optimize-mode`) shell command and
-    arm/disarm the session's `autonomous` flag in-process. Cursor's CLI
-    invocation can't self-detect its session (no env var), so the command
-    would no-op via `detect_session`; observing it here is what actually
-    arms it. Idempotent."""
+    `evo autonomous on|off` / `evo subagents-only on|off` (or `evo
+    exit-optimize-mode`) shell command and arm/disarm the matching session
+    flag in-process. Cursor's CLI invocation can't self-detect its session
+    (no env var), so the command would no-op via `detect_session`; observing
+    it here is what actually arms it. Idempotent."""
     if host != "cursor":
         return
     if hook_event != "preToolUse":
@@ -374,11 +376,21 @@ def _maybe_mark_autonomous_from_shell(
     cmd = ((payload or {}).get("tool_input") or {}).get("command", "")
     if not isinstance(cmd, str):
         return
-    from .registry import mark_autonomous, unmark_autonomous
-    if _AUTONOMOUS_OFF_RE.match(cmd) or _EXIT_OPTIMIZE_RE.match(cmd):
+    from .registry import (
+        mark_autonomous, unmark_autonomous,
+        mark_subagents_only, unmark_subagents_only,
+    )
+    if _EXIT_OPTIMIZE_RE.match(cmd):
+        unmark_autonomous(root, session_id)
+        unmark_subagents_only(root, session_id)
+    elif _AUTONOMOUS_OFF_RE.match(cmd):
         unmark_autonomous(root, session_id)
     elif _AUTONOMOUS_ON_RE.match(cmd):
         mark_autonomous(root, session_id)
+    elif _SUBAGENTS_ONLY_OFF_RE.match(cmd):
+        unmark_subagents_only(root, session_id)
+    elif _SUBAGENTS_ONLY_ON_RE.match(cmd):
+        mark_subagents_only(root, session_id)
 
 
 def _self_contained_gate(
@@ -422,7 +434,11 @@ def _self_contained_gate(
     if sess and sess.get("optimize_mode") and not sess.get("exp_id"):
         if hook_event in ("stop", "subagentStop"):
             return True
-        if hook_event == "preToolUse" and _is_denied_in_optimize_mode(tool_name, tool_input):
+        # Only treat a denied tool as drain-worthy when subagents_only is
+        # armed — otherwise there's no policy deny to emit (default allows
+        # orchestrator edits).
+        if (hook_event == "preToolUse" and sess.get("subagents_only")
+                and _is_denied_in_optimize_mode(tool_name, tool_input)):
             return True
 
     if hook_event == "preToolUse" and _cursor_tool_class(tool_name) != "shell":
@@ -1241,6 +1257,9 @@ def _should_policy_block(
         Both forms accepted via `_PRE_TOOL_EVENTS`.
       - session is orchestrator-class (no exp_id).
       - optimize_mode is true on the session record.
+      - subagents_only is true (opt-in). Default /optimize ALLOWS the
+        orchestrator to edit; arming `evo subagents-only on` enforces the
+        delegate-to-subagents discipline (this gate).
       - tool is on the deny list (edit-tools, or bash with a mutating
         command pattern outside the safe-prefix exemption).
     """
@@ -1252,6 +1271,8 @@ def _should_policy_block(
         return False  # subagent — exempt
     if not sess.get("optimize_mode"):
         return False
+    if not sess.get("subagents_only"):
+        return False  # opt-in: default /optimize allows orchestrator edits
     if not payload:
         return False
 

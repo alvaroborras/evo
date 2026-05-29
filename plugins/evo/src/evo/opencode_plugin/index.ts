@@ -30,12 +30,14 @@ import {
   markAutonomous,
   markEngaged,
   markOptimizeMode,
+  markSubagentsOnly,
   maybeMarkOptimizeFromPrompt,
   maybeStopNudgeText,
   peekDrainSession,
   registerSession,
   shouldPolicyBlock,
   unmarkAutonomous,
+  unmarkSubagentsOnly,
 } from "./drain.js"
 import * as fs from "fs"
 import * as path from "path"
@@ -138,11 +140,17 @@ export const EvoPlugin = async ({ project, client }: any) => {
           // `evo autonomous on` CLI can't self-detect the session — we
           // observe the command here and arm/disarm in-process. Not prose:
           // this fires only on the actual command execution.
-          if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) ||
-              /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+          if (/^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+            unmarkAutonomous(runDir, sid)
+            unmarkSubagentsOnly(runDir, sid)
+          } else if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd)) {
             unmarkAutonomous(runDir, sid)
           } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
             markAutonomous(runDir, sid)
+          } else if (/^\s*evo\s+subagents-only\s+off\s*$/.test(cmd)) {
+            unmarkSubagentsOnly(runDir, sid)
+          } else if (/^\s*evo\s+subagents-only(\s+on)?\s*$/.test(cmd)) {
+            markSubagentsOnly(runDir, sid)
           }
         }
       }

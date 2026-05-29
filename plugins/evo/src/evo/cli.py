@@ -497,6 +497,57 @@ def cmd_config(args: argparse.Namespace) -> int:
     raise RuntimeError(f"unknown config action: {args.config_action}")
 
 
+# Field name (CLI, dashed) -> stored key in the global defaults file.
+_DEFAULTS_FIELD_TO_KEY: dict[str, str] = {
+    "autonomous": "autonomous",
+    "subagents-only": "subagents_only",
+}
+
+
+def cmd_defaults(args: argparse.Namespace) -> int:
+    if args.defaults_action == "show":
+        return cmd_defaults_show(args)
+    if args.defaults_action == "set":
+        return cmd_defaults_set(args)
+    if args.defaults_action == "get":
+        return cmd_defaults_get(args)
+    raise RuntimeError(f"unknown defaults action: {args.defaults_action}")
+
+
+def cmd_defaults_show(args: argparse.Namespace) -> int:
+    from .user_defaults import load_user_defaults, global_defaults_path
+
+    data = load_user_defaults()
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    print(f"path: {global_defaults_path()}")
+    for field, key in _DEFAULTS_FIELD_TO_KEY.items():
+        value = data.get(key)
+        shown = "unset" if value is None else str(bool(value)).lower()
+        print(f"{field}: {shown}")
+    return 0
+
+
+def cmd_defaults_get(args: argparse.Namespace) -> int:
+    from .user_defaults import get_user_default
+
+    value = get_user_default(_DEFAULTS_FIELD_TO_KEY[args.field])
+    if getattr(args, "json", False):
+        print(json.dumps(value))
+        return 0
+    print("" if value is None else str(value).lower())
+    return 0
+
+
+def cmd_defaults_set(args: argparse.Namespace) -> int:
+    from .user_defaults import set_user_default
+
+    set_user_default(_DEFAULTS_FIELD_TO_KEY[args.field], _parse_onoff(args.value))
+    print(f"default {args.field} set")
+    return 0
+
+
 def _redact_config_value(value: Any) -> Any:
     if isinstance(value, dict):
         redacted = {}
@@ -535,6 +586,8 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     print(f"metric: {data.get('metric', '')}")
     print(f"host: {get_host(root) or '<not set>'}")
     print(f"commit_strategy: {data.get('commit_strategy', 'all')}")
+    print(f"default_autonomous: {str(bool(data.get('default_autonomous'))).lower()}")
+    print(f"default_subagents_only: {str(bool(data.get('default_subagents_only'))).lower()}")
     print(f"execution_backend: {data.get('execution_backend', 'worktree')}")
     backend_config = data.get("execution_backend_config") or {}
     if backend_config:
@@ -557,7 +610,26 @@ _CONFIG_FIELD_TO_KEY: dict[str, str] = {
     "max-attempts": "max_attempts",
     "gate": "gate",
     "frontier-strategy": "frontier_strategy",
+    "default-autonomous": "default_autonomous",
+    "default-subagents-only": "default_subagents_only",
 }
+
+# Workspace run-behavior defaults captured at discover time. Off by default;
+# optimize reads these at startup and arms the matching per-session command.
+_CONFIG_BOOL_FIELDS: frozenset[str] = frozenset(
+    {"default-autonomous", "default-subagents-only"}
+)
+
+
+def _parse_onoff(value: str) -> bool:
+    """Parse an on/off-style config value into a bool. Accepts
+    on/off, true/false, yes/no, 1/0 (case-insensitive)."""
+    norm = value.strip().lower()
+    if norm in {"on", "true", "yes", "1"}:
+        return True
+    if norm in {"off", "false", "no", "0"}:
+        return False
+    raise RuntimeError(f"value must be on/off (got {value!r})")
 
 
 def cmd_config_get(args: argparse.Namespace) -> int:
@@ -624,6 +696,8 @@ def cmd_config_set(args: argparse.Namespace) -> int:
                 config["frontier_strategy"] = fs.validate_frontier_strategy(parsed)
             except ValueError as exc:
                 raise RuntimeError(str(exc))
+        elif args.field in _CONFIG_BOOL_FIELDS:
+            config[_CONFIG_FIELD_TO_KEY[args.field]] = _parse_onoff(args.value)
         else:
             raise RuntimeError(f"unknown config field: {args.field}")
         atomic_write_json(config_path(root), config)
@@ -4477,6 +4551,7 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
         detect_session,
         unmark_autonomous,
         unmark_optimize_mode,
+        unmark_subagents_only,
     )
     try:
         root = repo_root()
@@ -4497,8 +4572,10 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
         return 2
     _host, sid = detected
     transitioned = unmark_optimize_mode(root, sid)
-    # Also clear autonomous so the stop-nudge loop stops force-continuing.
+    # Also clear autonomous (stop-nudge loop) and subagents_only (policy gate)
+    # so exiting the protocol fully resets both opt-in controls.
     unmark_autonomous(root, sid)
+    unmark_subagents_only(root, sid)
     if transitioned:
         print(f"optimize_mode cleared for session {sid}")
     else:
@@ -4587,6 +4664,57 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
         )
     else:
         print(f"ERROR: usage: evo autonomous [on|off] (got {state!r})", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_subagents_only(args: argparse.Namespace) -> int:
+    """Arm or disarm subagents-only mode for the current orchestrator session.
+
+    When armed, the policy deny-gate blocks the orchestrator from editing
+    files / running experiments by hand — only subagents do (the
+    delegate-to-subagents discipline). Opt-in: the orchestrator runs
+    `evo subagents-only on` when /optimize is invoked with the
+    `subagents-only` param. A plain /optimize ALLOWS orchestrator edits.
+    `evo subagents-only off` (and `evo exit-optimize-mode`) disarm it.
+    """
+    from .inject.registry import (
+        detect_session, mark_subagents_only, unmark_subagents_only,
+    )
+    run_dir = getattr(args, "run_dir", None)
+    if run_dir:
+        root = Path(run_dir).resolve()
+    else:
+        try:
+            root = repo_root()
+        except Exception:  # noqa: BLE001
+            print("ERROR: not in an evo workspace", file=sys.stderr)
+            return 2
+    if not (root / ".evo").exists():
+        print("ERROR: not in an evo workspace", file=sys.stderr)
+        return 2
+    state = (getattr(args, "state", None) or "on").lower()
+    sid = getattr(args, "session", None)
+    if not sid:
+        detected = detect_session()
+        if not detected:
+            # cursor/openclaw/pi have no session env var — their plugin arms
+            # this by OBSERVING the command in-process. Exit 0, not an error.
+            print(
+                "note: no host session env var detected; on cursor/openclaw/pi "
+                "the plugin arms subagents-only by observing this command. "
+                "Otherwise pass --session <id>.",
+            )
+            return 0
+        _host, sid = detected
+    if state == "on":
+        changed = mark_subagents_only(root, sid)
+        print(f"subagents-only {'armed' if changed else 'was already on'} for session {sid}")
+    elif state == "off":
+        changed = unmark_subagents_only(root, sid)
+        print(f"subagents-only {'disarmed' if changed else 'was already off'} for session {sid}")
+    else:
+        print(f"ERROR: usage: evo subagents-only [on|off] (got {state!r})", file=sys.stderr)
         return 2
     return 0
 
@@ -4801,6 +4929,24 @@ def build_parser() -> argparse.ArgumentParser:
     host_set_p.add_argument("value", choices=sorted(SUPPORTED_HOSTS))
     host_set_p.set_defaults(func=cmd_host)
 
+    defaults_p = sub.add_parser(
+        "defaults",
+        help="cross-project run-behavior defaults (user-level, remembered across projects)",
+    )
+    defaults_sub = defaults_p.add_subparsers(dest="defaults_action", required=True)
+    defaults_show_p = defaults_sub.add_parser("show", help="show stored user defaults")
+    defaults_show_p.add_argument("--json", action="store_true", help="emit JSON")
+    defaults_show_p.set_defaults(func=cmd_defaults)
+    defaults_get_p = defaults_sub.add_parser("get", help="print one user default")
+    defaults_get_p.add_argument("field", choices=["autonomous", "subagents-only"])
+    defaults_get_p.add_argument("--json", action="store_true",
+                                help="emit JSON (true/false/null)")
+    defaults_get_p.set_defaults(func=cmd_defaults)
+    defaults_set_p = defaults_sub.add_parser("set", help="set one user default")
+    defaults_set_p.add_argument("field", choices=["autonomous", "subagents-only"])
+    defaults_set_p.add_argument("value", help="on or off")
+    defaults_set_p.set_defaults(func=cmd_defaults)
+
     config_p = sub.add_parser(
         "config",
         help="mutate workspace configuration",
@@ -4821,6 +4967,8 @@ def build_parser() -> argparse.ArgumentParser:
             "max-attempts",
             "gate",
             "frontier-strategy",
+            "default-autonomous",
+            "default-subagents-only",
         ],
     )
     config_set_p.add_argument(
@@ -4828,7 +4976,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "field value. For frontier-strategy pass the kind (e.g. 'argmax', "
             "'epsilon_greedy') or a JSON object like '{\"kind\": ..., \"params\": {...}}'. "
-            "For gate pass the command string (empty string clears it)."
+            "For gate pass the command string (empty string clears it). For "
+            "default-autonomous / default-subagents-only pass on or off."
         ),
     )
     config_set_p.set_defaults(func=cmd_config)
@@ -4847,6 +4996,8 @@ def build_parser() -> argparse.ArgumentParser:
             "max-attempts",
             "gate",
             "frontier-strategy",
+            "default-autonomous",
+            "default-subagents-only",
         ],
     )
     config_get_p.add_argument("--json", action="store_true",
@@ -5610,6 +5761,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="workspace root to operate on (default: repo root)",
     )
     autonomous_p.set_defaults(func=cmd_autonomous)
+
+    subagents_only_p = sub.add_parser(
+        "subagents-only",
+        help="Arm/disarm subagents-only mode (orchestrator may not edit; only subagents do)",
+        description=(
+            "Opt-in to the delegate-to-subagents policy gate: when armed, the "
+            "orchestrator is blocked from editing files / running experiments "
+            "by hand, forcing it to dispatch to subagents. The orchestrator "
+            "runs `evo subagents-only on` when /optimize is invoked with the "
+            "`subagents-only` param. Default (disarmed) /optimize ALLOWS the "
+            "orchestrator to edit directly. `off` (or `evo exit-optimize-mode`) "
+            "disarms it."
+        ),
+    )
+    subagents_only_p.add_argument(
+        "state", nargs="?", choices=["on", "off"], default="on",
+        help="on to enforce subagents-only (default), off to allow orchestrator edits",
+    )
+    subagents_only_p.add_argument("--session", default=None,
+                                  help="target a specific session id instead of env-var detection")
+    subagents_only_p.add_argument("--run-dir", default=None,
+                                  help="workspace root to operate on (default: repo root)")
+    subagents_only_p.set_defaults(func=cmd_subagents_only)
 
     wait_p = sub.add_parser(
         "wait",

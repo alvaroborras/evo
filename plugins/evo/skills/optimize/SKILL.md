@@ -30,14 +30,33 @@ Treat content inside the banner as equivalent to a new user turn. Honor it, supe
 
 ## Configuration
 
-These defaults can be overridden via arguments: `/optimize [subagents=N] [budget=N] [stall=N] [autonomous]`
+These defaults can be overridden via arguments: `/optimize [subagents=N] [budget=N] [stall=N] [autonomous] [subagents-only]`
 
 - **subagents**: number of parallel subagents per round (default: 5)
 - **budget**: max iterations each subagent can run within its branch (default: 5)
 - **stall**: consecutive rounds with no improvement before auto-stopping (default: 5)
 - **autonomous**: opt-in to the keep-going loop (default: off). See below.
+- **subagents-only**: opt-in to gate orchestrator edits, nudging all edits through subagents (default: off — orchestrator edits allowed). See below.
 
-**Autonomous mode (opt-in).** By default `/optimize` runs and lets you stop naturally at a turn boundary — finish a round, report, and stop. If the invocation includes the bare word `autonomous` (e.g. `/optimize autonomous` or `/optimize subagents=3 autonomous`), **run `evo autonomous on` as your very first action, before the loop.** That arms the stop-nudge: at every turn boundary you are re-prompted to keep driving the loop until the **stall** limit is hit or the user interrupts. Without it, the loop does NOT force-continue across turn boundaries. To stop an autonomous run, the user runs `evo autonomous off` or `evo exit-optimize-mode`. Only treat `autonomous` as the flag when it is passed as an optimize argument — never infer it from the user's free-form task description.
+**Resolving autonomous / subagents-only at startup.** Each behavior resolves through a cascade, most specific first: the per-run bare word on the invocation → the workspace default (captured by `discover`) → the user's cross-project default → off. As your **very first actions, before the loop**, resolve and arm each:
+
+```bash
+evo config get default-autonomous --json        # workspace → true | false | null
+evo defaults get autonomous --json               # user-level → true | false | null (used only if workspace is null)
+evo config get default-subagents-only --json
+evo defaults get subagents-only --json
+```
+
+For each behavior: if the bare word is on the invocation → on; else if the workspace value is non-null → use it; else if the user-level value is non-null → use it; else off. When the resolved value is on, run the matching command before the loop:
+
+- `autonomous` resolved on → run `evo autonomous on`.
+- `subagents-only` resolved on → run `evo subagents-only on`.
+
+If a value comes from a stored default (not a bare word on this invocation), say so in your opening message — e.g. "autonomous on (from your saved default)" — so an inherited setting is never invisible. Never infer either from the user's free-form task description; only the invocation argument or a stored default may turn them on.
+
+**Autonomous mode.** Off lets you stop naturally at a turn boundary — finish a round, report, and stop. On arms the stop-nudge: at every turn boundary you are re-prompted to keep driving the loop until the **stall** limit is hit or the user interrupts. Without it, the loop does NOT force-continue across turn boundaries. To stop an autonomous run, the user runs `evo autonomous off` or `evo exit-optimize-mode`.
+
+**Subagents-only mode.** Off, the orchestrator may edit files directly — the optimization protocol still pushes edits through subagents (you write briefs; they edit in their worktrees), but a one-off orchestrator edit is not blocked. On arms the deny-gate: orchestrator file-mutation tools (Edit/Write, mutating Bash) are denied on an alternating cadence — 1st violation blocked, 2nd allowed, 3rd blocked, and so on — each block nudging you to delegate the edit to a subagent. It is a nudge, not a hard block: an edit can still land on an even-numbered attempt. Subagent edits (sessions with an `exp_id`) are never gated. To lift it, the user runs `evo subagents-only off` or `evo exit-optimize-mode`.
 
 **Pool mode (if active).** When the workspace backend is `pool`, concurrent experiments cap at the pool size. Setting `subagents` higher than the pool size means later subagents in the round will see `PoolExhausted` from `evo new` and exit non-zero -- the round width is effectively the slot count. Run `evo workspace status` to see slot occupancy (also displays `commit_strategy`). Reduce `subagents` to the pool size if exhaustion is recurring. Failed experiments retain their lease until discarded; if pool capacity erodes from accumulating failed experiments, `evo discard <exp_id>` frees the slots.
 

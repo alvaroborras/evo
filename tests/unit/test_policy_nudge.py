@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "evo" / "src"))
 
 from evo.inject.registry import (
     register_session, mark_engaged, mark_optimize_mode, mark_autonomous,
+    mark_subagents_only,
 )
 
 
@@ -557,6 +558,7 @@ class TestAlternatingCadence(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_subagents_only(self.root, "orch")  # deny-gate is opt-in
 
     def test_first_edit_is_blocked_with_banner(self):
         self._setup_orchestrator()
@@ -623,6 +625,7 @@ class TestBashBlock(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_subagents_only(self.root, "orch")  # deny-gate is opt-in
 
     def test_first_mutating_bash_blocked(self):
         self._setup_orchestrator()
@@ -678,6 +681,20 @@ class TestPolicyNudgeDoesNotBlock(_Base):
             out = _drive_pretooluse(self.root, "casual", "Edit", {"file_path": "/f.py"})
             self.assertFalse(_is_denied(out), "non-optimize-mode session must not be blocked")
 
+    def test_optimize_mode_without_subagents_only_allows_edits(self):
+        """Default flip: /optimize alone keeps optimize_mode but allows
+        orchestrator edits. The deny-gate fires only after subagents_only
+        is armed (via `evo subagents-only on`)."""
+        register_session(self.root, "orch", "claude-code")
+        mark_engaged(self.root, "orch")
+        mark_optimize_mode(self.root, "orch")
+        # subagents_only NOT armed
+        for _ in range(10):
+            out = _drive_pretooluse(self.root, "orch", "Edit", {"file_path": "/f.py"})
+            self.assertFalse(
+                _is_denied(out),
+                "optimize_mode without subagents_only must allow orchestrator edits")
+
     def test_read_tools_never_blocked(self):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
@@ -699,6 +716,7 @@ class TestCursorPolicyNudge(_Base):
         mark_engaged(self.root, "cursor_sid")
         mark_optimize_mode(self.root, "cursor_sid")
         mark_autonomous(self.root, "cursor_sid")  # stop-nudge is opt-in
+        mark_subagents_only(self.root, "cursor_sid")  # deny-gate is opt-in
 
     def test_cursor_edit_file_blocked_via_drain_session(self):
         """Direct drain_session entry, claude-code-style PreToolUse."""
@@ -788,6 +806,7 @@ class TestCursorStopNudge(_Base):
         mark_engaged(self.root, "cursor_sid")
         mark_optimize_mode(self.root, "cursor_sid")
         mark_autonomous(self.root, "cursor_sid")  # stop-nudge is opt-in
+        mark_subagents_only(self.root, "cursor_sid")  # deny-gate is opt-in
 
     def test_cursor_stop_emits_followup_message(self):
         """Cursor doesn't honor `decision: block` — its stop-continuation
@@ -850,6 +869,7 @@ class TestCursorStopNudge(_Base):
         register_session(self.root, "cursor_sid", "cursor")
         mark_engaged(self.root, "cursor_sid")
         mark_optimize_mode(self.root, "cursor_sid")
+        mark_subagents_only(self.root, "cursor_sid")  # deny-gate is opt-in
 
         # Violation #1 — blocked, no consume.
         out1 = _drive_pretooluse(
