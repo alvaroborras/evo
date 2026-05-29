@@ -196,3 +196,17 @@ uv tool install --editable plugins/evo
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Citation
+
+If you use evo in your work, please cite it (see [`CITATION.cff`](CITATION.cff)):
+
+```bibtex
+@software{bishoyi_evo,
+  author = {Bishoyi, Alok Kumar},
+  title  = {{evo: an autoresearch orchestrator for codebases}},
+  url    = {https://github.com/evo-hq/evo},
+  doi    = {10.5281/zenodo.20447923},
+  year   = {2026}
+}
+```
