@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use evo in your research, please cite it as below."
+title: "evo: an autoresearch orchestrator for codebases"
+abstract: >-
+  evo is a plugin for agentic frameworks that optimizes code through
+  experiments. Given a codebase, it discovers metrics to optimize, sets up the
+  evaluation, and runs experiments in a loop using tree search over parallel
+  semi-autonomous agents, keeping changes that improve the score and discarding
+  those that do not.
+type: software
+authors:
+  - family-names: Bishoyi
+    given-names: Alok Kumar
+repository-code: "https://github.com/evo-hq/evo"
+url: "https://github.com/evo-hq/evo"
+license: Apache-2.0
+version: 0.4.4
+date-released: 2026-05-29
+keywords:
+  - autoresearch
+  - code-optimization
+  - agentic
+  - tree-search
+  - experiment-driven-development
+# Once you mint a Zenodo DOI (see README "Citation" section), add it here:
+# doi: 10.5281/zenodo.XXXXXXX
