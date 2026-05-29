@@ -38,10 +38,12 @@ import {
   incrementAndShouldBlock,
   initOffsetToLatest,
   isDeniedInOptimizeMode,
+  isAcked,
   isEvoCommand,
   isRegistered,
   markAutonomous,
   markEngaged,
+  parseDirectiveIds,
   markOptimizeMode,
   maybeMarkOptimizeFromPrompt,
   maybeStopNudgeText,
@@ -78,7 +80,11 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
     // appending these to every outbound LLM payload so that subagents
     // (which share sid via cwd hash) also see the directive on their own
     // first call.
-    const drainedTexts: string[] = []
+    // Each drained directive tracked by its event ids so the replay below
+    // can stop once the agent acks it (otherwise the same directive — and
+    // its `evo ack` footer — is re-injected every turn for the whole
+    // session, causing repeated re-acks + context bloat).
+    const drainedItems: { ids: string[]; text: string }[] = []
 
     const ensureRegistered = (): { sid: string; runDir: string } | null => {
       const runDir = findEvoRunDir()
@@ -216,12 +222,23 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
 
       // Drain any new on-disk events (advances offset → consumed_by++).
       const result = drainSession(ctx.runDir, ctx.sid)
-      if (result.text) drainedTexts.push(result.text)
+      if (result.text) {
+        drainedItems.push({ ids: parseDirectiveIds(result.text), text: result.text })
+      }
 
-      // Replay every previously drained directive on every call so
-      // subagents that share sid also receive the content directly.
-      if (drainedTexts.length === 0) return
-      const combined = drainedTexts.join("\n")
+      // Replay previously drained directives so subagents that share sid
+      // also receive the content directly — BUT drop any directive the
+      // agent has already acked, so a delivered+acknowledged directive
+      // stops being re-injected (no more re-acks / context bloat). A
+      // directive with no parseable id (legacy) is kept (can't track ack).
+      for (let i = drainedItems.length - 1; i >= 0; i--) {
+        const it = drainedItems[i]
+        if (it.ids.length > 0 && it.ids.every((id) => isAcked(ctx.runDir, id))) {
+          drainedItems.splice(i, 1)
+        }
+      }
+      if (drainedItems.length === 0) return
+      const combined = drainedItems.map((it) => it.text).join("\n")
       appendToPayload(event, combined)
       return event.payload
     })

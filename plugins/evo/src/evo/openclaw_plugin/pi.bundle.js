@@ -20,6 +20,24 @@ function offsetFile(runDir, sid) {
 function markerFile(runDir, sid) {
   return path.join(injectRoot(runDir), "markers", `${sid}.flag`);
 }
+function ackFile(runDir, eventId) {
+  return path.join(injectRoot(runDir), "acks", `${eventId}.json`);
+}
+function isAcked(runDir, eventId) {
+  try {
+    return fs.existsSync(ackFile(runDir, eventId));
+  } catch {
+    return false;
+  }
+}
+function parseDirectiveIds(text) {
+  const ids = [];
+  const re = /\[EVO DIRECTIVE id=([^\]]+)\]/g;
+  let m;
+  while ((m = re.exec(text)) !== null)
+    ids.push(m[1]);
+  return ids;
+}
 function readJsonOrNull(p) {
   try {
     return JSON.parse(fs.readFileSync(p, "utf8"));
@@ -693,7 +711,7 @@ function makeRegister(host) {
     return `${host}-${hash}`;
   }
   return function register(api) {
-    const drainedTexts = [];
+    const drainedItems = [];
     const ensureRegistered = () => {
       const runDir = findEvoRunDir();
       if (!runDir)
@@ -794,11 +812,18 @@ function makeRegister(host) {
       maybeMarkOptimizeFromPrompt(ctx.runDir, ctx.sid, host, promptText);
       scanForEvoCommands(event.payload);
       const result = drainSession(ctx.runDir, ctx.sid);
-      if (result.text)
-        drainedTexts.push(result.text);
-      if (drainedTexts.length === 0)
+      if (result.text) {
+        drainedItems.push({ ids: parseDirectiveIds(result.text), text: result.text });
+      }
+      for (let i = drainedItems.length - 1;i >= 0; i--) {
+        const it = drainedItems[i];
+        if (it.ids.length > 0 && it.ids.every((id) => isAcked(ctx.runDir, id))) {
+          drainedItems.splice(i, 1);
+        }
+      }
+      if (drainedItems.length === 0)
         return;
-      const combined = drainedTexts.join(`
+      const combined = drainedItems.map((it) => it.text).join(`
 `);
       appendToPayload(event, combined);
       return event.payload;

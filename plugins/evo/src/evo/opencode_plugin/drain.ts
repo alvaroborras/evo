@@ -88,6 +88,32 @@ function offsetFile(runDir: string, sid: string): string {
 function markerFile(runDir: string, sid: string): string {
   return path.join(injectRoot(runDir), "markers", `${sid}.flag`)
 }
+function ackFile(runDir: string, eventId: string): string {
+  return path.join(injectRoot(runDir), "acks", `${eventId}.json`)
+}
+
+/** True if the agent has acked this directive (inject/acks/<id>.json exists,
+ * written by `evo ack`). Used to STOP re-appending a directive into the
+ * model's context once acknowledged — otherwise the openclaw/pi/native
+ * "replay drained directives every turn" cache re-injects (and the agent
+ * re-acks) the same directive for the whole session. */
+export function isAcked(runDir: string, eventId: string): boolean {
+  try {
+    return fs.existsSync(ackFile(runDir, eventId))
+  } catch {
+    return false
+  }
+}
+
+/** Extract the directive event ids from a drained banner block
+ * (`[EVO DIRECTIVE id=<id>]`). A single drain may concatenate several. */
+export function parseDirectiveIds(text: string): string[] {
+  const ids: string[] = []
+  const re = /\[EVO DIRECTIVE id=([^\]]+)\]/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) ids.push(m[1])
+  return ids
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // File primitives

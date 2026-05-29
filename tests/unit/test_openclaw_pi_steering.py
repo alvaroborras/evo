@@ -300,6 +300,50 @@ class TestOpenclawPiDenyGate(unittest.TestCase):
         self.assertEqual(result["calls_after"], 1,
                          "nudge fires once autonomous is armed")
 
+    def test_directive_replay_stops_after_ack(self):
+        """The replay cache re-appends a drained directive to every
+        before_provider_request — but must STOP once the agent acks it
+        (else it re-injects + the agent re-acks all session, as seen live:
+        pi acked count=79). Fire the hook: directive appears, re-appears on
+        the next call (pre-ack replay), then DISAPPEARS once acked."""
+        result = self._run_factory("pi", textwrap.dedent("""
+            const fs = await import("fs")
+            const path = await import("path")
+            const cryp = await import("crypto")
+            await handlers.session_start({}, {})
+            const hash = cryp.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12)
+            const sid = `pi-${hash}`
+            const inj = path.join(process.cwd(), ".evo", "run_0000", "inject")
+            // arm optimize_mode + autonomous
+            const sfile = path.join(inj, "sessions", `${sid}.json`)
+            const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
+            rec.optimize_mode = true; rec.autonomous = true
+            fs.writeFileSync(sfile, JSON.stringify(rec))
+            // queue a workspace directive (raw event; drainSession wraps it)
+            const eid = "01TESTDIRECTIVE00000000001"
+            fs.mkdirSync(path.join(inj, "events"), { recursive: true })
+            fs.appendFileSync(path.join(inj, "events", "workspace.jsonl"),
+                JSON.stringify({schema_version:1, id:eid, ts:"2026-01-01T00:00:00+00:00", text:"USE HASHMAP"}) + "\\n")
+            const mkEvent = () => ({ payload: { input: [{ role:"user", content:"go" }] } })
+            const sawDirective = (ev) => JSON.stringify(ev.payload).indexOf("USE HASHMAP") >= 0
+
+            const e1 = mkEvent(); await handlers.before_provider_request(e1, {})
+            const first = sawDirective(e1)            // drained + appended
+            const e2 = mkEvent(); await handlers.before_provider_request(e2, {})
+            const second = sawDirective(e2)           // re-replayed (pre-ack)
+
+            // agent acks the directive
+            fs.mkdirSync(path.join(inj, "acks"), { recursive: true })
+            fs.writeFileSync(path.join(inj, "acks", `${eid}.json`), JSON.stringify({event_id:eid}))
+
+            const e3 = mkEvent(); await handlers.before_provider_request(e3, {})
+            const third = sawDirective(e3)            // dropped after ack
+            process.stdout.write(JSON.stringify({ first, second, third }))
+        """))
+        self.assertTrue(result["first"], "directive must be delivered on first call")
+        self.assertTrue(result["second"], "directive re-replays until acked (pre-ack)")
+        self.assertFalse(result["third"], "directive must STOP re-injecting once acked")
+
     def test_tool_call_observes_evo_autonomous_off_disarms(self):
         """`evo autonomous off` observed via tool_call disarms the loop."""
         result = self._run_factory("pi", textwrap.dedent("""

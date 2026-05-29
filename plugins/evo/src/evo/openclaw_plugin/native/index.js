@@ -20,6 +20,24 @@ function offsetFile(runDir, sid) {
 function markerFile(runDir, sid) {
   return path.join(injectRoot(runDir), "markers", `${sid}.flag`);
 }
+function ackFile(runDir, eventId) {
+  return path.join(injectRoot(runDir), "acks", `${eventId}.json`);
+}
+function isAcked(runDir, eventId) {
+  try {
+    return fs.existsSync(ackFile(runDir, eventId));
+  } catch {
+    return false;
+  }
+}
+function parseDirectiveIds(text) {
+  const ids = [];
+  const re = /\[EVO DIRECTIVE id=([^\]]+)\]/g;
+  let m;
+  while ((m = re.exec(text)) !== null)
+    ids.push(m[1]);
+  return ids;
+}
 function readJsonOrNull(p) {
   try {
     return JSON.parse(fs.readFileSync(p, "utf8"));
@@ -702,12 +720,18 @@ function deriveSessionId() {
   const hash = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
   return "openclaw-" + hash;
 }
-var drainedTexts = [];
-function directiveBanner() {
-  if (drainedTexts.length === 0)
+var drainedItems = [];
+function directiveBanner(runDir) {
+  for (let i = drainedItems.length - 1;i >= 0; i--) {
+    const it = drainedItems[i];
+    if (it.ids.length > 0 && it.ids.every((id) => isAcked(runDir, id))) {
+      drainedItems.splice(i, 1);
+    }
+  }
+  if (drainedItems.length === 0)
     return "";
   return `
-` + drainedTexts.join(`
+` + drainedItems.map((it) => it.text).join(`
 
 `);
 }
@@ -735,7 +759,7 @@ var native_default = {
     const pumpDirectives = (runDir, sid) => {
       const result = drainSession(runDir, sid);
       if (result.text) {
-        drainedTexts.push(result.text);
+        drainedItems.push({ ids: parseDirectiveIds(result.text), text: result.text });
         log(`drained ${result.text.length} bytes`);
       }
     };
@@ -848,14 +872,15 @@ var native_default = {
     });
     api.on("tool_result_persist", (event) => {
       const ctx = ensureRegistered();
-      if (ctx)
-        pumpDirectives(ctx.runDir, ctx.sid);
-      if (drainedTexts.length === 0)
+      if (!ctx)
+        return;
+      pumpDirectives(ctx.runDir, ctx.sid);
+      if (drainedItems.length === 0)
         return;
       const msg = event?.message ?? event?.assistantMessage ?? event;
       if (!msg || typeof msg !== "object")
         return;
-      const banner = directiveBanner();
+      const banner = directiveBanner(ctx.runDir);
       let mutated = false;
       const tryAppendString = (obj, key) => {
         if (typeof obj?.[key] === "string" && !obj[key].includes(BANNER_OPEN)) {

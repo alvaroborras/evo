@@ -35,10 +35,12 @@ import {
   drainSession,
   findEvoRunDir,
   initOffsetToLatest,
+  isAcked,
   isRegistered,
   markAutonomous,
   markEngaged,
   maybeMarkOptimizeFromPrompt,
+  parseDirectiveIds,
   maybeStopNudgeText,
   registerSession,
   shouldPolicyBlock,
@@ -94,17 +96,26 @@ function deriveSessionId(): string {
 // the parent's drain advances the on-disk offset the subagent's drain
 // returns null. Cache the drained text so the directive re-appends
 // to every subsequent tool-result message until session end.
-const drainedTexts: string[] = []
+// Track each drained directive by its event ids so directiveBanner can
+// stop re-appending it once the agent acks (otherwise the same directive
+// re-appends to every tool-result message until session end → repeated
+// re-acks + context bloat).
+const drainedItems: { ids: string[]; text: string }[] = []
 
-function directiveBanner(): string {
-  if (drainedTexts.length === 0) return ""
-  // drainedTexts entries are already wrapped with
-  // [EVO DIRECTIVE]...[END EVO DIRECTIVE] by formatDirectiveText()
-  // inside drainSession() (shared with opencode plugin). Don't
-  // double-wrap — produces nested banners that violate the documented
-  // contract in optimize/subagent skills and that stricter models
-  // (opus-4-7) refuse outright.
-  return "\n" + drainedTexts.join("\n\n")
+function directiveBanner(runDir: string): string {
+  // Drop directives the agent has already acked, so a delivered+acked
+  // directive stops being re-injected. Legacy items with no parseable id
+  // are kept (can't track ack).
+  for (let i = drainedItems.length - 1; i >= 0; i--) {
+    const it = drainedItems[i]
+    if (it.ids.length > 0 && it.ids.every((id) => isAcked(runDir, id))) {
+      drainedItems.splice(i, 1)
+    }
+  }
+  if (drainedItems.length === 0) return ""
+  // entries are already wrapped with [EVO DIRECTIVE]...[END EVO DIRECTIVE]
+  // by formatDirectiveText() inside drainSession() — don't double-wrap.
+  return "\n" + drainedItems.map((it) => it.text).join("\n\n")
 }
 
 export default {
@@ -147,7 +158,7 @@ export default {
     const pumpDirectives = (runDir: string, sid: string) => {
       const result = drainSession(runDir, sid)
       if (result.text) {
-        drainedTexts.push(result.text)
+        drainedItems.push({ ids: parseDirectiveIds(result.text), text: result.text })
         log(`drained ${result.text.length} bytes`)
       }
     }
@@ -278,9 +289,10 @@ export default {
     // is pure sync filesystem so the `async` is unneeded.
     api.on("tool_result_persist", (event: any) => {
       const ctx = ensureRegistered()
-      if (ctx) pumpDirectives(ctx.runDir, ctx.sid)
+      if (!ctx) return undefined
+      pumpDirectives(ctx.runDir, ctx.sid)
 
-      if (drainedTexts.length === 0) return undefined
+      if (drainedItems.length === 0) return undefined
 
       // Per docs: handler returns the modified message (rewrites
       // `details` or `content`). Payload shape is not documented
@@ -289,7 +301,7 @@ export default {
       const msg = event?.message ?? event?.assistantMessage ?? event
       if (!msg || typeof msg !== "object") return undefined
 
-      const banner = directiveBanner()
+      const banner = directiveBanner(ctx.runDir)
       let mutated = false
       const tryAppendString = (obj: any, key: string) => {
         // Re-entry guard: skip if this message already contains the
