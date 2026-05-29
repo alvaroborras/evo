@@ -474,6 +474,22 @@ def _verify_directive_consumed(h: _Harness, ws_root: str, directive_id: str) -> 
     return int(out) if out.isdigit() else 0
 
 
+def _verify_directive_acked(h: _Harness, ws_root: str, directive_id: str) -> bool:
+    """Did the agent run `evo ack <id>`? Checks for inject/acks/<id>.json
+    across all run_* dirs (the L2 ACK record written by `evo ack`). This is
+    the strongest receipt signal — model-level "I saw and acknowledged this
+    directive" — distinct from consumed_by (offset advanced = drain
+    delivered) and from shaped-work (model acted on the content). The
+    ack-on-receipt skill instruction tells the agent to run it immediately
+    on seeing the banner."""
+    out = h.run(
+        f"ls {ws_root}/run_*/inject/acks/{directive_id}.json "
+        f"2>/dev/null | wc -l",
+        must_succeed=False,
+    ).strip()
+    return out.isdigit() and int(out) >= 1
+
+
 def _read_graph(h: _Harness, run_dir: str) -> dict | None:
     out = h.run(f"cat {run_dir}/graph.json 2>/dev/null || echo '{{}}'",
                 must_succeed=False)
@@ -769,9 +785,21 @@ def _drive_smoke(
               must_succeed=False, timeout=10)
 
     consumed_by = _verify_directive_consumed(h, ws_root, directive_id)
+    # ACK is the strongest receipt signal: the agent ran `evo ack <id>`
+    # (ack-on-receipt) → the directive content reached the MODEL, not just
+    # the offset. Captured for diagnosis so a shaped-work failure can be
+    # classified: acked → model saw it and chose not to implement (model
+    # issue); not acked → delivery may not have surfaced (real concern,
+    # even though the offset advanced).
+    acked = _verify_directive_acked(h, ws_root, directive_id)
+    h.run(f"echo '=== RECEIPT [{host}] consumed_by={consumed_by} acked={acked} ==='; "
+          f"echo '--- evo direct-status ---'; "
+          f"export PATH=$HOME/.local/bin:$PATH; cd /tmp/ws && "
+          f"evo direct-status {directive_id} 2>&1 | head -20 || true",
+          must_succeed=False, timeout=10)
     assert consumed_by >= 1, (
-        f"[{host}] directive {directive_id} not consumed by any session; "
-        f"mid-run inject did not reach the agent"
+        f"[{host}] directive {directive_id} not consumed by any session "
+        f"(acked={acked}); mid-run inject did not reach the agent"
     )
 
     # Two independent evidence channels for "directive content shaped the
@@ -840,14 +868,16 @@ def _drive_smoke(
               "cat /tmp/evo-inject.log 2>&1 || echo '(no inject log)'",
               must_succeed=False, timeout=5)
     assert marker_ok or score_ok, (
-        f"[{host}] directive delivered (consumed_by={consumed_by}) but no "
-        f"evidence it shaped the work: marker '_DIRECTIVE_TAG' not in any "
-        f"committed target.py (tag_count={tag_count}), and best/baseline "
-        f"ratio is {ratio:.1f}x (best={best:.1f}, baseline={baseline:.1f}) "
-        f"— round-1 O(n²) strategies cap ~10x, the directive's O(n) "
-        f"hashmap is 100×+. Either signal alone passes; both absent means "
-        f"the directive arrived as an event but didn't shape any "
-        f"experiment's algorithm or marker."
+        f"[{host}] directive delivered (consumed_by={consumed_by}, "
+        f"acked={acked}) but no evidence it shaped the work: marker "
+        f"'_DIRECTIVE_TAG' not in any committed target.py "
+        f"(tag_count={tag_count}), and best/baseline ratio is {ratio:.1f}x "
+        f"(best={best:.1f}, baseline={baseline:.1f}) — round-1 O(n²) "
+        f"strategies cap ~10x, the directive's O(n) hashmap is 100×+. With "
+        f"acked={acked}: the model {'received+acknowledged it but did not '
+        'implement the algorithm (model-compliance)' if acked else 'never '
+        'acked — content may not have surfaced'}. Either marker or score "
+        f"alone passes; both absent + this receipt state is the failure."
     )
 
 
