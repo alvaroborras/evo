@@ -9,6 +9,7 @@
 [![PyPI](https://img.shields.io/pypi/v/evo-hq-cli)](https://pypi.org/project/evo-hq-cli/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Tests](https://github.com/evo-hq/evo/actions/workflows/ci.yml/badge.svg)](https://github.com/evo-hq/evo/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20447923.svg)](https://doi.org/10.5281/zenodo.20447923)
 
 **Get started with autoresearch on any codebase — with two simple commands.**
 
@@ -192,26 +193,20 @@ cd evo
 uv tool install --editable plugins/evo
 ```
 
-## Citation
-
-If you use evo in your research, please cite it. GitHub generates a citation from
-[`CITATION.cff`](CITATION.cff) via the "Cite this repository" button in the sidebar.
-
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20447923.svg)](https://doi.org/10.5281/zenodo.20447923)
-
-The DOI above is the concept DOI — it always resolves to the latest version. Each release also gets its own version DOI on Zenodo.
-
-```bibtex
-@software{bishoyi_evo,
-  author  = {Bishoyi, Alok Kumar},
-  title   = {{evo: an autoresearch orchestrator for codebases}},
-  url      = {https://github.com/evo-hq/evo},
-  doi     = {10.5281/zenodo.20447923},
-  license  = {Apache-2.0},
-  year     = {2026}
-}
-```
-
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Citation
+
+If you use evo in your work, please cite it (see [`CITATION.cff`](CITATION.cff)):
+
+```bibtex
+@software{bishoyi_evo,
+  author = {Bishoyi, Alok Kumar},
+  title  = {{evo: an autoresearch orchestrator for codebases}},
+  url    = {https://github.com/evo-hq/evo},
+  doi    = {10.5281/zenodo.20447923},
+  year   = {2026}
+}
+```
