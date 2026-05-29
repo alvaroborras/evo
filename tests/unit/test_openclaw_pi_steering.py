@@ -224,6 +224,7 @@ class TestOpenclawPiDenyGate(unittest.TestCase):
             const sfile = path.join(process.cwd(), ".evo", "run_0000", "inject", "sessions", `${sid}.json`)
             const rec = JSON.parse(fs.readFileSync(sfile, "utf8"))
             rec.optimize_mode = true
+            rec.autonomous = true
             fs.writeFileSync(sfile, JSON.stringify(rec))
 
             await handlers.turn_end({ turnIndex: 0 }, {})

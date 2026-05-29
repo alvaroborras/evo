@@ -4473,7 +4473,11 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
     (stopping subagents is a host-runtime concern this command cannot
     reach).
     """
-    from .inject.registry import detect_session, unmark_optimize_mode
+    from .inject.registry import (
+        detect_session,
+        unmark_autonomous,
+        unmark_optimize_mode,
+    )
     try:
         root = repo_root()
     except Exception:  # noqa: BLE001
@@ -4493,6 +4497,8 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
         return 2
     _host, sid = detected
     transitioned = unmark_optimize_mode(root, sid)
+    # Also clear autonomous so the stop-nudge loop stops force-continuing.
+    unmark_autonomous(root, sid)
     if transitioned:
         print(f"optimize_mode cleared for session {sid}")
     else:
@@ -4523,6 +4529,65 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
     print(f"{step}. Re-run `evo status` and confirm no experiment shows `active`.")
     print(f"   `evo discard <id> --force --reason \"manual halt\"` cleans any stragglers.")
 
+    return 0
+
+
+def cmd_autonomous(args: argparse.Namespace) -> int:
+    """Arm or disarm autonomous mode for the current orchestrator session.
+
+    Autonomous mode enables the always-fire stop nudge: at every turn
+    boundary the orchestrator is re-prompted to keep driving the optimize
+    loop, instead of stopping. It is opt-in — the orchestrator runs
+    `evo autonomous on` when /optimize is invoked with the `autonomous`
+    param. A plain /optimize keeps the policy gate but stops naturally.
+    `evo autonomous off` (and `evo exit-optimize-mode`) disarm it.
+    """
+    from .inject.registry import detect_session, mark_autonomous, unmark_autonomous
+    # Explicit --run-dir override (resolve workspace without repo_root()).
+    run_dir = getattr(args, "run_dir", None)
+    if run_dir:
+        root = Path(run_dir).resolve()
+    else:
+        try:
+            root = repo_root()
+        except Exception:  # noqa: BLE001
+            print("ERROR: not in an evo workspace", file=sys.stderr)
+            return 2
+    if not (root / ".evo").exists():
+        print("ERROR: not in an evo workspace", file=sys.stderr)
+        return 2
+    state = (getattr(args, "state", None) or "on").lower()
+    # Session resolution: explicit --session wins; else env-var detection.
+    sid = getattr(args, "session", None)
+    if not sid:
+        detected = detect_session()
+        if not detected:
+            # Hosts without a session env var (cursor / openclaw / pi) arm
+            # autonomous by having their plugin OBSERVE this command and
+            # write the flag in-process — the CLI itself can't resolve the
+            # session here. Exit 0 (not an error): the plugin handles it.
+            print(
+                "note: no host session env var detected; if you are on "
+                "cursor/openclaw/pi the plugin arms autonomous by observing "
+                "this command. Otherwise pass --session <id>.",
+            )
+            return 0
+        _host, sid = detected
+    if state == "on":
+        changed = mark_autonomous(root, sid)
+        print(
+            f"autonomous mode {'armed' if changed else 'was already on'} "
+            f"for session {sid}"
+        )
+    elif state == "off":
+        changed = unmark_autonomous(root, sid)
+        print(
+            f"autonomous mode {'disarmed' if changed else 'was already off'} "
+            f"for session {sid}"
+        )
+    else:
+        print(f"ERROR: usage: evo autonomous [on|off] (got {state!r})", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -5518,6 +5583,33 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     exit_opt_p.set_defaults(func=cmd_exit_optimize_mode)
+
+    autonomous_p = sub.add_parser(
+        "autonomous",
+        help="Arm/disarm autonomous mode (the always-fire stop-nudge loop) for this session",
+        description=(
+            "Opt-in to the autonomous optimize loop: when armed, the "
+            "orchestrator is re-prompted at every turn boundary to keep "
+            "driving the loop until its stall limit or interruption. The "
+            "orchestrator runs `evo autonomous on` when /optimize is invoked "
+            "with the `autonomous` param. Default (disarmed) /optimize keeps "
+            "the policy gate but stops naturally. `off` (or "
+            "`evo exit-optimize-mode`) disarms it."
+        ),
+    )
+    autonomous_p.add_argument(
+        "state", nargs="?", choices=["on", "off"], default="on",
+        help="on to arm (default), off to disarm",
+    )
+    autonomous_p.add_argument(
+        "--session", default=None,
+        help="target a specific session id instead of env-var detection",
+    )
+    autonomous_p.add_argument(
+        "--run-dir", default=None,
+        help="workspace root to operate on (default: repo root)",
+    )
+    autonomous_p.set_defaults(func=cmd_autonomous)
 
     wait_p = sub.add_parser(
         "wait",

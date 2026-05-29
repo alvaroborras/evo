@@ -617,6 +617,32 @@ function markOptimizeMode(runDir, sid) {
   atomicWriteJson(p, rec);
   return true;
 }
+function markAutonomous(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (rec.exp_id)
+    return false;
+  if (rec.autonomous)
+    return false;
+  rec.autonomous = true;
+  rec.autonomous_at = nowIso();
+  atomicWriteJson(p, rec);
+  return true;
+}
+function unmarkAutonomous(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (!rec.autonomous)
+    return false;
+  rec.autonomous = false;
+  rec.autonomous_at = null;
+  atomicWriteJson(p, rec);
+  return true;
+}
 var OPTIMIZE_PROMPT_RES = {
   opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
   openclaw: [
@@ -675,6 +701,8 @@ function maybeStopNudgeText(runDir, sid) {
   if (sess.exp_id)
     return null;
   if (!sess.optimize_mode)
+    return null;
+  if (!sess.autonomous)
     return null;
   return STOP_NUDGE_TEMPLATE;
 }
@@ -743,6 +771,11 @@ var EvoPlugin = async ({ project, client }) => {
           if (markEngaged(runDir, sid)) {
             initOffsetToLatest(runDir, sid);
           }
+          if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) || /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+            unmarkAutonomous(runDir, sid);
+          } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
+            markAutonomous(runDir, sid);
+          }
         }
       }
       if (shouldPolicyBlock(runDir, sid, toolName, toolArgs)) {
@@ -759,7 +792,7 @@ var EvoPlugin = async ({ project, client }) => {
       if (!runDir)
         return;
       const sess = getSession(runDir, sessionID);
-      if (!sess || sess.exp_id || !sess.optimize_mode)
+      if (!sess || sess.exp_id || !sess.optimize_mode || !sess.autonomous)
         return;
       if (!client || typeof client.session?.prompt !== "function")
         return;

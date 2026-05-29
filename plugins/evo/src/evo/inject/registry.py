@@ -116,6 +116,8 @@ def register_session(
             data.setdefault("engaged_at", None)
             data.setdefault("optimize_mode", False)
             data.setdefault("optimize_mode_at", None)
+            data.setdefault("autonomous", False)
+            data.setdefault("autonomous_at", None)
             # Merge-only: fill in fields that are currently null.
             # exp_id is special: never stamp a subagent's exp_id onto an
             # already-engaged orchestrator record (the inherited-session-id
@@ -163,9 +165,16 @@ def register_session(
         # v0.4.5+: optimize_mode tags a session as the orchestrator
         # currently driving /evo:optimize. Set automatically when the
         # user invokes /optimize (UserPromptSubmit pattern-match in
-        # drain.py). Drives the policy nudge + stop-hook continuation.
+        # drain.py). Drives the policy nudge.
         "optimize_mode": False,
         "optimize_mode_at": None,
+        # v0.4.5+: autonomous gates the stop-hook continuation (the
+        # always-fire stop nudge). Opt-in only — set when the orchestrator
+        # runs `evo autonomous on` (driven by the `autonomous` /optimize
+        # param). Default off: a plain /optimize stops naturally at a turn
+        # boundary instead of being force-continued until kill.
+        "autonomous": False,
+        "autonomous_at": None,
     }
     atomic_write_json(path, data)
     # Seed the workspace offset to the current queue tail so this session
@@ -273,6 +282,67 @@ def unmark_optimize_mode(root: Path, session_id: str) -> bool:
         _clear_optimize_mode_flag(root, session_id)
         return False
     _clear_optimize_mode_flag(root, session_id)
+    return True
+
+
+def mark_autonomous(root: Path, session_id: str) -> bool:
+    """Flip `autonomous` true on the session record if currently false.
+
+    Autonomous gates the always-fire stop nudge (the loop that
+    force-continues the orchestrator at every turn boundary). Opt-in: the
+    orchestrator runs `evo autonomous on` when /optimize is invoked with
+    the `autonomous` param. No Rust-side flag file is needed — the Rust
+    binary already hands off on Stop whenever optimize_mode is set, and
+    the Python drain (`_maybe_stop_nudge_text`) reads this field to decide
+    whether to actually nudge.
+
+    Refuses to flag a subagent session (one with exp_id set) — subagents
+    are never the orchestrator. Returns True on the false→true transition,
+    False on no-op (already true, missing record, or subagent). Fail-open
+    on disk errors (never crash the agent).
+    """
+    path = session_file(root, session_id)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if data.get("exp_id"):
+        return False  # subagent — never the orchestrator
+    if data.get("autonomous"):
+        return False
+    data["autonomous"] = True
+    data["autonomous_at"] = _now_iso()
+    try:
+        atomic_write_json(path, data)
+    except OSError:
+        return False
+    return True
+
+
+def unmark_autonomous(root: Path, session_id: str) -> bool:
+    """Flip `autonomous` false on the session record if currently true.
+
+    Used by `evo autonomous off` and by `evo exit-optimize-mode` (which
+    clears both optimize_mode and autonomous). Returns True on the
+    true→false transition, False on no-op.
+    """
+    path = session_file(root, session_id)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not data.get("autonomous"):
+        return False
+    data["autonomous"] = False
+    data["autonomous_at"] = None
+    try:
+        atomic_write_json(path, data)
+    except OSError:
+        return False
     return True
 
 

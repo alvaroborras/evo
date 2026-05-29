@@ -617,6 +617,32 @@ function markOptimizeMode(runDir, sid) {
   atomicWriteJson(p, rec);
   return true;
 }
+function markAutonomous(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (rec.exp_id)
+    return false;
+  if (rec.autonomous)
+    return false;
+  rec.autonomous = true;
+  rec.autonomous_at = nowIso();
+  atomicWriteJson(p, rec);
+  return true;
+}
+function unmarkAutonomous(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (!rec.autonomous)
+    return false;
+  rec.autonomous = false;
+  rec.autonomous_at = null;
+  atomicWriteJson(p, rec);
+  return true;
+}
 var OPTIMIZE_PROMPT_RES = {
   opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
   openclaw: [
@@ -786,10 +812,18 @@ function makeRegister(host) {
         return;
       if (sess.exp_id)
         return;
-      if (!sess.optimize_mode)
-        return;
       const toolName = event?.toolName ?? event?.tool_name;
       const toolInput = event?.input ?? {};
+      const cmd = toolInput?.command;
+      if (typeof cmd === "string") {
+        if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) || /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+          unmarkAutonomous(ctx.runDir, ctx.sid);
+        } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
+          markAutonomous(ctx.runDir, ctx.sid);
+        }
+      }
+      if (!sess.optimize_mode)
+        return;
       if (!isDeniedInOptimizeMode(toolName, toolInput))
         return;
       if (incrementAndShouldBlock(ctx.runDir, ctx.sid, toolName)) {
@@ -808,6 +842,8 @@ function makeRegister(host) {
       if (sess.exp_id)
         return;
       if (!sess.optimize_mode)
+        return;
+      if (!sess.autonomous)
         return;
       const peek = peekDrainSession(ctx.runDir, ctx.sid);
       const text = peek.text ? peek.text + `

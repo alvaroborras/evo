@@ -46,6 +46,15 @@ export interface SessionRecord {
   // markEngaged() themselves.
   has_evo_engaged?: boolean
   engaged_at?: string | null
+  // v0.4.5: optimize_mode tags the orchestrator driving /optimize (policy
+  // gate). autonomous (opt-in) gates the always-fire stop nudge — default
+  // off, so a plain /optimize stops naturally; armed via the agent running
+  // `evo autonomous on`, which these in-process plugins observe as a tool
+  // call (the CLI can't self-detect a session here).
+  optimize_mode?: boolean
+  optimize_mode_at?: string | null
+  autonomous?: boolean
+  autonomous_at?: string | null
 }
 
 export interface DrainResult {
@@ -854,6 +863,32 @@ export function unmarkOptimizeMode(runDir: string, sid: string): boolean {
   return true
 }
 
+/** Arm `autonomous` (opt-in stop-nudge loop). Mirrors Python `mark_autonomous`.
+ * Refuses subagents (exp_id). Returns true on the false->true transition. */
+export function markAutonomous(runDir: string, sid: string): boolean {
+  const p = sessionFile(runDir, sid)
+  const rec = readJsonOrNull<any>(p)
+  if (!rec) return false
+  if (rec.exp_id) return false
+  if (rec.autonomous) return false
+  rec.autonomous = true
+  rec.autonomous_at = nowIso()
+  atomicWriteJson(p, rec)
+  return true
+}
+
+/** Disarm `autonomous`. Mirrors Python `unmark_autonomous`. */
+export function unmarkAutonomous(runDir: string, sid: string): boolean {
+  const p = sessionFile(runDir, sid)
+  const rec = readJsonOrNull<any>(p)
+  if (!rec) return false
+  if (!rec.autonomous) return false
+  rec.autonomous = false
+  rec.autonomous_at = null
+  atomicWriteJson(p, rec)
+  return true
+}
+
 
 // `/optimize` prompt patterns per host. Mirrors `_OPTIMIZE_INVOCATION_PATTERNS`.
 // The leading `[\s"']*` tolerates wrapping quotes — `opencode run "..."` and
@@ -959,5 +994,6 @@ export function maybeStopNudgeText(runDir: string, sid: string): string | null {
   if (!sess) return null
   if (sess.exp_id) return null
   if (!sess.optimize_mode) return null
+  if (!sess.autonomous) return null  // opt-in only; default stops naturally
   return STOP_NUDGE_TEMPLATE
 }

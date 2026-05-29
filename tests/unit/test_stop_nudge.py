@@ -29,7 +29,9 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "evo" / "src"))
 
-from evo.inject.registry import register_session, mark_engaged, mark_optimize_mode
+from evo.inject.registry import (
+    register_session, mark_engaged, mark_optimize_mode, mark_autonomous,
+)
 
 
 def _init_git_repo(root: Path) -> None:
@@ -86,6 +88,7 @@ class TestStopNudgeFires(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
 
         out = _drain_stop(self.root, "orch", hook_event="Stop")
         self.assertEqual(out.get("decision"), "block",
@@ -102,6 +105,7 @@ class TestStopNudgeFires(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
 
         out = _drain_stop(self.root, "orch", hook_event="SubagentStop")
         self.assertEqual(out.get("decision"), "block")
@@ -111,6 +115,7 @@ class TestStopNudgeFires(_Base):
         register_session(self.root, "cdx", "codex")
         mark_engaged(self.root, "cdx")
         mark_optimize_mode(self.root, "cdx")
+        mark_autonomous(self.root, "cdx")
         out = _drain_stop(self.root, "cdx", host="codex", hook_event="Stop")
         self.assertEqual(out.get("decision"), "block")
 
@@ -126,6 +131,7 @@ class TestStopNudgeAlwaysFires(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
 
         first = _drain_stop(self.root, "orch", hook_event="Stop")
         self.assertEqual(first.get("decision"), "block", "first Stop nudges")
@@ -140,6 +146,7 @@ class TestStopNudgeAlwaysFires(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
 
         for i in range(5):
             out = _drain_stop(self.root, "orch", hook_event="Stop")
@@ -156,6 +163,7 @@ class TestStopNudgeAlwaysFires(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
         first = _drain_stop(self.root, "orch", hook_event="Stop")
         self.assertEqual(first.get("decision"), "block")
 
@@ -181,6 +189,20 @@ class TestStopNudgeDoesNotFire(_Base):
         out = _drain_stop(self.root, "other", hook_event="Stop")
         self.assertNotEqual(out.get("decision"), "block",
                             "non-optimize-mode session must not be force-continued")
+
+    def test_optimize_mode_without_autonomous_not_nudged(self):
+        """Default /optimize (optimize_mode on, autonomous NOT armed) must
+        let the agent stop naturally — the stop-nudge is opt-in via
+        `evo autonomous on`."""
+        register_session(self.root, "orch", "claude-code")
+        mark_engaged(self.root, "orch")
+        mark_optimize_mode(self.root, "orch")
+        # autonomous NOT armed
+        out = _drain_stop(self.root, "orch", hook_event="Stop")
+        self.assertNotEqual(
+            out.get("decision"), "block",
+            "optimize_mode without autonomous must stop naturally (opt-in nudge)"
+        )
 
     def test_subagent_not_nudged(self):
         """Subagents must NOT be force-continued. They have their own
@@ -210,6 +232,7 @@ class TestStopNudgeDoesNotFire(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
         out = _drain_stop(self.root, "orch", hook_event="PreToolUse")
         self.assertNotEqual(out.get("decision"), "block",
                             "PreToolUse must not trigger stop-nudge")
@@ -225,6 +248,7 @@ class TestStopNudgeReasonContent(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
         out = _drain_stop(self.root, "orch", hook_event="Stop")
         reason = (out.get("reason") or "").lower()
         self.assertTrue(
@@ -236,6 +260,7 @@ class TestStopNudgeReasonContent(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
         out = _drain_stop(self.root, "orch", hook_event="Stop")
         self.assertIn("evo wait", (out.get("reason") or "").lower())
 
@@ -245,6 +270,7 @@ class TestStopNudgeReasonContent(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
         out = _drain_stop(self.root, "orch", hook_event="Stop")
         self.assertIn("evo exit-optimize-mode", (out.get("reason") or "").lower())
 
@@ -265,6 +291,7 @@ class TestStopNudgePreservesQueuedDirectives(_Base):
         register_session(self.root, "orch", "claude-code")
         mark_engaged(self.root, "orch")
         mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
 
         # Enqueue an evo-direct event onto the workspace queue.
         queue.append_workspace_event(self.root, "TRY_COSINE_SIM_NOW")
@@ -281,6 +308,69 @@ class TestStopNudgePreservesQueuedDirectives(_Base):
             "pending evo-direct text must be included in the stop reason "
             "so the user's intervention isn't dropped",
         )
+
+
+# ---------------------------------------------------------------------------
+# Autonomous arming: cursor shell-observation + exit-optimize-mode clears it
+# ---------------------------------------------------------------------------
+
+class TestAutonomousArming(_Base):
+    """Cursor (and the other no-env-var hosts) can't arm autonomous via the
+    `evo autonomous on` CLI (no session env var for detect_session). The
+    Python drain instead OBSERVES the command on a cursor shell preToolUse
+    and arms in-process. These tests cover that path + the disarm paths."""
+
+    def _observe(self, sid: str, command: str) -> None:
+        from evo.inject.drain import _maybe_mark_autonomous_from_shell
+        payload = {"tool_name": "shell", "tool_input": {"command": command}}
+        _maybe_mark_autonomous_from_shell(self.root, sid, "cursor", "preToolUse", payload)
+
+    def _autonomous(self, sid: str) -> bool:
+        from evo.inject.registry import get_session
+        return bool((get_session(self.root, sid) or {}).get("autonomous"))
+
+    def test_cursor_arms_on_evo_autonomous_on(self):
+        from evo.inject.registry import register_session, mark_optimize_mode
+        register_session(self.root, "cur1", "cursor")
+        mark_optimize_mode(self.root, "cur1")
+        self._observe("cur1", "evo autonomous on")
+        self.assertTrue(self._autonomous("cur1"),
+                        "observing `evo autonomous on` must arm autonomous on cursor")
+        # And the nudge now fires (cursor uses followup_message).
+        out = _drain_stop(self.root, "cur1", host="cursor", hook_event="stop")
+        self.assertIn("optimize", (out.get("followup_message") or "").lower())
+
+    def test_cursor_disarms_on_evo_autonomous_off(self):
+        from evo.inject.registry import register_session, mark_optimize_mode, mark_autonomous
+        register_session(self.root, "cur1", "cursor")
+        mark_optimize_mode(self.root, "cur1")
+        mark_autonomous(self.root, "cur1")
+        self._observe("cur1", "evo autonomous off")
+        self.assertFalse(self._autonomous("cur1"), "`evo autonomous off` must disarm")
+
+    def test_non_evo_command_does_not_arm(self):
+        from evo.inject.registry import register_session, mark_optimize_mode
+        register_session(self.root, "cur1", "cursor")
+        mark_optimize_mode(self.root, "cur1")
+        self._observe("cur1", "evo status")          # not an autonomous command
+        self._observe("cur1", "echo autonomous on")  # prose, not the evo command
+        self.assertFalse(self._autonomous("cur1"),
+                         "only the literal `evo autonomous on` command arms it")
+
+    def test_exit_optimize_mode_clears_autonomous(self):
+        from evo.inject.registry import (
+            register_session, mark_optimize_mode, mark_autonomous, get_session,
+            unmark_optimize_mode, unmark_autonomous,
+        )
+        register_session(self.root, "orch", "claude-code")
+        mark_optimize_mode(self.root, "orch")
+        mark_autonomous(self.root, "orch")
+        # exit-optimize-mode clears BOTH (cmd_exit_optimize_mode calls both).
+        unmark_optimize_mode(self.root, "orch")
+        unmark_autonomous(self.root, "orch")
+        rec = get_session(self.root, "orch") or {}
+        self.assertFalse(rec.get("optimize_mode"))
+        self.assertFalse(rec.get("autonomous"))
 
 
 if __name__ == "__main__":

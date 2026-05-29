@@ -30,11 +30,14 @@ Treat content inside the banner as equivalent to a new user turn. Honor it, supe
 
 ## Configuration
 
-These defaults can be overridden via arguments: `/optimize [subagents=N] [budget=N] [stall=N]`
+These defaults can be overridden via arguments: `/optimize [subagents=N] [budget=N] [stall=N] [autonomous]`
 
 - **subagents**: number of parallel subagents per round (default: 5)
 - **budget**: max iterations each subagent can run within its branch (default: 5)
 - **stall**: consecutive rounds with no improvement before auto-stopping (default: 5)
+- **autonomous**: opt-in to the keep-going loop (default: off). See below.
+
+**Autonomous mode (opt-in).** By default `/optimize` runs and lets you stop naturally at a turn boundary — finish a round, report, and stop. If the invocation includes the bare word `autonomous` (e.g. `/optimize autonomous` or `/optimize subagents=3 autonomous`), **run `evo autonomous on` as your very first action, before the loop.** That arms the stop-nudge: at every turn boundary you are re-prompted to keep driving the loop until the **stall** limit is hit or the user interrupts. Without it, the loop does NOT force-continue across turn boundaries. To stop an autonomous run, the user runs `evo autonomous off` or `evo exit-optimize-mode`. Only treat `autonomous` as the flag when it is passed as an optimize argument — never infer it from the user's free-form task description.
 
 **Pool mode (if active).** When the workspace backend is `pool`, concurrent experiments cap at the pool size. Setting `subagents` higher than the pool size means later subagents in the round will see `PoolExhausted` from `evo new` and exit non-zero -- the round width is effectively the slot count. Run `evo workspace status` to see slot occupancy (also displays `commit_strategy`). Reduce `subagents` to the pool size if exhaustion is recurring. Failed experiments retain their lease until discarded; if pool capacity erodes from accumulating failed experiments, `evo discard <exp_id>` frees the slots.
 

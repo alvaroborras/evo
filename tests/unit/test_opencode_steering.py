@@ -203,6 +203,8 @@ class TestOpencodeStopNudgeAndPolicyState(unittest.TestCase):
                 registerSession,
                 markOptimizeMode,
                 unmarkOptimizeMode,
+                markAutonomous,
+                unmarkAutonomous,
                 maybeMarkOptimizeFromPrompt,
                 shouldPolicyBlock,
                 maybeStopNudgeText,
@@ -288,10 +290,21 @@ class TestOpencodeStopNudgeAndPolicyState(unittest.TestCase):
         result = self._bun(textwrap.dedent("""
             registerSession(runDir, "oc1", "opencode")
             markOptimizeMode(runDir, "oc1")
+            markAutonomous(runDir, "oc1")
             const text = maybeStopNudgeText(runDir, "oc1")
             process.stdout.write(JSON.stringify(text !== null && text.indexOf("EVO LOOP") >= 0))
         """))
         self.assertEqual(result, True)
+
+    def test_stop_nudge_skipped_without_autonomous(self):
+        """optimize_mode set but autonomous NOT armed → no nudge (opt-in)."""
+        result = self._bun(textwrap.dedent("""
+            registerSession(runDir, "oc1", "opencode")
+            markOptimizeMode(runDir, "oc1")
+            const text = maybeStopNudgeText(runDir, "oc1")
+            process.stdout.write(JSON.stringify(text))
+        """))
+        self.assertEqual(result, None)
 
     def test_stop_nudge_skipped_for_subagent(self):
         result = self._bun(textwrap.dedent("""

@@ -27,7 +27,9 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "evo" / "src"))
 
-from evo.inject.registry import register_session, mark_engaged, mark_optimize_mode
+from evo.inject.registry import (
+    register_session, mark_engaged, mark_optimize_mode, mark_autonomous,
+)
 
 
 def _init_git_repo(root: Path) -> None:
@@ -696,6 +698,7 @@ class TestCursorPolicyNudge(_Base):
         register_session(self.root, "cursor_sid", "cursor")
         mark_engaged(self.root, "cursor_sid")
         mark_optimize_mode(self.root, "cursor_sid")
+        mark_autonomous(self.root, "cursor_sid")  # stop-nudge is opt-in
 
     def test_cursor_edit_file_blocked_via_drain_session(self):
         """Direct drain_session entry, claude-code-style PreToolUse."""
@@ -784,6 +787,7 @@ class TestCursorStopNudge(_Base):
         register_session(self.root, "cursor_sid", "cursor")
         mark_engaged(self.root, "cursor_sid")
         mark_optimize_mode(self.root, "cursor_sid")
+        mark_autonomous(self.root, "cursor_sid")  # stop-nudge is opt-in
 
     def test_cursor_stop_emits_followup_message(self):
         """Cursor doesn't honor `decision: block` — its stop-continuation

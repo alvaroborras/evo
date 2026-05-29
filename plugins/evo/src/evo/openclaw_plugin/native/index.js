@@ -577,6 +577,32 @@ function markOptimizeMode(runDir, sid) {
   atomicWriteJson(p, rec);
   return true;
 }
+function markAutonomous(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (rec.exp_id)
+    return false;
+  if (rec.autonomous)
+    return false;
+  rec.autonomous = true;
+  rec.autonomous_at = nowIso();
+  atomicWriteJson(p, rec);
+  return true;
+}
+function unmarkAutonomous(runDir, sid) {
+  const p = sessionFile(runDir, sid);
+  const rec = readJsonOrNull(p);
+  if (!rec)
+    return false;
+  if (!rec.autonomous)
+    return false;
+  rec.autonomous = false;
+  rec.autonomous_at = null;
+  atomicWriteJson(p, rec);
+  return true;
+}
 var OPTIMIZE_PROMPT_RES = {
   opencode: [/(?:^|[^A-Za-z0-9_/:-])\/optimize\b/i],
   openclaw: [
@@ -635,6 +661,8 @@ function maybeStopNudgeText(runDir, sid) {
   if (sess.exp_id)
     return null;
   if (!sess.optimize_mode)
+    return null;
+  if (!sess.autonomous)
     return null;
   return STOP_NUDGE_TEMPLATE;
 }
@@ -779,6 +807,14 @@ var native_default = {
           return;
         const toolName = event?.toolName ?? event?.tool_name ?? event?.tool?.name;
         const toolInput = event?.params ?? event?.input ?? event?.tool?.params ?? {};
+        const cmd = toolInput?.command;
+        if (typeof cmd === "string") {
+          if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) || /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+            unmarkAutonomous(ctx.runDir, ctx.sid);
+          } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
+            markAutonomous(ctx.runDir, ctx.sid);
+          }
+        }
         if (shouldPolicyBlock(ctx.runDir, ctx.sid, toolName, toolInput)) {
           log(`deny ${toolName} in optimize_mode`);
           return { block: true, blockReason: POLICY_NUDGE_TEMPLATE };

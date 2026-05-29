@@ -122,7 +122,21 @@ class TestClaudeCodeEndToEnd(unittest.TestCase):
         )
         self.assertIn("EVO POLICY", hso.get("permissionDecisionReason", ""))
 
-        # Stop — must emit decision:block with EVO LOOP banner.
+        # Stop without autonomous — must NOT block. The stop-nudge is opt-in;
+        # a plain /optimize keeps the policy gate but stops naturally.
+        rc, out = self._fire({"hook_event_name": "Stop", "session_id": sid})
+        self.assertEqual(rc, 0)
+        self.assertNotEqual(
+            json.loads(out or "{}").get("decision"), "block",
+            "default /optimize (no autonomous) must let the agent stop"
+        )
+
+        # Arm autonomous — simulates the agent running `evo autonomous on`
+        # when /optimize was invoked with the `autonomous` param.
+        from evo.inject.registry import mark_autonomous
+        mark_autonomous(self.root, sid)
+
+        # Stop with autonomous — now emits decision:block with EVO LOOP banner.
         rc, out = self._fire({
             "hook_event_name": "Stop",
             "session_id": sid,

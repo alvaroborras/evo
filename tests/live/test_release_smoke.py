@@ -958,7 +958,7 @@ def test_opencode(sandbox_4g):
     # this, optimize_mode stays false, the deny gate doesn't engage, and
     # the optimize skill body isn't promoted into the conversation —
     # mid-run directives end up as observations the model can ignore.
-    prompt = _shell_quote("/optimize\n\n" + _read_prompt())
+    prompt = _shell_quote("/optimize autonomous\n\n" + _read_prompt())
 
     # `evo install opencode` now installs skills itself (via npx skills
     # add). In local-source mode pass --from-path so skills come from the
@@ -1019,10 +1019,13 @@ def test_claude_code(sandbox):
         timeout=300,
     )
 
-    # Prepend `/optimize` so the auto-arm regex flips optimize_mode → true
-    # on UserPromptSubmit. Without it, the deny gate doesn't engage and
-    # mid-run directives arrive as plain context the model can dismiss.
-    prompt = _shell_quote("/optimize\n\n" + _read_prompt())
+    # Prepend `/optimize autonomous` so (a) the auto-arm regex flips
+    # optimize_mode → true on UserPromptSubmit (deny gate engages), and
+    # (b) the `autonomous` param makes the agent run `evo autonomous on`,
+    # arming the stop-nudge. Without `autonomous` the default is stop-
+    # naturally, so the single --print turn would end after round 1 and
+    # the mid-run directive (injected post-round-1) would never be consumed.
+    prompt = _shell_quote("/optimize autonomous\n\n" + _read_prompt())
     # `evo install claude-code` is required (not optional) post-0.4.1: it
     # fetches the platform-native evo-hook-drain binary from the release's
     # uploaded assets (or via --from-path in local-source mode). Without
@@ -1090,7 +1093,7 @@ def test_codex(sandbox):
     # host-agnostic prompt body is just translation, not protocol leakage.
     # Without it, codex's gpt-5-mini reads the round-1/round-2 specs as
     # actionable shell tasks and skips the skill entirely.
-    prompt = _shell_quote("$evo:optimize\n\n" + _read_prompt())
+    prompt = _shell_quote("$evo:optimize autonomous\n\n" + _read_prompt())
     # In local-source mode, point `evo install codex` at the marketplace
     # root (contains .claude-plugin/marketplace.json) — it drives codex's
     # `plugin/install` RPC against that marketplace.json. PyPI/GitHub mode
@@ -1191,7 +1194,7 @@ def test_hermes(sandbox):
     )
     sandbox.sbx.files.write(
         "/tmp/hermes-prompt.txt",
-        "/optimize\n\n" + _read_prompt(),
+        "/optimize autonomous\n\n" + _read_prompt(),
     )
     sandbox.sbx.files.write(
         "/tmp/hermes-model.txt",
@@ -1266,7 +1269,7 @@ def test_openclaw(sandbox_4g):
     )
 
     # Prepend openclaw's `/optimize` to fire the auto-arm regex.
-    prompt = _shell_quote("/optimize\n\n" + _read_prompt())
+    prompt = _shell_quote("/optimize autonomous\n\n" + _read_prompt())
     _drive_smoke(
         sandbox_4g,
         host="openclaw",

@@ -40,12 +40,14 @@ import {
   isDeniedInOptimizeMode,
   isEvoCommand,
   isRegistered,
+  markAutonomous,
   markEngaged,
   markOptimizeMode,
   maybeMarkOptimizeFromPrompt,
   maybeStopNudgeText,
   peekDrainSession,
   registerSession,
+  unmarkAutonomous,
 } from "../opencode_plugin/drain.js"
 import * as crypto from "crypto"
 
@@ -233,9 +235,22 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       const sess = getSession(ctx.runDir, ctx.sid) as any
       if (!sess) return
       if (sess.exp_id) return // subagent — exempt
-      if (!sess.optimize_mode) return
       const toolName = event?.toolName ?? event?.tool_name
       const toolInput = event?.input ?? {}
+      // Autonomous arming: openclaw/pi have no session env var, so the
+      // `evo autonomous on` CLI can't self-detect the session — observe
+      // the command here and arm/disarm in-process (not prose; fires only
+      // on the actual command). Runs regardless of optimize_mode state.
+      const cmd = (toolInput as any)?.command
+      if (typeof cmd === "string") {
+        if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) ||
+            /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+          unmarkAutonomous(ctx.runDir, ctx.sid)
+        } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
+          markAutonomous(ctx.runDir, ctx.sid)
+        }
+      }
+      if (!sess.optimize_mode) return
       if (!isDeniedInOptimizeMode(toolName, toolInput)) return
       if (incrementAndShouldBlock(ctx.runDir, ctx.sid, toolName)) {
         return { block: true, reason: POLICY_NUDGE_TEMPLATE }
@@ -256,6 +271,7 @@ export function makeRegister(host: string): (api: PiExtensionAPI) => void {
       if (!sess) return
       if (sess.exp_id) return
       if (!sess.optimize_mode) return
+      if (!sess.autonomous) return  // opt-in only; default stops naturally
 
       // Peek queued directives (don't pop) and combine with the nudge.
       // If sendUserMessage throws, directives stay queued.

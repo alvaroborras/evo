@@ -36,11 +36,13 @@ import {
   findEvoRunDir,
   initOffsetToLatest,
   isRegistered,
+  markAutonomous,
   markEngaged,
   maybeMarkOptimizeFromPrompt,
   maybeStopNudgeText,
   registerSession,
   shouldPolicyBlock,
+  unmarkAutonomous,
 } from "../../opencode_plugin/drain.js"
 import * as crypto from "crypto"
 import * as fs from "fs"
@@ -225,6 +227,18 @@ export default {
         if (!ctx) return undefined
         const toolName = event?.toolName ?? event?.tool_name ?? event?.tool?.name
         const toolInput = event?.params ?? event?.input ?? event?.tool?.params ?? {}
+        // Autonomous arming via command observation (no session env var on
+        // openclaw/pi, so the CLI can't self-detect). Fires on the actual
+        // `evo autonomous on|off` / `evo exit-optimize-mode` command.
+        const cmd = (toolInput as any)?.command
+        if (typeof cmd === "string") {
+          if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) ||
+              /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+            unmarkAutonomous(ctx.runDir, ctx.sid)
+          } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
+            markAutonomous(ctx.runDir, ctx.sid)
+          }
+        }
         if (shouldPolicyBlock(ctx.runDir, ctx.sid, toolName, toolInput)) {
           log(`deny ${toolName} in optimize_mode`)
           return { block: true, blockReason: POLICY_NUDGE_TEMPLATE }

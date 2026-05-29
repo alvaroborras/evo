@@ -342,6 +342,45 @@ def _maybe_mark_engaged_from_shell(
         queue.init_offset_to_latest(root, session_id)
 
 
+# `evo autonomous on|off` and `evo exit-optimize-mode` — the autonomous
+# arming/disarming commands. Cursor has no session env var, so `evo
+# autonomous on` run from the agent's shell can't self-detect its session
+# via the CLI; we observe the command here instead and arm/disarm the
+# session record directly (same idea as _maybe_mark_engaged_from_shell).
+_AUTONOMOUS_ON_RE = _re.compile(r"^\s*evo\s+autonomous(\s+on)?\s*$")
+_AUTONOMOUS_OFF_RE = _re.compile(r"^\s*evo\s+autonomous\s+off\s*$")
+_EXIT_OPTIMIZE_RE = _re.compile(r"^\s*evo\s+exit-optimize-mode\b")
+
+
+def _maybe_mark_autonomous_from_shell(
+    root: Path,
+    session_id: str,
+    host: str,
+    hook_event: str | None,
+    payload: dict | None,
+) -> None:
+    """For self-contained hosts (currently Cursor): observe the agent's
+    `evo autonomous on|off` (or `evo exit-optimize-mode`) shell command and
+    arm/disarm the session's `autonomous` flag in-process. Cursor's CLI
+    invocation can't self-detect its session (no env var), so the command
+    would no-op via `detect_session`; observing it here is what actually
+    arms it. Idempotent."""
+    if host != "cursor":
+        return
+    if hook_event != "preToolUse":
+        return
+    if _cursor_tool_class((payload or {}).get("tool_name")) != "shell":
+        return
+    cmd = ((payload or {}).get("tool_input") or {}).get("command", "")
+    if not isinstance(cmd, str):
+        return
+    from .registry import mark_autonomous, unmark_autonomous
+    if _AUTONOMOUS_OFF_RE.match(cmd) or _EXIT_OPTIMIZE_RE.match(cmd):
+        unmark_autonomous(root, session_id)
+    elif _AUTONOMOUS_ON_RE.match(cmd):
+        mark_autonomous(root, session_id)
+
+
 def _self_contained_gate(
     root: Path, session_id: str, host: str, hook_event: str | None,
     tool_name: str | None = None,
@@ -1302,9 +1341,13 @@ def _maybe_stop_nudge_text(
     """Return continuation-prompt text if this Stop/SubagentStop should
     re-prompt the agent, or None to let the agent stop normally.
 
-    Always fires when conditions hold. The user explicitly invoked
-    /optimize for autonomous operation — letting the agent stop on its
-    own defeats the point. The escape hatch is `evo exit-optimize-mode`.
+    Opt-in: fires only when the orchestrator armed `autonomous` (via
+    `evo autonomous on`, driven by the `autonomous` /optimize param). A
+    plain /optimize keeps the policy gate but lets the agent stop
+    naturally at a turn boundary — the always-continue loop is too
+    aggressive to be the default (its only escape is
+    `evo exit-optimize-mode`). When autonomous is on, the loop runs until
+    the agent hits its stall limit or the user interrupts.
 
     Conditions:
       - hook event must be Stop or SubagentStop (case-insensitive
@@ -1312,6 +1355,7 @@ def _maybe_stop_nudge_text(
         camelCase).
       - session must be orchestrator-class (no exp_id).
       - optimize_mode must be true on the session record.
+      - autonomous must be true on the session record (the opt-in).
       - host must have a working stop-continuation envelope:
         claude-code/codex use `{decision: "block", reason: …}`; cursor
         uses `{followup_message: …}` (auto-submitted at turn end).
@@ -1325,6 +1369,8 @@ def _maybe_stop_nudge_text(
         return None  # subagent — not our session to force-continue
     if not sess.get("optimize_mode"):
         return None
+    if not sess.get("autonomous"):
+        return None  # opt-in only; default /optimize stops naturally
     if host not in ("claude-code", "codex", "cursor"):
         return None  # no known stop-continuation envelope on this host
     return _STOP_NUDGE_TEMPLATE
@@ -1404,6 +1450,8 @@ def main(argv: list[str] | None = None) -> int:
     # used by other hosts. Detect it here instead: if the agent runs any
     # `evo …` shell command, flip engagement on this session's record.
     _maybe_mark_engaged_from_shell(root, session, host, hook_event, payload)
+    # Same rationale for autonomous: cursor arms via observing the command.
+    _maybe_mark_autonomous_from_shell(root, session, host, hook_event, payload)
     gate = _self_contained_gate(root, session, host, hook_event, tool_name, tool_input)
     # Detect /optimize invocation from the prompt payload for cursor's
     # self-contained path. Must run AFTER the gate because the gate is

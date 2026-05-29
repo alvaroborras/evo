@@ -27,6 +27,7 @@ import {
   initOffsetToLatest,
   isEvoCommand,
   isRegistered,
+  markAutonomous,
   markEngaged,
   markOptimizeMode,
   maybeMarkOptimizeFromPrompt,
@@ -34,6 +35,7 @@ import {
   peekDrainSession,
   registerSession,
   shouldPolicyBlock,
+  unmarkAutonomous,
 } from "./drain.js"
 import * as fs from "fs"
 import * as path from "path"
@@ -132,6 +134,16 @@ export const EvoPlugin = async ({ project, client }: any) => {
           if (markEngaged(runDir, sid)) {
             initOffsetToLatest(runDir, sid)
           }
+          // Autonomous arming: opencode has no session env var, so the
+          // `evo autonomous on` CLI can't self-detect the session — we
+          // observe the command here and arm/disarm in-process. Not prose:
+          // this fires only on the actual command execution.
+          if (/^\s*evo\s+autonomous\s+off\s*$/.test(cmd) ||
+              /^\s*evo\s+exit-optimize-mode\b/.test(cmd)) {
+            unmarkAutonomous(runDir, sid)
+          } else if (/^\s*evo\s+autonomous(\s+on)?\s*$/.test(cmd)) {
+            markAutonomous(runDir, sid)
+          }
         }
       }
 
@@ -155,7 +167,7 @@ export const EvoPlugin = async ({ project, client }: any) => {
       const runDir = findEvoRunDir(project?.directory)
       if (!runDir) return
       const sess = getSession(runDir, sessionID) as any
-      if (!sess || sess.exp_id || !sess.optimize_mode) return
+      if (!sess || sess.exp_id || !sess.optimize_mode || !sess.autonomous) return
 
       // Bail BEFORE any state mutation if we can't actually deliver.
       // session.prompt is the only delivery channel here; if it's
