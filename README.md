@@ -160,7 +160,7 @@ evo update <host>                    # update one host (also bumps CLI to match)
 evo update <host> --version 0.4.1    # pin to a release
 ```
 
-Every `evo install` / `evo update` keeps the CLI on PATH in lockstep with the host plugin version it just installed (`uv tool install --force evo-hq-cli` under the hood). The CLI binary, the skill files, and the hook protocol share wire formats — letting them drift caused silent failures in earlier versions. Editable installs (`uv tool install --editable`, `pip install -e`) are detected and left untouched.
+Every `evo install` / `evo update` keeps the CLI on PATH in lockstep with the host plugin version it just installed (`uv tool install --force evo-hq-cli` under the hood). Without a `--version` pin that resolves to the latest **stable** release, so running an unpinned `evo install`/`evo update` against a pre-release pulls the CLI back to stable — pin both sides for an alpha (see [Testing a pre-release](#testing-a-pre-release-alpha)). The CLI binary, the skill files, and the hook protocol share wire formats — letting them drift caused silent failures in earlier versions. Editable installs (`uv tool install --editable`, `pip install -e`) are detected and left untouched.
 
 See `evo update --help` for `--force`, `--scope`, and additional flags.
 
