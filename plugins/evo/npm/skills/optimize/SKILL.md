@@ -30,11 +30,14 @@ Treat content inside the banner as equivalent to a new user turn. Honor it, supe
 
 ## Configuration
 
-These defaults can be overridden via arguments: `/optimize [subagents=N] [budget=N] [stall=N] [autonomous] [subagents-only]`
+The orchestrator **sizes the round to the benchmark's resource profile** instead of using a flat default. Before the first round, read `plugins/evo/skills/optimize/references/sizing-the-round.md` and apply it. Short version:
 
-- **subagents**: number of parallel subagents per round (default: 5)
-- **budget**: max iterations each subagent can run within its branch (default: 5)
-- **stall**: consecutive rounds with no improvement before auto-stopping (default: 5)
+- **subagents** (round width): bounded by the backend (worktree = one shared machine, pool = slot count, remote = provider quota) and by whatever resource one benchmark run saturates. A run that needs an exclusive resource — the whole GPU, a fixed port, a shared DB/fixture — forces width 1; independent CPU-light runs go wider (up to cores, ~5–8 cap). Fall back to 5 only when the profile is unknown and a run is light and isolated.
+- **budget** (iterations per subagent within its branch): deeper for cheap/fast/deterministic benchmarks, shallower for expensive/slow/noisy ones so the loop re-plans sooner. ~5 is a reasonable midpoint.
+- **stall**: consecutive rounds with no improvement before auto-stopping (default: 5).
+
+A user can override any of these with `/optimize [subagents=N] [budget=N] [stall=N]`; an explicit value always wins over the heuristic.
+
 - **autonomous**: the keep-going loop. **Default: on** — evo is autoresearch; it runs unattended. Turn off for a run with `evo autonomous off`.
 - **subagents-only**: gate orchestrator edits, pushing all edits through subagents. **Default: on**. Turn off for a run with `evo subagents-only off`.
 

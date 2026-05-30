@@ -392,6 +392,7 @@ Document:
   - `uses LLMs with temp=0` -- expected to be deterministic in practice; flag if it isn't
   - `sampling-based, variance expected` -- inherent noise; optimize will need multi-run strategies
 - Environment requirements discovered during validation
+- **Resource profile (for run sizing)** -- the binding resource one benchmark run needs (exclusive GPU/accelerator, peak memory, an exclusive port, a shared DB/fixture, or an external API rate limit / $-per-run), whether concurrent benchmark runs are safe on this backend or must serialize, and rough time/cost per run. `/evo:optimize` reads this to size each round (see `plugins/evo/skills/optimize/references/sizing-the-round.md`)
 - What each gate protects
 - Benchmark gaming risks identified during the Goodhart check
 - Future experiment candidates (the non-picked dimensions from step 3)
