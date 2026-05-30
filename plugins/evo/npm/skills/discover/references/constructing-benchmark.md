@@ -54,7 +54,7 @@ Output contract (same as existing evo benchmarks):
 - **stdout / stderr:** free for user output (logs, progress, debug)
 - **exit code:** 0 on successful completion (even if score is low); non-zero only on infrastructure failure (import error, missing data, etc.)
 
-Use the SDK or inline instrumentation depending on the user's earlier choice (recorded in `.evo/meta.json` as `instrumentation_mode`).
+Use the SDK or inline instrumentation depending on the user's earlier choice (recorded in `.evo/meta.json` as `instrumentation_mode`). Write the harness in the language that drives the target -- a Rust target gets a Rust harness, a Go target a Go harness. Inline mode is language-native: implement the trace/result contract in that same language (`instrumentation-contract.md`), don't wrap the benchmark in a Python or JS sidecar. SDK mode is Python/Node only.
 
 ## 4. Goodhart check
 
