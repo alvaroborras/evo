@@ -30,13 +30,24 @@ Treat content inside the banner as equivalent to a new user turn. Honor it, supe
 
 ## Configuration
 
-The orchestrator **sizes the round to the benchmark's resource profile** instead of using a flat default. Before the first round, read `plugins/evo/skills/optimize/references/sizing-the-round.md` and apply it. Short version:
+The orchestrator's three round-shape knobs are **subagents** (round width), **budget** (per-branch depth), and **stall** (consecutive rounds with no improvement before auto-stopping; default 5).
 
-- **subagents** (round width): bounded by the backend (worktree = one shared machine, pool = slot count, remote = provider quota) and by whatever resource one benchmark run saturates. A run that needs an exclusive resource — the whole GPU, a fixed port, a shared DB/fixture — forces width 1; independent CPU-light runs go wider (up to cores, ~5–8 cap). Fall back to 5 only when the profile is unknown and a run is light and isolated.
-- **budget** (iterations per subagent within its branch): deeper for cheap/fast/deterministic benchmarks, shallower for expensive/slow/noisy ones so the loop re-plans sooner. ~5 is a reasonable midpoint.
-- **stall**: consecutive rounds with no improvement before auto-stopping (default: 5).
+A user can override any of these with `/optimize [subagents=N] [budget=N] [stall=N]`; an explicit value always wins over what's below.
 
-A user can override any of these with `/optimize [subagents=N] [budget=N] [stall=N]`; an explicit value always wins over the heuristic.
+**Picking `subagents` and `budget` is load-bearing -- do not skim.**
+
+Mandatory before the first round (and again any time the backend or benchmark changes): **READ `plugins/evo/skills/optimize/references/sizing-the-round.md` IN FULL.** That doc enumerates the resource-binding cases (exclusive accelerator, memory-heavy, shared mutable fixture, latency/timing measurement, external rate-limit, CPU-light isolated) and gives the specific width formula for each. Do not infer the value from any inline summary in this skill -- the cases that matter most (latency benchmarks, shared-state contention) are exactly the ones that don't compress to a one-liner safely.
+
+Under-subscribing wastes wall-clock. Over-subscribing CORRUPTS RESULTS -- e.g., a latency benchmark with two concurrent runs measures contended timings, not the optimization's real effect, and the orchestrator may promote a "winner" that's just a contention artifact.
+
+Common ways agents get this wrong by skimming:
+- "8-core machine, CPU-light → width 5" sounds right but assumes the measurement isn't contention-sensitive. Latency / timing / throughput benchmarks are corrupted by sibling-process CPU pressure even when the scoring code is "light."
+- "Worktree backend has no slot cap so I can go higher" — worktree just shifts the cap from infrastructure to the binding resource. Same hardware, no safety net.
+- "The harness has warmup + min-over-N batches" softens noise but doesn't eliminate contention bias.
+
+If `.evo/project.md` records a resource profile (it should, after `/evo:discover`), START from that. The reference doc is what you use to APPLY it. If the profile is missing or thin, that's a discover-step bug — fix it (write a resource profile that names the binding resource explicitly) before continuing.
+
+In your opening message, state the width/budget you chose AND the one-line reason tied to the binding-resource case FROM THE DOC (e.g. "width 1 — latency benchmark, sibling CPU contention corrupts ns measurements; budget 8 — runs are deterministic, deeper iteration before re-plan is cheap"). If you can't cite the binding-resource case by name, you skipped the doc -- go back and read it.
 
 - **autonomous**: the keep-going loop. **Default: on** — evo is autoresearch; it runs unattended. Turn off for a run with `evo autonomous off`.
 - **subagents-only**: gate orchestrator edits, pushing all edits through subagents. **Default: on**. Turn off for a run with `evo subagents-only off`.
