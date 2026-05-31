@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Audit a single experiment for design-time cheating (pre-phase) or result-time validity (post-phase). Run as a precondition for evo run and as a gate before commit. Use when the user invokes /evo:verifier, the subagent protocol calls verifier before evo run or before commit, or you need to sanity-check an experiment that completed suspiciously fast or with implausible scores.
+description: Internal protocol for the evo experiment-verifier. Loaded by an evo optimization subagent before evo run (--phase pre) and after evo run (--phase post) to audit one experiment for design-time cheating or result-time validity. Not user-invokable; the orchestrator does not load it either.
 argument-hint: "--phase <pre|post> --target <exp_id>"
 evo_version: 0.5.0-alpha.1
 ---
@@ -11,8 +11,8 @@ Internal procedure for `evo:verifier`. Audits one experiment for issues that the
 
 Two phases, both scoped to a single experiment:
 
-- **`--phase pre`** runs BEFORE `evo run`. Static analysis only -- the experiment hasn't executed yet. Catches design-time cheating (training on test data, deliberately undersampled eval, missing gates) before any compute is burned.
-- **`--phase post`** runs AFTER `evo run` completes, BEFORE the subagent commits. Inspects the actual results -- benchmark duration vs. cohort, score reproducibility, artifact reality. Catches result-time cheating (cached eval output, no-op model, fabricated score).
+- **`--phase pre`** (primary): runs BEFORE `evo run`, called by every experiment subagent as a precondition. Static analysis only -- the experiment hasn't executed yet. Catches design-time cheating (training on test data, deliberately undersampled eval, missing gates) before any compute is burned.
+- **`--phase post`** (advisory): runs AFTER `evo run` completes. Inspects the actual results -- benchmark duration vs. cohort, score reproducibility, artifact reality. NOTE: `evo run` auto-commits before any subagent can intervene, so post-phase is currently advisory only -- useful for ad-hoc audits of suspicious experiments via `evo prune`, not as a pre-commit gate. Re-architecting post-phase as a workspace gate (so commit-prevention happens inside evo) is a separate piece of work.
 
 ## Host conventions
 

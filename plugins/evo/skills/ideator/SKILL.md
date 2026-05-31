@@ -1,6 +1,6 @@
 ---
 name: ideator
-description: Generate new experiment proposals by cross-cutting analysis of the experiment graph plus targeted literature/web scans. Spawned in parallel as multiple briefs (failure analysis, literature, frontier extrapolation) that reconcile via append-only proposals file. Use when the user invokes /evo:ideator, the optimize loop wants fresh directions after a stall, or after every N committed experiments.
+description: Internal protocol for the evo experiment-ideator. Loaded by an ideator subagent spawned from /optimize when fresh directions are needed (stall, failure cluster, or every N committed experiments). Each spawn runs ONE brief (failure_analysis / literature / frontier_extrapolation); all briefs append to a shared proposals file the orchestrator reconciles. Not user-invokable; the orchestrator does not load it either.
 argument-hint: "--brief <failure_analysis|literature|frontier_extrapolation> [--k <count>]"
 evo_version: 0.5.0-alpha.1
 ---

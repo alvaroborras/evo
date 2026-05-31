@@ -168,7 +168,7 @@ The verifier checks for test-set leakage in your training data, subsetted eval c
 
 If the verifier returns FAIL, address every flagged issue and re-verify. Only proceed to `evo run` when it returns PASS. Skipping or fudging a FAIL verdict is a stop-the-line bug -- the verdict is the precondition for compute spend.
 
-If the verifier returns WARN, you may proceed but address the warnings in your annotation (step 8).
+If the verifier returns WARN, you may proceed but address the warnings in your annotation (step 7).
 
 ### 5. Run the experiment
 
@@ -205,23 +205,7 @@ evo run <exp_id> --i-staged-new-files yes
 
 The ack flag is required when the worktree has any untracked, non-gitignored file. Without it, `evo run` errors closed and lists the files. For each file, decide: source (then `git add`) or warm state (leave untracked -- it persists in the slot for future experiments). Then re-run with `--i-staged-new-files yes`. The flag value must be exactly `yes`. In `commit_strategy=all` workspaces (default for `--backend worktree`) the flag is a silent no-op; safe to always pass.
 
-### 6. Verify the result (post-`evo run`)
-
-After `evo run` finishes, load the **evo verifier skill** again, this time with args `--phase post --target <your exp_id>`. Result audit.
-
-Post-phase checks: did benchmark duration look right vs. the cohort, is `final_model/` (or whatever artifact your gate references) a real non-empty checkpoint, does a 2-sample re-eval match the recorded score, did every registered gate actually fire. See `plugins/evo/skills/verifier/SKILL.md` for details.
-
-> **Known architectural gap (being addressed separately):** `evo run` auto-commits when score improves + gates pass — there's no "pre-commit" window for the subagent to intervene. So if the run committed, calling post-verifier and then `evo discard` won't work (committed nodes can't be discarded, only pruned). The intended fix is to register the post-phase verifier as a workspace gate so commit-prevention happens inside evo's own gate machinery. Until that lands: if the run is `COMMITTED` and the verifier flags problems, use `evo prune <exp_id> --reason "verifier post-phase fail: <summary>"`. If the run is `EVALUATED` or `FAILED`, `evo discard` works as documented below.
-
-If post-verifier returns FAIL on an EVALUATED node, discard with the verifier's reason verbatim:
-
-```bash
-evo discard <exp_id> --reason "verifier post-phase fail: <one-line summary from verifier annotation>"
-```
-
-The discard preserves the verification annotation so the ideator's failure-analysis brief can learn from why experiments were rejected.
-
-### 7. Analyze the result
+### 6. Analyze the result
 
 `evo run` prints one of three outcomes:
 
@@ -241,7 +225,7 @@ The discard preserves the verification annotation so the ideator's failure-analy
   - Structural (benchmark broken, evo misconfigured): report to orchestrator and stop.
   - Not worth fixing: `evo discard <id> --reason "..."`.
 
-### 8. Annotate
+### 7. Annotate
 
 ```bash
 evo annotate <exp_id> "<what you changed, what happened, and why>"
@@ -249,7 +233,7 @@ evo annotate <exp_id> "<what you changed, what happened, and why>"
 
 Always annotate so other agents can learn from your experiments.
 
-### 8b. Add gates for fixed behaviors
+### 7b. Add gates for fixed behaviors
 
 When you fix a critical, easy-to-regress behavior, lock it in as a gate so future experiments on this branch can't break it:
 
@@ -259,7 +243,7 @@ evo gate add <exp_id> --name "social_eng_resistance" --command "python3 {worktre
 
 Good candidates: a specific benchmark task that was hard to fix, a test for a critical policy rule, a smoke test for a fragile behavior. The gate command must exit non-zero when the protected behavior regresses; a bare benchmark invocation that prints a low score but exits 0 is decorative and should not be registered. Do NOT gate every passing task -- that over-constrains the search.
 
-### 9. Decide: continue or stop
+### 8. Decide: continue or stop
 
 Continue if budget remains AND (last outcome was committed, OR you have a meaningfully different idea after an evaluated/discarded outcome). When continuing after a committed experiment, update your parent to the newly committed ID.
 
