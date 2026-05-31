@@ -2,7 +2,7 @@
 name: verifier
 description: Audit a single experiment for design-time cheating (pre-phase) or result-time validity (post-phase). Run as a precondition for evo run and as a gate before commit. Use when the user invokes /evo:verifier, the subagent protocol calls verifier before evo run or before commit, or you need to sanity-check an experiment that completed suspiciously fast or with implausible scores.
 argument-hint: "--phase <pre|post> --target <exp_id>"
-evo_version: 0.5.0-alpha.4
+evo_version: 0.5.0-alpha.5
 ---
 
 # Verifier
@@ -56,7 +56,7 @@ Cheap (~30s). The experiment's worktree exists with the agent's proposed train.p
 
 3. **Gate coverage.** Run `evo gate list <exp_id>`. If the experiment introduces a new artifact (model checkpoint, generated code), confirm there's at least one gate that validates the artifact exists and isn't a no-op stub (look for any gate command that touches the artifact path). Warn if missing.
 
-4. **Hypothesis specificity.** Read `evo show <exp_id>` for the `hypothesis` field. Generic hypotheses like "try LoRA" or "improve performance" should warn -- the experiment can't be evaluated against a specific prediction. Specific hypotheses ("LoRA r=64 on NuminaMath-CoT amc_aime subset, 1 epoch, lr=2e-4, expected +3-5% over baseline") pass.
+4. **Hypothesis specificity.** Read `evo show <exp_id>` for the `hypothesis` field. Generic hypotheses like "improve performance" or "try a different technique" should warn -- the experiment can't be evaluated against a specific prediction. Specific hypotheses (a named technique with concrete hyperparameters, named dataset / input, and a quantitative expected effect) pass.
 
 5. **Resource-profile compliance.** Read workspace `resource_profile` if present (set via `evo config set resource-binding ...`). If `concurrent_safe=false` AND `evo status` shows any other experiment as active, warn -- a second run will OOM.
 
@@ -117,17 +117,17 @@ The verification annotation persists so future ideator runs can learn from why e
 ### Pre-phase: catch test-set leakage
 
 ```bash
-# Subagent has constructed exp_0007 with a new train.py
+# Subagent has constructed exp_0007 with a changed target file
 evo:verifier --phase pre --target exp_0007
 # Output:
 # annotation written: phase=pre, verdict=fail
 #   checks.test_set_leakage = fail
-#     train.py:42 loads 'data/aime_2025_problems.json' which matches workspace
-#     test_set_glob 'aime_2025*'
+#     <target>:42 loads a path matching the workspace's declared test_set_glob
+#     ("<glob from project.md>") -- training on test data invalidates the score
 # exit code: 1
 ```
 
-The subagent revises train.py, removes the offending load, re-runs the verifier, gets pass, then proceeds to `evo run`.
+The subagent revises the target, removes the offending load, re-runs the verifier, gets pass, then proceeds to `evo run`.
 
 ### Post-phase: catch cache short-circuit
 

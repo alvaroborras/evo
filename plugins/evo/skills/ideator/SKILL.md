@@ -2,7 +2,7 @@
 name: ideator
 description: Generate new experiment proposals by cross-cutting analysis of the experiment graph plus targeted literature/web scans. Spawned in parallel as multiple briefs (failure analysis, literature, frontier extrapolation) that reconcile via append-only proposals file. Use when the user invokes /evo:ideator, the optimize loop wants fresh directions after a stall, or after every N committed experiments.
 argument-hint: "--brief <failure_analysis|literature|frontier_extrapolation> [--k <count>]"
-evo_version: 0.5.0-alpha.4
+evo_version: 0.5.0-alpha.5
 ---
 
 # Ideator
@@ -38,20 +38,50 @@ Output: 0-5 proposals depending on how many distinct failure clusters exist.
 
 ### `--brief literature`
 
-Targeted web/arxiv scan for techniques relevant to the workspace's domain, filtered against what's been tried.
+Multi-source web/research scan for techniques relevant to the workspace's domain, filtered against what's already been tried in this run.
+
+This brief is the closest thing in evo to a generic research agent: it acts like a focused web search that surfaces *actionable* proposals (technique + code + config) rather than just a reading list. Borrowed structurally from systems like HuggingFace's ml-intern -- multi-source, separate-context, multi-tool.
 
 Inputs:
-- Workspace `project_name` and `.evo/project.md` for the domain
-- Full `evo graph` for the list of tried hypotheses
-- Web tools (`WebFetch`, `WebSearch`) from the host
+- Workspace `project_name`, `.evo/project.md` for domain context
+- `evo graph` (full) for the list of tried hypotheses + their outcomes
+- Web tools: `WebSearch`, `WebFetch` (or your host's equivalents)
 
 Procedure:
-1. Read `.evo/project.md` and `evo show root` for the optimization target (e.g., "Qwen3-4B-Base on AIME 2025 via post-training").
-2. Query arxiv-listings / recent blog posts / paper summaries for the most recent techniques in the domain (last 6-12 months). Two or three search queries, not exhaustive.
-3. For each technique found, check against the workspace graph: has anything along these lines already been tried? Skip if yes.
-4. Write 2-4 proposals, each with: technique name, paper/post link, mechanism summary, expected cost (small/medium/large), specific configuration to try.
 
-Output: 2-4 proposals. The orchestrator weighs these against in-graph proposals -- novelty alone doesn't beat a strong frontier extrapolation.
+1. **Frame the search.** Read `.evo/project.md` and `evo show root` to extract: the optimization target, the base model / system being optimized, the metric. Write a one-sentence brief for yourself: "I'm looking for techniques to improve <target> on <metric>, given that <prior approaches> have already been tried (with outcomes ...)."
+
+2. **Scan multiple sources in parallel** -- different sources surface different kinds of signal:
+
+   | Source | Query shape | Surfaces |
+   |---|---|---|
+   | **arXiv** | `site:arxiv.org [domain] [recent month]` | Newest techniques; methodology depth |
+   | **HuggingFace Papers** | `site:huggingface.co/papers [domain]` | Curated; community discussion + replication notes |
+   | **HuggingFace Hub** | `site:huggingface.co/datasets [domain]` or `models [base]` | Available data/checkpoints to skip data prep |
+   | **GitHub code search** | `site:github.com [technique keyword] [base model]` | Working implementations; whether technique has been built |
+   | **GitHub issues** | `site:github.com/issues [technique] improvement OR worked` | Practitioner anecdotes ("LoRA r=64 gave +5% on my task") |
+   | **GitHub PRs** | `site:github.com/pulls [framework] [technique]` | Active in-flight work; pre-release techniques |
+   | **Recent blog posts** | unfiltered web search, last 6 months | Honest writeups about what actually worked |
+
+   Aim for 5-8 total searches across sources. Don't exhaustively crawl any one source; this is signal-gathering, not a literature review.
+
+3. **Due diligence on each candidate.** Before turning a finding into a proposal:
+   - **Paper sources**: WebFetch the abstract + main results. Confirm the claimed improvement is in the headline results, not buried in an appendix. Note sample size + benchmark used.
+   - **GitHub repos**: WebFetch the README. Check: when was the last commit, are there open issues complaining about it not working, does the README claim quantitative improvements with reproducible config.
+   - **Issues/PRs**: read the actual thread, not just the title. Look for "I confirmed this" / "didn't reproduce" follow-ups.
+   - Discard candidates that look promising but lack a concrete config or runnable code -- proposals need to be actionable.
+
+4. **Filter against the workspace graph.** For each surviving candidate, check `evo graph` for any prior experiment with a similar hypothesis (use `evo discards --like "<keyword>"` for fast string match, then read `evo show <id>` for the full hypothesis). Skip duplicates and trivial variations. The orchestrator's reconciler does a second-pass dedup, but the ideator should catch the obvious ones to avoid wasted proposals.
+
+5. **Rank surviving candidates** by:
+   - **Has-code signal**: working implementation > paper-only > anecdote-only
+   - **Replication signal**: multiple independent sources reporting it > single source
+   - **Specificity**: precise config (concrete hyperparams, named datasets, runnable commands) > vague high-level technique names
+   - **Recency**: newer often better for post-training, but a 6-month-old paper with a working repo beats a 1-week-old paper with no code
+
+6. **Write 2-4 proposals** -- top of the ranking. Each includes the full provenance so the orchestrator can verify before spending compute (see Output format below).
+
+Output: 2-4 proposals. The orchestrator weighs these against in-graph proposals -- novelty alone doesn't beat a strong frontier extrapolation, but a well-cited technique with working code and an unexplored direction often beats both.
 
 ### `--brief frontier_extrapolation`
 
@@ -81,7 +111,7 @@ One JSON object per line:
 ```json
 {
   "generated_at": "2026-05-31T18:30:00+00:00",
-  "brief": "frontier_extrapolation",
+  "brief": "frontier_extrapolation|failure_analysis|literature",
   "based_on_experiments": ["exp_0003", "exp_0005"],
   "hypothesis": "<one-sentence specific proposal>",
   "mechanism": "<why this should help, 1-3 sentences>",
@@ -89,9 +119,24 @@ One JSON object per line:
   "expected_score_uplift": "<range, e.g. +2-5% absolute>",
   "data_needed": ["dataset id 1", "dataset id 2"],
   "differentiation_from_existing": "<what makes this distinct from what was already tried>",
-  "source": "<url if literature; null otherwise>"
+
+  "sources": [
+    {"kind": "paper", "url": "https://arxiv.org/abs/...", "claim": "<headline result quoted>"},
+    {"kind": "repo",  "url": "https://github.com/.../...", "last_commit": "2026-04", "stars": 1240,
+     "claim": "<README quote on improvement / config>"},
+    {"kind": "issue", "url": "https://github.com/.../issues/...", "claim": "<practitioner's reported delta>"},
+    {"kind": "blog",  "url": "https://...", "claim": "<key sentence>"}
+  ],
+  "confidence_signals": {
+    "has_runnable_code": true,
+    "replicated_across_sources": 2,
+    "specificity": "high|medium|low",
+    "recency_months": 4
+  }
 }
 ```
+
+`sources` and `confidence_signals` are only required for the `literature` brief. `failure_analysis` and `frontier_extrapolation` derive their evidence from in-graph data (`based_on_experiments` is sufficient provenance) and may leave them null. The orchestrator uses `confidence_signals` to weight proposals at reconciliation -- a paper-only finding with `replicated_across_sources=1, has_runnable_code=false` ranks below a frontier-extrapolation proposal grounded in observed gradients.
 
 Append-only: the file may accumulate hundreds of proposals across a long run. The orchestrator filters on `generated_at` (newer than last check) and `differentiation_from_existing` (not duplicative).
 
@@ -172,18 +217,39 @@ evo:ideator --brief frontier_extrapolation --k 2
 #   2. LoRA r=64 with gradient_checkpointing (avoid OOM), expected +1-4%, medium cost
 ```
 
-### Literature surfaces an untried technique
+### Literature surfaces an untried technique (with full provenance)
 
 ```bash
-evo:ideator --brief literature --k 3
-# Reads workspace project_name = "AIME2025-Qwen3-4B"
-# Searches: "math reasoning post-training 2026", "Qwen3 finetuning verifier reward"
-# Finds: GRPO with verifier reward (AIME answers are integers; perfect for verifiable RL)
-# Cross-checks graph: no RL attempts in the workspace yet
-# Writes 1 proposal:
-#   1. GRPO with verifier reward, mechanism: integer-answer verifier as binary reward,
-#      large cost (~3h), expected +5-15% absolute, source: <arxiv link>
+evo:ideator --brief literature
+# Reads workspace project_name + .evo/project.md to identify target + base system
+# Searches across sources in parallel (5-8 total queries):
+#   - arxiv: "<target-domain> <related-technique> <recent year>"
+#   - HF Papers: "site:huggingface.co/papers <target-domain> <recent year>"
+#   - GitHub code: "site:github.com <technique-keyword> <base-framework> implementation"
+#   - GitHub issues: "site:github.com <technique> improvement OR worked"
+#   - blog: "<technique> <target-domain>" (unfiltered, last 6mo)
+# Finds N candidates across sources; counts how many sources each shows up in
+# Due diligence per candidate:
+#   - WebFetch paper abstract: confirms claimed delta is in headline results
+#   - WebFetch top GitHub repo README: last-commit recency, claimed config, stars
+#   - WebFetch supporting issue/PR threads: practitioner replication
+# Cross-check evo graph: skip candidates whose hypothesis matches a prior experiment
+# Ranks surviving candidates by has_runnable_code > replication > specificity > recency
+# Writes 2-4 proposals with full sources=[...] and confidence_signals={...}
 ```
+
+## Generic web-research mode
+
+The literature brief doubles as a generic web-research agent when the orchestrator wants targeted external signal without spawning a full ideation round. Invoke it directly with a focused query:
+
+```bash
+evo:ideator --brief literature
+# Pass a focused query via the orchestrator's brief override mechanism, e.g.
+# "Search specifically for: how others handle <specific failure mode> when training
+#  <base model> on <data type>. Focus on sources from the last 3 months."
+```
+
+The procedure is the same -- multi-source scan, due diligence, ranked proposals -- but the orchestrator narrows the brief to a specific question rather than the broad "what could we try next."
 
 ### Failure analysis catches a shared root cause
 
