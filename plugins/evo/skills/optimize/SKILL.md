@@ -2,7 +2,7 @@
 name: optimize
 description: Run the evo optimization loop with parallel subagents until interrupted.
 argument-hint: "[subagents=N] [budget=N] [stall=N]"
-evo_version: 0.5.0-alpha.1
+evo_version: 0.5.0-alpha.2
 ---
 
 Run the `evo` optimization loop. Each round, the orchestrator writes structured briefs and spawns parallel subagents that execute within them. Each subagent is semi-autonomous: it reads the pointer traces, forms the concrete edit, runs experiments, and can iterate within its branch. Runs until interrupted or the stall limit is reached.
@@ -296,6 +296,50 @@ Update notes with cross-cutting learnings:
   ```bash
   evo set <exp_id> --note "key insight from round N"
   ```
+
+### 6b. Periodically spawn ideators (in parallel, non-blocking)
+
+The optimize loop's scan sub-agents (step 3) read the CURRENT round's evaluated experiments for failure patterns. They don't do deep cross-graph analysis or external literature scans -- that work belongs to the ideator skill (`evo:ideator`).
+
+Spawn ideators in parallel when ANY of these triggers fire:
+
+- **Periodic**: every N=5 committed experiments since the last ideator round
+- **Stall**: best score unchanged for M=3 consecutive committed experiments (the stall counter from step 6)
+- **Failure cluster**: M=3 consecutive discards with related root causes (use the `evo discards` output)
+- **User-triggered**: a directive (`evo direct`) asks for fresh ideas
+
+When a trigger fires, spawn three parallel ideator subagents -- one per brief -- using your host's parallel-subagent tool (same mechanism as step 5):
+
+```
+brief: failure_analysis     -- cross-graph clustering of discards/failures
+brief: literature           -- web/arxiv scan for untried techniques in the workspace domain
+brief: frontier_extrapolation -- deeper variants of the steepest score gradient on the best path
+```
+
+Each subagent loads the **evo ideator skill** (named `ideator` under the evo plugin in your host's skill registry) as its first action, then runs the brief. They write to `.evo/run_<run_id>/ideator/proposals.jsonl` (append-only). See `plugins/evo/skills/ideator/SKILL.md` for the full procedure each ideator follows.
+
+Do not block on ideators -- they take 5-10 min and you have a next round to plan. Fire them, exit the turn, continue the loop. The proposals are consumed at decision time (step 4 of the next round).
+
+### 6c. Reconcile ideator proposals at brief-writing time
+
+Before writing the next round's briefs (step 4 of the next iteration), check for new ideator proposals:
+
+```bash
+# Read proposals newer than the last round
+test -f .evo/run_*/ideator/proposals.jsonl && \
+  tail -n +1 .evo/run_*/ideator/proposals.jsonl | \
+  jq -s --argjson cutoff "$LAST_ROUND_END_TS" \
+    'map(select(.generated_at > $cutoff))'
+```
+
+For each new proposal:
+
+1. Check the workspace graph -- has the proposed config already been tried? Use `evo discards --like "<keyword>"` to scan. If yes, skip.
+2. Score each remaining proposal by `expected_score_uplift × confidence`. Confidence ranking: `frontier_extrapolation > failure_analysis > literature`, all else equal.
+3. The top 1-2 proposals become objectives in the next round's briefs (step 4). Cite the proposal's `hypothesis` and `mechanism` in the brief's *Objective* field.
+4. Leave the rest in the queue -- they may surface as winners after a few more rounds when the frontier shifts.
+
+Proposals are advisory, not mandatory. If none look better than what step 3's scan sub-agents surfaced from in-graph signal, ignore them and proceed with the in-graph briefs. Ideator output complements, doesn't replace.
 
 ### 7. Continue or stop
 

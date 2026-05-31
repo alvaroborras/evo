@@ -1,7 +1,7 @@
 ---
 name: subagent
 description: Internal protocol for evo optimization subagents. Loaded by subagents spawned from /optimize via their host's skill loader. Not for orchestrator use.
-evo_version: 0.5.0-alpha.1
+evo_version: 0.5.0-alpha.2
 ---
 
 # Evo Subagent Protocol
@@ -160,7 +160,24 @@ For multi-line edits, `evo edit --json-stdin` reads `{"old":...,"new":...,"repla
 
 You may edit anything within the target scope. Do NOT modify benchmark, gate, or framework code.
 
-### 4. Run the experiment
+### 4. Verify the experiment design (pre-`evo run`)
+
+Before `evo run` burns compute, audit the experiment for design-time cheating or shape issues:
+
+```bash
+# Invoke the verifier skill -- pre-phase is static analysis, ~30s
+# Host-equivalent invocation; on claude-code:
+#   Skill("evo:verifier", args="--phase pre --target <exp_id>")
+evo:verifier --phase pre --target <exp_id>
+```
+
+The verifier checks for test-set leakage in your training data, subsetted eval commands, missing gates for new artifacts, generic hypotheses, and concurrent-resource conflicts. See `plugins/evo/skills/verifier/SKILL.md` for the full check list.
+
+If the verifier returns FAIL, address every flagged issue and re-verify. Only proceed to `evo run` when it returns PASS. Skipping or fudging a FAIL verdict is a stop-the-line bug -- the verdict is the precondition for compute spend.
+
+If the verifier returns WARN, you may proceed but address the warnings in your annotation (step 6).
+
+### 5. Run the experiment
 
 ```bash
 evo run <exp_id>
@@ -195,7 +212,25 @@ evo run <exp_id> --i-staged-new-files yes
 
 The ack flag is required when the worktree has any untracked, non-gitignored file. Without it, `evo run` errors closed and lists the files. For each file, decide: source (then `git add`) or warm state (leave untracked -- it persists in the slot for future experiments). Then re-run with `--i-staged-new-files yes`. The flag value must be exactly `yes`. In `commit_strategy=all` workspaces (default for `--backend worktree`) the flag is a silent no-op; safe to always pass.
 
-### 5. Analyze the result
+### 6. Verify the result (post-`evo run`, pre-commit)
+
+After `evo run` finishes but before the experiment is committed, audit the actual result:
+
+```bash
+evo:verifier --phase post --target <exp_id>
+```
+
+Post-phase checks: did benchmark duration look right vs. the cohort, is `final_model/` (or whatever artifact your gate references) a real non-empty checkpoint, does a 2-sample re-eval match the recorded score, did every registered gate actually fire. See `plugins/evo/skills/verifier/SKILL.md` for details.
+
+If post-verifier returns FAIL, do not commit. Discard the experiment with the verifier's reason verbatim:
+
+```bash
+evo discard <exp_id> --reason "verifier post-phase fail: <one-line summary from verifier annotation>"
+```
+
+The discard preserves the verification annotation so the ideator's failure-analysis brief can learn from why experiments were rejected.
+
+### 7. Analyze the result
 
 `evo run` prints one of three outcomes:
 
@@ -215,7 +250,7 @@ The ack flag is required when the worktree has any untracked, non-gitignored fil
   - Structural (benchmark broken, evo misconfigured): report to orchestrator and stop.
   - Not worth fixing: `evo discard <id> --reason "..."`.
 
-### 6. Annotate
+### 8. Annotate
 
 ```bash
 evo annotate <exp_id> "<what you changed, what happened, and why>"
@@ -223,7 +258,7 @@ evo annotate <exp_id> "<what you changed, what happened, and why>"
 
 Always annotate so other agents can learn from your experiments.
 
-### 6b. Add gates for fixed behaviors
+### 8b. Add gates for fixed behaviors
 
 When you fix a critical, easy-to-regress behavior, lock it in as a gate so future experiments on this branch can't break it:
 
@@ -233,7 +268,7 @@ evo gate add <exp_id> --name "social_eng_resistance" --command "python3 {worktre
 
 Good candidates: a specific benchmark task that was hard to fix, a test for a critical policy rule, a smoke test for a fragile behavior. The gate command must exit non-zero when the protected behavior regresses; a bare benchmark invocation that prints a low score but exits 0 is decorative and should not be registered. Do NOT gate every passing task -- that over-constrains the search.
 
-### 7. Decide: continue or stop
+### 9. Decide: continue or stop
 
 Continue if budget remains AND (last outcome was committed, OR you have a meaningfully different idea after an evaluated/discarded outcome). When continuing after a committed experiment, update your parent to the newly committed ID.
 
