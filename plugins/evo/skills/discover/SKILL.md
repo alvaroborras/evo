@@ -409,6 +409,9 @@ End the skill by reporting in chat:
 - The baseline experiment ID and score
 - The chosen optimization dimension and why
 - A one-liner on next steps: "Run `/evo:optimize` to start the optimization loop."
+
+**Do not run experiments outside `/evo:optimize`.** Even if the workspace's resource profile forces serial execution (e.g. exclusive-GPU, width 1), you still go through `/evo:optimize` with `subagents=1`. The optimize loop's value isn't just parallelism -- it's the structured loop around every experiment (scan-subagent cross-cutting analysis, brief writing, verifier pre/post hooks, ideator spawning on stall, frontier reconciliation). Bypassing optimize to "drive experiments directly" loses all of that and reverts to ad-hoc iteration. If you are tempted to skip optimize because the workload is serial, read `plugins/evo/skills/optimize/SKILL.md` for how to configure it for serial work -- the answer is `subagents=1`, NOT "don't run optimize."
+
 - **Resume after crash:** if the host, the shell, or the machine restarts mid-flow, re-invoke `evo:optimize`. Evo reads `.evo/` and resumes from the last committed experiment -- no special restore procedure.
 - **State is local to this machine:** experiment commits on branches like `evo/run_0000/exp_*` survive `git push --all`, but orchestration state (graph, annotations, project notes) lives only in `.evo/`. If that history matters to you, back up `.evo/` separately (e.g., `tar -czf evo-state-$(date +%F).tar.gz .evo/`).
 
