@@ -17,6 +17,7 @@ working around an upstream cache-invalidation bug
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -31,11 +32,25 @@ _PLUGIN = "evo@evo-hq-evo"
 _MARKETPLACE_NAME = "evo-hq-evo"
 
 
+def _claude_config_dir() -> Path:
+    """Return the Claude Code config root. Honors `CLAUDE_CONFIG_DIR` (used
+    by Claude Code to relocate state outside `~/.claude`, e.g. in cloud
+    containers where the home dir is ephemeral and a persistent volume is
+    mounted elsewhere). Falls back to `~/.claude`.
+
+    Without this, every helper here that hardcodes `Path.home() / ".claude"`
+    misses the plugin cache when `CLAUDE_CONFIG_DIR` is set -- silently
+    skipping `ensure_hook_drain_binary` and breaking `evo direct` delivery.
+    """
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(cfg) if cfg else Path.home() / ".claude"
+
+
 def _latest_cache_dir() -> Path | None:
     """Return the latest-version plugin cache dir, or None if not installed.
-    Cache layout: ~/.claude/plugins/cache/<mkt>/evo/<version>/
+    Cache layout: <claude-config-dir>/plugins/cache/<mkt>/evo/<version>/
     """
-    root = Path.home() / ".claude" / "plugins" / "cache" / _MARKETPLACE_NAME / "evo"
+    root = _claude_config_dir() / "plugins" / "cache" / _MARKETPLACE_NAME / "evo"
     if not root.exists():
         return None
     versions = sorted(p for p in root.iterdir() if p.is_dir())
@@ -157,7 +172,7 @@ def update(args: argparse.Namespace) -> int:
 
     if force:
         # Sidestep the upstream cache-invalidation bug: wipe cache, reinstall.
-        cache = Path.home() / ".claude" / "plugins" / "cache" / _MARKETPLACE_NAME
+        cache = _claude_config_dir() / "plugins" / "cache" / _MARKETPLACE_NAME
         if cache.exists():
             print(f"$ rm -rf {cache}")
             shutil.rmtree(cache)
@@ -192,8 +207,8 @@ def uninstall(args: argparse.Namespace) -> int:
 def doctor(args: argparse.Namespace) -> int:
     import json
 
-    home = Path.home()
-    settings = home / ".claude" / "settings.json"
+    home = _claude_config_dir()
+    settings = home / "settings.json"
     if not settings.exists():
         print(f"✗ {settings} not found — Claude Code not installed?")
         return 1
@@ -217,7 +232,7 @@ def doctor(args: argparse.Namespace) -> int:
     src = marketplaces.get(_MARKETPLACE_NAME, {}).get("source", {})
     src_type = src.get("source")
     if src_type == "github":
-        cache = home / ".claude" / "plugins" / "marketplaces" / _MARKETPLACE_NAME
+        cache = home / "plugins" / "marketplaces" / _MARKETPLACE_NAME
         if cache.exists():
             print(f"✓ marketplace cached at {cache}")
         else:
@@ -234,9 +249,9 @@ def doctor(args: argparse.Namespace) -> int:
         print(f"? unknown marketplace source type: {src_type}")
 
     # Detect cache-staleness (#35-shape): marketplace clone version vs cache.
-    plugin_cache_root = home / ".claude" / "plugins" / "cache" / _MARKETPLACE_NAME / "evo"
+    plugin_cache_root = home / "plugins" / "cache" / _MARKETPLACE_NAME / "evo"
     mkt_manifest = (
-        home / ".claude" / "plugins" / "marketplaces" / _MARKETPLACE_NAME
+        home / "plugins" / "marketplaces" / _MARKETPLACE_NAME
         / "plugins" / "evo" / ".claude-plugin" / "plugin.json"
     )
     if plugin_cache_root.exists() and mkt_manifest.exists():
