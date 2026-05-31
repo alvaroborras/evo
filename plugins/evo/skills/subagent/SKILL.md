@@ -162,20 +162,13 @@ You may edit anything within the target scope. Do NOT modify benchmark, gate, or
 
 ### 4. Verify the experiment design (pre-`evo run`)
 
-Before `evo run` burns compute, audit the experiment for design-time cheating or shape issues:
-
-```bash
-# Invoke the verifier skill -- pre-phase is static analysis, ~30s
-# Host-equivalent invocation; on claude-code:
-#   Skill("evo:verifier", args="--phase pre --target <exp_id>")
-evo:verifier --phase pre --target <exp_id>
-```
+Before `evo run` burns compute, load the **evo verifier skill** (named `verifier` under the evo plugin in your host's skill registry — use your host's skill loader) with args `--phase pre --target <your exp_id>`. Static analysis, ~30s.
 
 The verifier checks for test-set leakage in your training data, subsetted eval commands, missing gates for new artifacts, generic hypotheses, and concurrent-resource conflicts. See `plugins/evo/skills/verifier/SKILL.md` for the full check list.
 
 If the verifier returns FAIL, address every flagged issue and re-verify. Only proceed to `evo run` when it returns PASS. Skipping or fudging a FAIL verdict is a stop-the-line bug -- the verdict is the precondition for compute spend.
 
-If the verifier returns WARN, you may proceed but address the warnings in your annotation (step 6).
+If the verifier returns WARN, you may proceed but address the warnings in your annotation (step 8).
 
 ### 5. Run the experiment
 
@@ -212,17 +205,15 @@ evo run <exp_id> --i-staged-new-files yes
 
 The ack flag is required when the worktree has any untracked, non-gitignored file. Without it, `evo run` errors closed and lists the files. For each file, decide: source (then `git add`) or warm state (leave untracked -- it persists in the slot for future experiments). Then re-run with `--i-staged-new-files yes`. The flag value must be exactly `yes`. In `commit_strategy=all` workspaces (default for `--backend worktree`) the flag is a silent no-op; safe to always pass.
 
-### 6. Verify the result (post-`evo run`, pre-commit)
+### 6. Verify the result (post-`evo run`)
 
-After `evo run` finishes but before the experiment is committed, audit the actual result:
-
-```bash
-evo:verifier --phase post --target <exp_id>
-```
+After `evo run` finishes, load the **evo verifier skill** again, this time with args `--phase post --target <your exp_id>`. Result audit.
 
 Post-phase checks: did benchmark duration look right vs. the cohort, is `final_model/` (or whatever artifact your gate references) a real non-empty checkpoint, does a 2-sample re-eval match the recorded score, did every registered gate actually fire. See `plugins/evo/skills/verifier/SKILL.md` for details.
 
-If post-verifier returns FAIL, do not commit. Discard the experiment with the verifier's reason verbatim:
+> **Known architectural gap (being addressed separately):** `evo run` auto-commits when score improves + gates pass — there's no "pre-commit" window for the subagent to intervene. So if the run committed, calling post-verifier and then `evo discard` won't work (committed nodes can't be discarded, only pruned). The intended fix is to register the post-phase verifier as a workspace gate so commit-prevention happens inside evo's own gate machinery. Until that lands: if the run is `COMMITTED` and the verifier flags problems, use `evo prune <exp_id> --reason "verifier post-phase fail: <summary>"`. If the run is `EVALUATED` or `FAILED`, `evo discard` works as documented below.
+
+If post-verifier returns FAIL on an EVALUATED node, discard with the verifier's reason verbatim:
 
 ```bash
 evo discard <exp_id> --reason "verifier post-phase fail: <one-line summary from verifier annotation>"

@@ -142,28 +142,13 @@ Append-only: the file may accumulate hundreds of proposals across a long run. Th
 
 ## Concurrency and reconciliation
 
-The orchestrator typically spawns three parallel ideator subagents. Each spawn is a Task call; the spawned agent's FIRST action is to load this skill via its host's Skill tool, passing the brief as args. The orchestrator never pastes the skill body into the Task prompt -- it just instructs the spawned agent to load and run the skill:
+The orchestrator spawns one ideator subagent per brief using its host's parallel-subagent tool (same mechanism as experiment subagents -- see `evo:optimize` step 5 for the per-host spawn commands). The orchestrator does NOT read this skill -- it only knows the skill name and which brief to pass. Each spawned subagent loads the skill itself as its first action.
 
-```python
-# In the orchestrator's evo:optimize loop, on stall or every N=5 commits.
-# Spawn shape varies per host (Task on claude-code, batch task on opencode, etc.)
-# -- see optimize skill step 5 for the per-host spawn commands.
+Each subagent's prompt MUST start with the literal sentence:
 
-for brief in ("failure_analysis", "literature", "frontier_extrapolation"):
-    Task(
-        subagent_type="general-purpose",
-        description=f"evo:ideator {brief}",
-        prompt=(
-            f"First, load the `evo:ideator` skill from your host's skill "
-            f"registry with args=\"--brief {brief}\". Then follow the skill's "
-            f"procedure for that brief. When you finish, append all your "
-            f"proposals as JSONL lines (single final write) to "
-            f".evo/run_*/ideator/proposals.jsonl, then exit."
-        ),
-    )
-```
+> "First, load and follow the **evo ideator skill** (named `ideator` under the evo plugin in your host's skill registry — use your host's skill loader, not a filesystem path) with args `--brief <failure_analysis|literature|frontier_extrapolation>`. Append all your proposals as JSONL lines (single final write at the end) to `.evo/run_*/ideator/proposals.jsonl`, then exit."
 
-The spawned agent then runs `Skill(skill="evo:ideator", args="--brief failure_analysis")` as its first call -- the skill body loads into ITS context with the args, and it branches to the right brief section.
+Substitute the actual brief value when spawning. Each spawn gets exactly ONE brief.
 
 Each runs ~5-10 min, independently, in its own context. The orchestrator chooses whether to block on them or fire-and-continue -- see the optimize skill's step 6b for the policy. In either case, the orchestrator blocks/checks via `evo wait`:
 
