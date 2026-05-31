@@ -2,7 +2,7 @@
 name: verifier
 description: Audit a single experiment for design-time cheating (pre-phase) or result-time validity (post-phase). Run as a precondition for evo run and as a gate before commit. Use when the user invokes /evo:verifier, the subagent protocol calls verifier before evo run or before commit, or you need to sanity-check an experiment that completed suspiciously fast or with implausible scores.
 argument-hint: "--phase <pre|post> --target <exp_id>"
-evo_version: 0.5.0-alpha.5
+evo_version: 0.5.0-alpha.1
 ---
 
 # Verifier

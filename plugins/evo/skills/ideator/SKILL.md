@@ -2,7 +2,7 @@
 name: ideator
 description: Generate new experiment proposals by cross-cutting analysis of the experiment graph plus targeted literature/web scans. Spawned in parallel as multiple briefs (failure analysis, literature, frontier extrapolation) that reconcile via append-only proposals file. Use when the user invokes /evo:ideator, the optimize loop wants fresh directions after a stall, or after every N committed experiments.
 argument-hint: "--brief <failure_analysis|literature|frontier_extrapolation> [--k <count>]"
-evo_version: 0.5.0-alpha.5
+evo_version: 0.5.0-alpha.1
 ---
 
 # Ideator
@@ -142,20 +142,28 @@ Append-only: the file may accumulate hundreds of proposals across a long run. Th
 
 ## Concurrency and reconciliation
 
-The orchestrator typically spawns three parallel ideator subagents:
+The orchestrator typically spawns three parallel ideator subagents. Each spawn is a Task call; the spawned agent's FIRST action is to load this skill via its host's Skill tool, passing the brief as args. The orchestrator never pastes the skill body into the Task prompt -- it just instructs the spawned agent to load and run the skill:
 
 ```python
-# In the orchestrator's evo:optimize loop, on stall or every N=5 commits:
-Task(subagent_type="general-purpose",
-     description="evo:ideator failure analysis",
-     prompt=<ideator skill body with --brief failure_analysis filled in>)
-Task(subagent_type="general-purpose",
-     description="evo:ideator literature",
-     prompt=<ideator skill body with --brief literature filled in>)
-Task(subagent_type="general-purpose",
-     description="evo:ideator frontier",
-     prompt=<ideator skill body with --brief frontier_extrapolation filled in>)
+# In the orchestrator's evo:optimize loop, on stall or every N=5 commits.
+# Spawn shape varies per host (Task on claude-code, batch task on opencode, etc.)
+# -- see optimize skill step 5 for the per-host spawn commands.
+
+for brief in ("failure_analysis", "literature", "frontier_extrapolation"):
+    Task(
+        subagent_type="general-purpose",
+        description=f"evo:ideator {brief}",
+        prompt=(
+            f"First, load the `evo:ideator` skill from your host's skill "
+            f"registry with args=\"--brief {brief}\". Then follow the skill's "
+            f"procedure for that brief. When you finish, append all your "
+            f"proposals as JSONL lines (single final write) to "
+            f".evo/run_*/ideator/proposals.jsonl, then exit."
+        ),
+    )
 ```
+
+The spawned agent then runs `Skill(skill="evo:ideator", args="--brief failure_analysis")` as its first call -- the skill body loads into ITS context with the args, and it branches to the right brief section.
 
 Each runs ~5-10 min, independently, in its own context. The orchestrator chooses whether to block on them or fire-and-continue -- see the optimize skill's step 6b for the policy. In either case, the orchestrator blocks/checks via `evo wait`:
 

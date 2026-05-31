@@ -1,6 +1,6 @@
 {
   "name": "@evo-hq/pi-evo",
-  "version": "0.5.0-alpha.5",
+  "version": "0.5.0-alpha.1",
   "description": "Evo plugin for pi-coding-agent: optimize/discover/subagent skills + mid-run inject extension.",
   "publishConfig": {
     "access": "public"
