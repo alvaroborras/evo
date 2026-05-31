@@ -6,6 +6,13 @@
  * - Reads EVO_TRACES_DIR, EVO_EXPERIMENT_ID, EVO_RESULT_PATH from process.env.
  * - Writes traces/task_<id>.json per task.
  * - Writes the final result JSON to EVO_RESULT_PATH, or stdout if unset.
+ *
+ * **Per-task emission is the load-bearing discipline.** If your benchmark
+ * evaluates N independent items (per-test-case, per-document, per-sample),
+ * call logTask ONCE PER ITEM with as much detail as you have (input,
+ * expected, model output, timings). Do NOT roll up to one aggregate call --
+ * the dashboard's per-task panel and the verifier's reproducibility check
+ * both rely on per-item traces. See the USAGE EXAMPLE at the bottom.
  */
 
 import {
@@ -95,3 +102,41 @@ export function writeResult(score) {
   }
   return score;
 }
+
+
+// === USAGE EXAMPLE (copy + adapt) ===
+//
+// For a benchmark scoring N independent items, emit one logTask per item.
+// writeResult() with no arg aggregates from the per-task scores.
+//
+// async function main() {
+//   const cases = await loadTestCases();              // N items
+//   for (const [i, c] of cases.entries()) {
+//     const output = await runUnderTest(c.input);
+//     const correct = output === c.expected;
+//     logTask(
+//       `case_${String(i).padStart(2, "0")}`,         // stable id per item
+//       correct ? 1.0 : 0.0,                          // per-item score
+//       {
+//         input: c.input,                             // extras land in the trace JSON
+//         expected: c.expected,                       // for diagnosis later
+//         actual: output,
+//         elapsed_ms: c.elapsed,
+//       }
+//     );
+//   }
+//   // No arg -> writeResult averages the per-task scores
+//   const final = writeResult();
+//   console.log(`final: ${final.toFixed(4)}`);
+// }
+//
+// Anti-pattern: one logTask or writeResult with the aggregate score. Loses
+// the per-item detail the dashboard and verifier rely on. Don't do this:
+//
+//   const score = passed / total;
+//   logTask("eval_total", score);                    // <-- aggregate; useless
+//   writeResult(score);
+//
+// Exception: if the benchmark really is a single indivisible measurement
+// (one e2e workflow, one perf number), emit one task with that score AND
+// pass every observable as extras (timings, allocations, error log).

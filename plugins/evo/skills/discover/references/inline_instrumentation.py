@@ -5,6 +5,18 @@ Contract:
 - Reads EVO_TRACES_DIR, EVO_EXPERIMENT_ID, EVO_RESULT_PATH from env.
 - Writes traces/task_<id>.json per task.
 - Writes the final result JSON to EVO_RESULT_PATH, or stdout if unset.
+
+**Per-task emission is the load-bearing discipline.** If your benchmark
+evaluates N independent items (per-question math, per-test-case unit
+tests, per-document QA, per-sample reasoning trace), call `log_task`
+ONCE PER ITEM with as much detail as you have (problem text, model
+output, expected answer, intermediate reasoning) -- not one aggregate
+call with the rolled-up score. The dashboard's per-task panel and the
+verifier's reproducibility spot-check both rely on per-item traces;
+emitting one aggregate `log_task("eval_total", score)` makes both
+useless and loses the diagnostic value of the run. `write_result()`
+aggregates from the per-task scores automatically -- you don't need to
+roll up yourself. See the USAGE EXAMPLE at the bottom of this file.
 """
 
 from __future__ import annotations
@@ -107,3 +119,41 @@ def write_result(score: float | None = None) -> float:
     else:
         print(payload)
     return score
+
+
+# === USAGE EXAMPLE (copy + adapt) ===
+#
+# For a benchmark scoring N independent items, emit one log_task per item.
+# write_result() with no arg aggregates _SCORES into the final score.
+#
+# def main():
+#     problems = load_aime_problems()              # list of N items
+#     model = load_model()
+#     for i, problem in enumerate(problems):
+#         output = model.generate(problem.question)
+#         correct = extract_answer(output) == problem.expected
+#         log_task(
+#             f"aime_q{i:02d}",                    # stable id per item
+#             score=1.0 if correct else 0.0,       # per-item score
+#             question=problem.question,           # everything else goes as **extra
+#             expected=problem.expected,           # and lands in the trace JSON
+#             model_output=output,                 # for diagnosis later
+#             tokens_used=len(model.last_tokens),
+#         )
+#     # write_result() with no arg returns mean(_SCORES) over all logged tasks --
+#     # no need to compute the average yourself
+#     final_score = write_result()
+#     print(f"final: {final_score:.4f}")
+#
+# Anti-pattern: ONE log_task or write_result call with the aggregate. The
+# dashboard's per-task panel + the verifier's reproducibility spot-check
+# both need per-item traces; aggregate-only emission makes them useless.
+#
+#     # DO NOT do this:
+#     score = sum(per_problem_correct) / len(per_problem_correct)
+#     log_task("eval_total", score)               # <-- aggregate; loses detail
+#     write_result(score)
+#
+# Exception: if the benchmark really is a single indivisible measurement
+# (one e2e workflow, one perf number), emit one task with that score AND
+# include every observable as **extra (timings, allocations, error log).

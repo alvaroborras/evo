@@ -5,6 +5,13 @@ Install `evo-hq-agent` with this project's package manager/runtime, for example
 
 The SDK auto-reads $EVO_TRACES_DIR, $EVO_EXPERIMENT_ID, and $EVO_RESULT_PATH.
 Traces flush on each report() so the dashboard can stream progress live.
+
+**Per-task emission is the load-bearing discipline.** Loop over your N
+independent items and call `run.report(task_id, score=..., ...)` ONCE PER
+ITEM. Do NOT roll up to one aggregate `run.report("eval_total", score=avg)`
+call -- the dashboard's per-task panel and the verifier's reproducibility
+spot-check both rely on per-item traces. The example below shows the right
+pattern. The Anti-pattern at the bottom is what to avoid.
 """
 
 from evo_agent import Run, Gate
@@ -41,3 +48,21 @@ with Gate() as gate:
     for task in critical_tasks:
         result = evaluate(task, agent)
         gate.check(task["id"], score=result.score)
+
+
+# ---- ANTI-PATTERN (do NOT do this) ----
+#
+# Computing the aggregate yourself and reporting it as a single task
+# entry loses every diagnostic value of the per-item traces -- dashboard
+# can't show which problems failed, verifier can't spot-check, ideator
+# can't cluster failure modes. The SDK aggregates from per-task reports
+# automatically.
+#
+#     # WRONG:
+#     scores = [evaluate(t, agent).score for t in tasks]
+#     run.report("eval_total", score=sum(scores) / len(scores))
+#     run.finish()
+#
+# Exception: if your benchmark really is a single indivisible measurement
+# (one e2e workflow with one score number), report one task AND attach
+# every observable as extras.
