@@ -1059,8 +1059,9 @@ def create_app(root: Path | None = None) -> Flask:
 def main() -> None:
     import os
     port = int(os.environ.get("EVO_DASHBOARD_PORT", "8080"))
+    host = os.environ.get("EVO_DASHBOARD_HOST", "127.0.0.1")
     app = create_app()
-    app.run(host="127.0.0.1", port=port, debug=False)
+    app.run(host=host, port=port, debug=False)
 
 
 if __name__ == "__main__":
