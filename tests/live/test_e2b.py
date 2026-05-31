@@ -82,7 +82,7 @@ def test_evo_run_against_e2b() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print("--- evo init OK ---")
@@ -164,7 +164,7 @@ def test_e2b_recovers_after_orchestrator_death() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         _evo(

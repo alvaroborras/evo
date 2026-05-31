@@ -2,7 +2,7 @@
 name: discover
 description: Initialize evo for the current repository by exploring the codebase, proposing unexplored optimization dimensions, constructing the benchmark inside a baseline worktree, and running the first experiment. Use when the user invokes /evo:discover, mentions setting up evo, wants to instrument a codebase for autonomous optimization, or asks to start a new evo run on a project.
 argument-hint: <optional context about what to optimize>
-evo_version: 0.4.4
+evo_version: 0.5.0-alpha.1
 ---
 
 # Discover
@@ -40,20 +40,20 @@ evo --version
 The output must be exactly:
 
 ```
-evo-hq-cli 0.4.4
+evo-hq-cli 0.5.0-alpha.1
 ```
 
 Three outcomes:
 
 1. **Matches exactly** — continue to step 1.
 2. **Reports a different version** (`evo-hq-cli 0.4.2`, etc.) — the host refetched a newer/older skill bundle than the CLI on PATH. Drift breaks skills silently. Stop and tell the user:
-   > Your installed evo CLI is on a different version than this skill (`0.4.4`). Run:
+   > Your installed evo CLI is on a different version than this skill (`0.5.0-alpha.1`). Run:
    > ```
-   > uv tool install --force evo-hq-cli==0.4.4
+   > uv tool install --force evo-hq-cli==0.5.0-alpha.1
    > ```
    > Then re-invoke this skill.
 3. **`command not found`, or reports a different package** (commonly `evo 1.x` — the unrelated SLAM tool) — the CLI isn't installed. Tell the user:
-   > `evo-hq-cli` isn't on your PATH. Install it: `uv tool install evo-hq-cli==0.4.4` (or `pipx install evo-hq-cli==0.4.4`). Then re-invoke this skill.
+   > `evo-hq-cli` isn't on your PATH. Install it: `uv tool install evo-hq-cli==0.5.0-alpha.1` (or `pipx install evo-hq-cli==0.5.0-alpha.1`). Then re-invoke this skill.
 
 Do not try to auto-install. Host sandbox + network policy may block it; leaving the install as a user action keeps failure modes clear.
 
@@ -180,13 +180,16 @@ build/
 evo init --name "<short project name>" \
   --target <file> --benchmark "<command using {worktree} and {target}>" --metric <max|min> \
   --host <claude-code|codex|opencode|openclaw|hermes|pi|generic> \
-  --instrumentation-mode <sdk|inline> [--gate "<gate command>"] \
+  --instrumentation-mode <sdk|inline> \
+  --per-exp-timeout <seconds> [--gate "<gate command>"] \
   [--commit-strategy <all|tracked-only>]
 ```
 
 **`--host` is required.** Pass the host runtime you (the orchestrator) are running under. Allowed values: `claude-code`, `codex`, `opencode`, `openclaw`, `hermes`, `pi`, `generic`. This is recorded in `.evo/meta.json` so other commands can adapt to host-specific conventions. Pick the value matching the runtime you invoked `discover` from. Use `evo host set <value>` later if you change runtimes.
 
 **`--name` should be a short human-readable project label** for dashboard display, chosen from the repository/product context. Existing workspaces without a name fall back to the repo directory name; do not hand-edit config just to migrate them.
+
+**`--per-exp-timeout` is required.** Wall-clock seconds for each `evo run` invocation. Becomes the workspace default; override per-call with `evo run --timeout N`. Pick based on what the benchmark actually costs end-to-end on this hardware -- if you don't know yet, time the benchmark once locally and use ~2x that. Typical ranges: a unit-test-style benchmark is 300-900s; a small-model SFT + eval cycle is 1800-3600s; a large-model train run is several hours. Set conservatively -- a too-tight value kills experiments mid-flight; a too-loose value wastes budget only when something actually hangs. Update later with `evo config set per-exp-timeout <seconds>`.
 
 **`--commit-strategy` is optional.** Default is `all`. Override with `--commit-strategy tracked-only` only when you want the stricter shisa-kanko flow where new files must be staged explicitly and acknowledged at `evo run` time.
 
@@ -205,7 +208,8 @@ evo init \
   --target agent/solve.py \
   --benchmark "python3 {worktree}/benchmark.py --target {target}" \
   --metric max \
-  --host claude-code
+  --host claude-code \
+  --per-exp-timeout 1800
 ```
 
 Use the same runtime entry point the project already uses, but make sure the command does not assume uncommitted runtime state exists inside the worktree. Worktrees are git checkouts; untracked directories such as local virtualenvs, build caches, and downloaded models are usually not present there. If the benchmark needs setup or a package-manager runner, configure evo's runtime recipe instead of baking local paths into the benchmark command:

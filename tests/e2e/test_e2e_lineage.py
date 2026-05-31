@@ -96,7 +96,7 @@ def _build_minimal_workspace(root: Path) -> None:
             "--target", "agent/solve.py",
             "--benchmark", f"python3 {{worktree}}/benchmark.py --target {{target}}",
             "--metric", "max",
-            "--host", "claude-code",
+            "--host", "claude-code", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -137,7 +137,7 @@ def _build_pool_workspace(root: Path, workdir: Path) -> tuple[Path, Path]:
             "--target", "agent/solve.py",
             "--benchmark", f"python3 {{worktree}}/benchmark.py --target {{target}}",
             "--metric", "max",
-            "--host", "claude-code",
+            "--host", "claude-code", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )

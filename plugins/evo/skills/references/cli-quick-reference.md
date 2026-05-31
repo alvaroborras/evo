@@ -45,6 +45,7 @@ evo init \
   --benchmark "<command using {worktree} and/or {target}>" \
   --metric <max|min> \
   --host <claude-code|codex|opencode|openclaw|hermes|generic> \
+  --per-exp-timeout <seconds> \
   [--instrumentation-mode <sdk|inline>] \
   [--gate "<command>"] \
   [--commit-strategy <all|tracked-only>]
@@ -58,6 +59,10 @@ evo init \
   experiment branches.
 - `--host` records the orchestrator runtime; it controls whether `dispatch` is
   available.
+- `--per-exp-timeout` is the workspace default wall-clock cap for each `evo run`
+  (seconds). Override per-call with `evo run --timeout N`. Pick based on what
+  the benchmark actually costs; update later with
+  `evo config set per-exp-timeout <seconds>`.
 
 ## Configuration
 
@@ -166,8 +171,8 @@ Provider auth and SDK packages are separate from benchmark runtime env.
 
 ```bash
 evo new --parent <parent_id> -m "<hypothesis>"
-evo run <exp_id> [--timeout <seconds>] [--force]
-evo run <exp_id> --check [--timeout <seconds>]
+evo run <exp_id> [--timeout <seconds>] [--force]    # --timeout overrides workspace per-exp-timeout
+evo run <exp_id> --check [--timeout <seconds>]      # same override semantics for check phase
 evo abort <exp_id> [--timeout <seconds>] [--force]
 evo done <exp_id> --score <float> [--traces <dir>] [--no-compare]
 evo discard <exp_id> --reason "<why>" [--force]

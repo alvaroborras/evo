@@ -126,7 +126,7 @@ def test_sdk_result_file_flow(root: Path) -> None:
             "--metric",
             "max",
             "--host",
-            "generic",
+            "generic", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -222,7 +222,7 @@ def test_sdk_gate_does_not_overwrite_result_file(root: Path) -> None:
             "--benchmark", "python eval.py --agent {target}",
             "--gate", "python gate.py --agent {target}",
             "--metric", "max",
-            "--host", "generic",
+            "--host", "generic", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -299,7 +299,7 @@ def test_sdk_gate_does_not_overwrite_benchmark_traces(root: Path) -> None:
             "--benchmark", "python eval.py --agent {target}",
             "--gate", "python gate.py --agent {target}",
             "--metric", "max",
-            "--host", "generic",
+            "--host", "generic", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -369,7 +369,7 @@ def test_max_flow(root: Path) -> None:
             "--metric",
             "max",
             "--host",
-            "generic",
+            "generic", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -431,7 +431,7 @@ def test_min_flow(root: Path) -> None:
             "--metric",
             "min",
             "--host",
-            "generic",
+            "generic", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -462,7 +462,7 @@ def test_stale_branch_recovery(root: Path) -> None:
             "--metric",
             "max",
             "--host",
-            "generic",
+            "generic", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -534,7 +534,7 @@ sys.exit(1 if "BREAK_CANCEL" in content else 0)
     run(["git", "commit", "-m", "fixture: gates"], cwd=root)
 
     # Init workspace
-    evo(["init", "--target", "agent.py", "--benchmark", "python eval.py --agent {target}", "--metric", "max", "--host", "generic"], cwd=root)
+    evo(["init", "--target", "agent.py", "--benchmark", "python eval.py --agent {target}", "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"], cwd=root)
 
     # Add a gate on root
     evo(["gate", "add", "root", "--name", "refund_flow", "--command", "python gate_refund.py --agent {target}"], cwd=root)
@@ -626,7 +626,7 @@ def test_retry_cap_and_fix(root: Path) -> None:
             "--host",
             "generic",
             "--metric",
-            "max",
+            "max", "--per-exp-timeout", "1800",
         ],
         cwd=root,
     )
@@ -706,7 +706,7 @@ def _setup_dispatch_workspace(root: Path, *, host: str | None) -> None:
         "init",
         "--target", "bench.sh",
         "--benchmark", "./bench.sh",
-        "--metric", "max",
+        "--metric", "max", "--per-exp-timeout", "1800",
     ]
     if host is not None:
         args += ["--host", host]
@@ -938,7 +938,7 @@ def test_pruned_parent_rejects_new_children(root: Path) -> None:
     evo(
         ["init", "--target", "agent.py",
          "--benchmark", "python eval.py --agent {target}",
-         "--metric", "max", "--host", "generic"],
+         "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
         cwd=root,
     )
     evo(["new", "--parent", "root", "-m", "baseline"], cwd=root)
@@ -963,7 +963,7 @@ def test_scratchpad_aggregates_per_node_notes(root: Path) -> None:
     evo(
         ["init", "--target", "agent.py",
          "--benchmark", "python eval.py --agent {target}",
-         "--metric", "max", "--host", "generic"],
+         "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
         cwd=root,
     )
     evo(["new", "--parent", "root", "-m", "baseline"], cwd=root)
@@ -982,7 +982,7 @@ def test_evo_done_writes_attempt_scoped_traces(root: Path) -> None:
     evo(
         ["init", "--target", "agent.py",
          "--benchmark", "python eval.py --agent {target}",
-         "--metric", "max", "--host", "generic"],
+         "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
         cwd=root,
     )
     evo(["new", "--parent", "root", "-m", "manual record"], cwd=root)
@@ -1015,7 +1015,7 @@ def test_dashboard_traces_and_log_routes(root: Path) -> None:
     evo(
         ["init", "--target", "agent.py",
          "--benchmark", "python eval.py --agent {target}",
-         "--metric", "max", "--host", "generic"],
+         "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
         cwd=root,
     )
     evo(["new", "--parent", "root", "-m", "for dashboard"], cwd=root)
@@ -1062,7 +1062,7 @@ def test_worktree_mode_commit_strategy_unchanged(root: Path) -> None:
     evo(
         ["init", "--target", "agent.py",
          "--benchmark", "python eval.py --agent {target}",
-         "--metric", "max", "--host", "generic"],
+         "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
         cwd=root,
     )
     config = json.loads(

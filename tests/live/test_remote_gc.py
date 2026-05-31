@@ -174,7 +174,7 @@ def _run_gc_leak_scenario(
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print(f"--- [{provider_label}] evo init OK ---")
@@ -260,7 +260,7 @@ def _run_gc_scenario_a(
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         _evo(["new", "--parent", "root", "-m", f"{provider_label}-A", *new_args],
@@ -342,7 +342,7 @@ def _run_gc_scenario_b(
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         _evo(["new", "--parent", "root", "-m", f"{provider_label}-B", *new_args],

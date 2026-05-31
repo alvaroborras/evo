@@ -119,7 +119,7 @@ def test_evo_run_against_modal() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print("--- evo init OK ---")
@@ -228,7 +228,7 @@ def test_multi_experiment_tree_modal() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print("--- evo init OK ---")
@@ -346,7 +346,7 @@ def test_two_live_modal_allocations_same_config() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print("--- evo init OK ---")
@@ -419,7 +419,7 @@ def test_modal_streaming_salvages_partial_artifacts() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print("--- evo init OK ---")
@@ -545,7 +545,7 @@ def test_modal_recovers_after_orchestrator_death() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         _new_remote_modal(
@@ -673,7 +673,7 @@ def test_branched_tree_modal() -> None:
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
              "--gate", "python gate.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print("--- evo init OK (gate=python gate.py, metric=max) ---")

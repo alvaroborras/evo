@@ -151,7 +151,7 @@ def test_evo_run_against_azure() -> None:
                 "--metric",
                 "max",
                 "--host",
-                "generic",
+                "generic", "--per-exp-timeout", "1800",
             ],
             cwd=repo,
         )

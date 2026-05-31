@@ -183,7 +183,7 @@ if any(key.startswith("EVO_") for key in os.environ):
                 "--benchmark", "python3 eval.py",
                 "--gate", "python3 gate.py",
                 "--metric", "max",
-                "--host", "generic",
+                "--host", "generic", "--per-exp-timeout", "1800",
             ],
             cwd=tmp_path,
         )
@@ -229,7 +229,7 @@ Path(os.environ["EVO_RESULT_PATH"]).write_text(json.dumps({"score": 1.0}), encod
                 "--target", "agent.py",
                 "--benchmark", "python3 eval.py",
                 "--metric", "max",
-                "--host", "generic",
+                "--host", "generic", "--per-exp-timeout", "1800",
             ],
             cwd=tmp_path,
         )
@@ -263,7 +263,7 @@ def test_cli_config_show_and_set_basic_fields(tmp_path: Path) -> None:
                 "--target", "agent.py",
                 "--benchmark", "python3 eval.py",
                 "--metric", "max",
-                "--host", "generic",
+                "--host", "generic", "--per-exp-timeout", "1800",
             ],
             cwd=tmp_path,
         )
@@ -323,7 +323,7 @@ sys.exit(0 if os.environ.get("PREFIXED") == "1" else 2)
                 "--benchmark", "python3 eval.py",
                 "--gate", "python3 gate.py",
                 "--metric", "max",
-                "--host", "generic",
+                "--host", "generic", "--per-exp-timeout", "1800",
             ],
             cwd=tmp_path,
         )
@@ -387,7 +387,7 @@ Path(os.environ["EVO_TRACES_DIR"], "task_0.json").write_text(
                 "--benchmark", "python3 eval.py",
                 "--gate", "python3 gate.py",
                 "--metric", "max",
-                "--host", "generic",
+                "--host", "generic", "--per-exp-timeout", "1800",
             ],
             cwd=tmp_path,
         )
@@ -442,7 +442,7 @@ sys.exit(0 if Path(args.agent).exists() else 1)
                 "--target", "agent.py",
                 "--benchmark", "python3 eval.py",
                 "--metric", "max",
-                "--host", "generic",
+                "--host", "generic", "--per-exp-timeout", "1800",
             ],
             cwd=tmp_path,
         )

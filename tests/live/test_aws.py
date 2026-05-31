@@ -84,7 +84,7 @@ def test_evo_run_against_aws() -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         print("--- evo init OK ---")

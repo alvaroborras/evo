@@ -631,7 +631,7 @@ class TestEvoRunWritesAnchorRef(unittest.TestCase):
             r = self._run_evo(root, [
                 "init", "--target", "agent.py",
                 "--benchmark", f"{PY} benchmark.py",
-                "--metric", "max", "--host", "generic",
+                "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800",
             ])
             self.assertEqual(r.returncode, 0, f"init failed: {r.stderr}")
 
@@ -743,7 +743,7 @@ class TestNewAfterRestoreWorks(unittest.TestCase):
             r = self._run_evo(root, [
                 "init", "--target", "agent.py",
                 "--benchmark", f"{PY} benchmark.py",
-                "--metric", "max", "--host", "generic",
+                "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800",
             ])
             self.assertEqual(r.returncode, 0, f"init: {r.stderr}")
 
@@ -946,7 +946,7 @@ class TestPoolBackendAnchor(unittest.TestCase):
             r = self._run_evo(main_repo, [
                 "init", "--target", "agent.py",
                 "--benchmark", f"{PY} benchmark.py",
-                "--metric", "max", "--host", "generic",
+                "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800",
             ])
             self.assertEqual(r.returncode, 0, r.stderr)
             r = self._run_evo(main_repo, [
@@ -1000,7 +1000,7 @@ class TestPoolBackendAnchor(unittest.TestCase):
             self._run_evo(main_repo, [
                 "init", "--target", "agent.py",
                 "--benchmark", f"{PY} benchmark.py",
-                "--metric", "max", "--host", "generic",
+                "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800",
             ])
             self._run_evo(main_repo, [
                 "config", "backend", "pool", "--workspaces", slot_arg,

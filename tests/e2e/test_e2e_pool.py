@@ -106,7 +106,7 @@ def _init_evo_workspace(
         "--target", "agent/solve.py",
         "--benchmark", _POOL_BENCHMARK_CMD,
         "--metric", "max",
-        "--host", "claude-code",
+        "--host", "claude-code", "--per-exp-timeout", "1800",
     ]
     if commit_strategy:
         args.extend(["--commit-strategy", commit_strategy])
@@ -141,7 +141,7 @@ def test_init_validates_pool_slots(workdir: Path) -> None:
     # Task 1: init no longer accepts backend flags.
     r = _evo(
         ["init", "--target", "agent/solve.py", "--benchmark", "true",
-         "--metric", "max", "--host", "claude-code", "--backend", "pool"],
+         "--metric", "max", "--host", "claude-code", "--backend", "pool", "--per-exp-timeout", "1800"],
         cwd=main, check=False,
     )
     assert r.returncode != 0, r.stdout
@@ -149,7 +149,7 @@ def test_init_validates_pool_slots(workdir: Path) -> None:
 
     _evo(
         ["init", "--target", "agent/solve.py", "--benchmark", "true",
-         "--metric", "max", "--host", "claude-code"],
+         "--metric", "max", "--host", "claude-code", "--per-exp-timeout", "1800"],
         cwd=main,
     )
 
@@ -714,7 +714,7 @@ def test_init_commit_strategy_override(workdir: Path) -> None:
         ["init", "--target", "agent/solve.py",
          "--benchmark", f"python3 {{worktree}}/benchmark.py --target {{target}}",
          "--metric", "max", "--host", "claude-code",
-         "--commit-strategy", "tracked-only"],
+         "--commit-strategy", "tracked-only", "--per-exp-timeout", "1800"],
         cwd=wt_main,
     )
     try:

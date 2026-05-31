@@ -321,7 +321,7 @@ def test_remote_backend_full_lifecycle(workdir: Path) -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python3 eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         try:
@@ -419,7 +419,7 @@ def test_workspace_ops_cli_subcommands(workdir: Path) -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python3 eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         try:
@@ -520,7 +520,7 @@ def test_distinct_remote_configs_can_be_live_in_one_run(workdir: Path) -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         try:
@@ -631,7 +631,7 @@ def test_plaintext_remote_token_migrates_on_read(workdir: Path) -> None:
     _evo(
         ["init", "--target", "agent.py",
          "--benchmark", "python eval.py",
-         "--metric", "max", "--host", "generic"],
+         "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
         cwd=repo,
     )
     state_key = backend_state_key(
@@ -697,7 +697,7 @@ def test_remote_streaming_salvages_partial_logs_and_traces(workdir: Path) -> Non
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         try:
@@ -770,7 +770,7 @@ def test_remote_run_recovers_active_attempt_after_orchestrator_death(workdir: Pa
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         _evo(
@@ -866,7 +866,7 @@ def test_remote_run_fails_and_releases_when_container_dies_before_recovery(workd
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         try:
@@ -947,7 +947,7 @@ def test_remote_run_recovers_after_benchmark_artifacts_phase(workdir: Path) -> N
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
         try:
@@ -996,7 +996,7 @@ def test_ssh_provider_full_lifecycle(workdir: Path) -> None:
         _evo(
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
-             "--metric", "max", "--host", "generic"],
+             "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800"],
             cwd=repo,
             env=env,
         )

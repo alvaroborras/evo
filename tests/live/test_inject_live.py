@@ -137,7 +137,7 @@ def _hook_drain_bash(run_dir: Path, stdin_payload: dict, env: dict | None = None
 def _make_workspace(root: Path) -> Path:
     _init_git_repo(root)
     _evo(["init", "--target", "agent.py", "--benchmark", "python bench.py",
-          "--metric", "max", "--host", "claude-code"], cwd=root)
+          "--metric", "max", "--host", "claude-code", "--per-exp-timeout", "1800"], cwd=root)
     # Find the run dir
     run_dirs = list((root / ".evo").glob("run_*"))
     assert run_dirs, f"no run dir created under {root / '.evo'}"

@@ -370,6 +370,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         host=args.host,
         commit_strategy=commit_strategy,
         project_name=args.name,
+        per_exp_timeout=args.per_exp_timeout,
     )
     if args.instrumentation_mode:
         meta_file = evo_dir(root) / "meta.json"
@@ -612,6 +613,7 @@ _CONFIG_FIELD_TO_KEY: dict[str, str] = {
     "frontier-strategy": "frontier_strategy",
     "default-autonomous": "default_autonomous",
     "default-subagents-only": "default_subagents_only",
+    "per-exp-timeout": "per_exp_timeout",
 }
 
 # Workspace run-behavior defaults captured at discover time. Off by default;
@@ -679,6 +681,14 @@ def cmd_config_set(args: argparse.Namespace) -> int:
             if attempts < 1:
                 raise RuntimeError("max-attempts must be a positive integer")
             config["max_attempts"] = attempts
+        elif args.field == "per-exp-timeout":
+            try:
+                seconds = int(args.value)
+            except ValueError:
+                raise RuntimeError("per-exp-timeout must be a positive integer (seconds)")
+            if seconds < 1:
+                raise RuntimeError("per-exp-timeout must be a positive integer (seconds)")
+            config["per_exp_timeout"] = seconds
         elif args.field == "gate":
             value = args.value.strip()
             config["gate"] = value or None
@@ -1947,9 +1957,36 @@ def _block_if_epoch_requires_baseline(root: Path, parent_id: str, no_compare: bo
         raise RuntimeError("comparison is blocked for the current eval epoch until a new root baseline is committed")
 
 
+def _resolve_run_timeout(args: argparse.Namespace, config: dict) -> int:
+    """Resolve the effective per-experiment timeout for `evo run`.
+
+    Precedence: `--timeout N` (per-call) > workspace `per_exp_timeout`
+    (set at `evo init`) > legacy 1800s fallback (with one-line warning).
+
+    The legacy fallback exists so workspaces initialized before
+    `--per-exp-timeout` became required keep working. Run
+    `evo config set per-exp-timeout <seconds>` to silence the warning.
+    """
+    if getattr(args, "timeout", None) is not None:
+        return args.timeout
+    workspace_timeout = config.get("per_exp_timeout")
+    if workspace_timeout is not None:
+        return int(workspace_timeout)
+    print(
+        "WARN: workspace was initialized before --per-exp-timeout existed. "
+        "Using legacy default 1800s. Set explicitly via "
+        "`evo config set per-exp-timeout <seconds>` to silence this warning.",
+        file=sys.stderr,
+    )
+    return 1800
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     root = repo_root()
     config, graph = _require_workspace(root)
+    # Resolve the effective per-experiment timeout once, then write it back
+    # so every downstream `args.timeout` reference picks up the resolved value.
+    args.timeout = _resolve_run_timeout(args, config)
     node = _read_node(root, args.exp_id)
     if getattr(args, "check", False):
         if not node.get("worktree"):
@@ -4915,6 +4952,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="commit policy for `evo run`. Default: 'all'. Override only "
              "if you know why.",
     )
+    init_p.add_argument(
+        "--per-exp-timeout",
+        type=int,
+        required=True,
+        help="Per-experiment wall-clock timeout in seconds. Becomes the workspace "
+             "default for `evo run`; override per-call with `evo run --timeout N`. "
+             "Pick based on expected benchmark cost (e.g. 3600 for a 4B LoRA SFT + "
+             "eval). If unsure, time the benchmark locally once and use ~2x that.",
+    )
     init_p.add_argument("--port", type=int, default=8080)
     init_p.set_defaults(func=cmd_init)
 
@@ -4969,6 +5015,7 @@ def build_parser() -> argparse.ArgumentParser:
             "frontier-strategy",
             "default-autonomous",
             "default-subagents-only",
+            "per-exp-timeout",
         ],
     )
     config_set_p.add_argument(
@@ -4998,6 +5045,7 @@ def build_parser() -> argparse.ArgumentParser:
             "frontier-strategy",
             "default-autonomous",
             "default-subagents-only",
+            "per-exp-timeout",
         ],
     )
     config_get_p.add_argument("--json", action="store_true",
@@ -5116,7 +5164,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_p = sub.add_parser("run")
     run_p.add_argument("exp_id")
-    run_p.add_argument("--timeout", type=int, default=1800)
+    run_p.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="Per-call override of workspace `per_exp_timeout`. If omitted, "
+             "uses the workspace's `per_exp_timeout` (set at `evo init`). "
+             "Workspaces initialized before `--per-exp-timeout` existed fall "
+             "back to the legacy 1800s with a warning -- set explicitly via "
+             "`evo config set per-exp-timeout <seconds>`.",
+    )
     run_p.add_argument(
         "--check",
         action="store_true",

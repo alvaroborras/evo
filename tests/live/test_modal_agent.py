@@ -407,7 +407,7 @@ def test_real_subagent_against_modal() -> None:
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
              "--gate", "python gate.py",
-             "--metric", "max", "--host", "claude-code"],
+             "--metric", "max", "--host", "claude-code", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
 
@@ -448,7 +448,7 @@ def test_parallel_real_subagents_against_modal() -> None:
             ["init", "--target", "agent.py",
              "--benchmark", "python eval.py",
              "--gate", "python gate.py",
-             "--metric", "max", "--host", "claude-code"],
+             "--metric", "max", "--host", "claude-code", "--per-exp-timeout", "1800"],
             cwd=repo,
         )
 

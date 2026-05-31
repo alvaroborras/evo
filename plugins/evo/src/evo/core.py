@@ -495,16 +495,23 @@ def init_workspace(
     host: str | None = None,
     commit_strategy: str = "all",
     project_name: str | None = None,
+    per_exp_timeout: int | None = None,
 ) -> str:
     if commit_strategy not in ("all", "tracked-only"):
         raise RuntimeError(
             f"commit_strategy must be 'all' or 'tracked-only', got {commit_strategy!r}"
+        )
+    if per_exp_timeout is not None and per_exp_timeout <= 0:
+        raise RuntimeError(
+            f"per_exp_timeout must be a positive number of seconds, got {per_exp_timeout!r}"
         )
     run_id = _allocate_run(root)
     ensure_workspace_dirs(root)
     config = default_config(root, target, benchmark, metric, gate, project_name=project_name)
     config["execution_backend"] = "worktree"
     config["commit_strategy"] = commit_strategy
+    if per_exp_timeout is not None:
+        config["per_exp_timeout"] = per_exp_timeout
     atomic_write_json(config_path(root), config)
     atomic_write_json(graph_path(root), default_graph())
     atomic_write_json(annotations_path(root), {"annotations": []})
