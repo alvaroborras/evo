@@ -279,21 +279,26 @@ evo infra log [--limit N]                          # read recorded events
 ## Loop control (for the /optimize orchestrator)
 
 ```bash
-evo wait [--for experiments|ideators] [--count N] [--timeout SEC]
-                              # default: watches BOTH experiments and
-                              # ideators; wakes on whichever changes first.
-                              # --for narrows the watch (a filter, not
-                              # a selector). Use --for ideators when
-                              # blocking specifically for proposals and
-                              # incidental experiment activity should not
-                              # wake the wait.
-                              # --count N (requires --for) blocks until
-                              # N additional items of that kind land.
-                              # Without --for, --count > 1 is rejected.
-                              # --timeout default 3600, capped at 3600 (1h).
-                              # exit 0 with one-line summary on transition;
-                              # 124 on timeout (partial ideator counts
-                              # surfaced in the summary).
+evo wait [--for <target>] ... [--count N] [--timeout DUR]
+         [--stall-threshold DUR] [--poll-interval DUR] [--json]
+                              # --for is repeatable. Targets:
+                              #   experiments       (workspace; new commit lands)
+                              #   ideators          (workspace; new proposal lands)
+                              #   process=<pid>     (PID exits)
+                              #   log-growth=<path> (file stalls for --stall-threshold)
+                              #   gpu-active        (GPU util rises above 0)
+                              #   gpu-idle          (GPU util drops to 0)
+                              # No --for = legacy default: watches BOTH experiments
+                              # and ideators; wakes on whichever first.
+                              # --count N (requires exactly one --for experiments|ideators)
+                              # blocks until N additional items of that kind land.
+                              # --timeout: duration string (60m, 2h) or int seconds;
+                              # default 1h, max 24h.
+                              # --stall-threshold default 2m. --poll-interval default 5s.
+                              # --json emits structured exit (exit_reason, triggered_by,
+                              # per-watch state) instead of the one-line summary.
+                              # Exit: 0 on match, 124 on timeout, 2 on usage error.
+                              # See `references/evo-wait.md` for full semantics + JSON shape.
 
 evo autonomous on|off         # arm/disarm the stop-nudge (keep-going
                               # loop). Off by default. Run `on` when
