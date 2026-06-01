@@ -309,6 +309,22 @@ Update notes with cross-cutting learnings:
   evo set <exp_id> --note "key insight from round N"
   ```
 
+### 6a. Pattern recognition across history (objective, not narrative)
+
+Step 6 cross-cuts a single round. This step looks across ALL committed experiments in the run, not just this round's. The orchestrator's failure mode is tunnel vision -- iterating on the visible axis (technique, hyperparameters) while missing the orthogonal axis (data, format, verifier alignment, environment, plumbing). The check is cheap, runs between rounds, and is the most reliable signal that you're on the wrong axis.
+
+Four checks via `evo show` + `evo tree`:
+
+1. **Score plateaus across distinct techniques.** If 3+ committed experiments spanning structurally different techniques (e.g. SFT, GRPO, RFT) all land at the same non-zero score, the bottleneck is not the training method. See `evo:finetuning`'s "Stuck at the same non-zero score across 3+ experiments" diagnostic. Pivot to data / format / verifier alignment before queuing another technique variant.
+
+2. **Repeated error class.** Tally failure reasons across discarded + failed nodes in the run so far. If 2+ failures share a class (TRL config drift, OOM at the same shape, distributed init timeout, eval-script interpreter mismatch, gate command misconfigured), that class is the bottleneck. Fix the structural cause before queuing more experiments on the same recipe.
+
+3. **Training-vs-eval delta.** Compare each evaluated node's train-side metrics (in the train log or trackio) to its benchmark score. Loss falling cleanly + benchmark score flat = the model is fitting something the verifier does not reward. Investigate train↔verifier format alignment (output format, chat template, prompt shape) before queuing another training variant.
+
+4. **Annotate facts, not narratives.** Annotations via `evo annotate <exp_id>` and `evo set <exp_id> --note` should record what HAPPENED -- scores, exact error messages, surprising observations, data sources used. NOT what you hoped would happen, what you plan to try next, or how you feel about the result. Annotations get loaded into future decision context and into ideator briefs; narrative noise contaminates them. State facts; leave plans to TodoWrite / `evo set --note` on the round itself.
+
+If any check surfaces a structural issue, the next round's subagent briefs MUST target the orthogonal axis the pattern identifies. Do not queue more experiments on the axis that already plateaued -- another iteration produces another data point with the same conclusion and burns the budget.
+
 ### 6b. Periodically spawn ideators (in parallel)
 
 The optimize loop's scan sub-agents (step 3) read the CURRENT round's evaluated experiments for failure patterns. They don't do deep cross-graph analysis or external literature scans -- that work belongs to the ideator skill (`evo:ideator`).
