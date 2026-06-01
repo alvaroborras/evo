@@ -2,7 +2,7 @@
 name: optimize
 description: Run the evo optimization loop with parallel subagents until interrupted.
 argument-hint: "[subagents=N] [budget=N] [stall=N]"
-evo_version: 0.5.0-alpha.2
+evo_version: 0.5.0-alpha.3
 ---
 
 Run the `evo` optimization loop. Each round, the orchestrator writes structured briefs and spawns subagents that execute within them. Each subagent is semi-autonomous: it reads the pointer traces, forms the concrete edit, runs experiments, and can iterate within its branch. Runs until interrupted or the stall limit is reached.
@@ -411,27 +411,24 @@ Go back to step 1.
 
 ## Polling discipline
 
-When waiting on a long-running background process (training, evaluation, batch generation), do NOT use `while true; do sleep N; tail file; done`. That loop never exits when the underlying process crashes — the tail keeps reading the same dead file, the agent interprets "no growth" as "still working," and the agent blocks indefinitely.
+When waiting on a long-running background process (a subagent's training subprocess, a long evaluation, a batch job), do NOT use `while true; do sleep N; tail file; done`. That loop never exits when the underlying process crashes -- the tail keeps reading the same dead file, the agent interprets "no growth" as "still working," and the agent blocks indefinitely.
 
-Bounded poll pattern (do this until `evo wait --for process=<pid>` is available):
+Use `evo wait`. The CLI is the bounded, structured replacement:
 
 ```bash
-for i in $(seq 1 60); do
-  if ! kill -0 $TRAIN_PID 2>/dev/null; then
-    echo "process $TRAIN_PID died"; tail -50 $TRAIN_LOG; break
-  fi
-  PREV=$CURR; CURR=$(wc -c < $TRAIN_LOG)
-  GPU_UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)
-  if [ "$PREV" = "$CURR" ] && [ "${GPU_UTIL:-0}" = "0" ]; then
-    echo "stalled: log not growing, GPU idle"; break
-  fi
-  sleep 60
-done
+# wait until the training subprocess exits, OR its log stalls, OR the GPU goes idle,
+# whichever first; 60-minute ceiling; structured JSON on stdout
+evo wait --for process=$TRAIN_PID \
+         --for log-growth=$TRAIN_LOG \
+         --for gpu-idle \
+         --timeout 60m --stall-threshold 5m --json
 ```
 
-Three signals checked per iteration: process alive (`kill -0`), log growth delta, GPU activity. Stop when any check fails AND another agrees. Hard timeout via the loop bound (60 × 60s = 60 min in the example). NEVER unbounded `while true`.
+Multiple `--for` flags combine; the wait returns on the first matching condition. The JSON output's `exit_reason` and `triggered_by` identify which condition fired. Process / log-growth / gpu-* watches do not require an evo workspace context; the workspace-anchored watches (`--for experiments`, `--for ideators`) cover the ideator + commit waits described elsewhere in this skill.
 
-Forward-compatible note: once `evo wait --for process=… --for log-growth=… --for gpu-active --timeout 60m --json` lands, it replaces this whole loop with one CLI call. See issue #52.
+Full surface, exit codes, JSON shape, examples: `references/evo-wait.md` (under `plugins/evo/skills/references/`).
+
+If `evo wait` is not available for some reason (older CLI on PATH, sandbox constraint), fall back to a bounded poll loop that checks all three signals -- process liveness via `kill -0 $PID`, log growth via `wc -c` delta, GPU via `nvidia-smi --query-gpu=utilization.gpu` -- and exits on any one going negative. NEVER unbounded `while true`.
 
 ## Resetting the eval epoch
 

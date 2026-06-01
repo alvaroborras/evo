@@ -2,7 +2,7 @@
 name: discover
 description: Initialize evo for the current repository by exploring the codebase, proposing unexplored optimization dimensions, constructing the benchmark inside a baseline worktree, and running the first experiment. Use when the user invokes /evo:discover, mentions setting up evo, wants to instrument a codebase for autonomous optimization, or asks to start a new evo run on a project.
 argument-hint: <optional context about what to optimize>
-evo_version: 0.5.0-alpha.2
+evo_version: 0.5.0-alpha.3
 ---
 
 # Discover
@@ -40,20 +40,20 @@ evo --version
 The output must be exactly:
 
 ```
-evo-hq-cli 0.5.0-alpha.2
+evo-hq-cli 0.5.0-alpha.3
 ```
 
 Three outcomes:
 
 1. **Matches exactly** — continue to step 1.
 2. **Reports a different version** (`evo-hq-cli 0.4.2`, etc.) — the host refetched a newer/older skill bundle than the CLI on PATH. Drift breaks skills silently. Stop and tell the user:
-   > Your installed evo CLI is on a different version than this skill (`0.5.0-alpha.2`). Run:
+   > Your installed evo CLI is on a different version than this skill (`0.5.0-alpha.3`). Run:
    > ```
-   > uv tool install --force evo-hq-cli==0.5.0-alpha.2
+   > uv tool install --force evo-hq-cli==0.5.0-alpha.3
    > ```
    > Then re-invoke this skill.
 3. **`command not found`, or reports a different package** (commonly `evo 1.x` — the unrelated SLAM tool) — the CLI isn't installed. Tell the user:
-   > `evo-hq-cli` isn't on your PATH. Install it: `uv tool install evo-hq-cli==0.5.0-alpha.2` (or `pipx install evo-hq-cli==0.5.0-alpha.2`). Then re-invoke this skill.
+   > `evo-hq-cli` isn't on your PATH. Install it: `uv tool install evo-hq-cli==0.5.0-alpha.3` (or `pipx install evo-hq-cli==0.5.0-alpha.3`). Then re-invoke this skill.
 
 Do not try to auto-install. Host sandbox + network policy may block it; leaving the install as a user action keeps failure modes clear.
 
@@ -449,27 +449,24 @@ End the skill by reporting in chat:
 
 ## Polling discipline
 
-When waiting on a long-running background process (training, evaluation, batch generation), do NOT use `while true; do sleep N; tail file; done`. That loop never exits when the underlying process crashes — the tail keeps reading the same dead file, the agent interprets "no growth" as "still working," and the agent blocks indefinitely.
+When waiting on a long-running background process (training, evaluation, batch generation, any externally-spawned long task), do NOT use `while true; do sleep N; tail file; done`. That loop never exits when the underlying process crashes -- the tail keeps reading the same dead file, the agent interprets "no growth" as "still working," and the agent blocks indefinitely.
 
-Bounded poll pattern (do this until `evo wait --for process=<pid>` is available):
+Use `evo wait`. The CLI is the bounded, structured replacement:
 
 ```bash
-for i in $(seq 1 60); do
-  if ! kill -0 $TRAIN_PID 2>/dev/null; then
-    echo "process $TRAIN_PID died"; tail -50 $TRAIN_LOG; break
-  fi
-  PREV=$CURR; CURR=$(wc -c < $TRAIN_LOG)
-  GPU_UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)
-  if [ "$PREV" = "$CURR" ] && [ "${GPU_UTIL:-0}" = "0" ]; then
-    echo "stalled: log not growing, GPU idle"; break
-  fi
-  sleep 60
-done
+# wait for a training subprocess to exit, OR its log to stall, OR the GPU to go idle,
+# whichever first; 60-minute ceiling; structured JSON on stdout
+evo wait --for process=$TRAIN_PID \
+         --for log-growth=$TRAIN_LOG \
+         --for gpu-idle \
+         --timeout 60m --stall-threshold 5m --json
 ```
 
-Three signals checked per iteration: process alive (`kill -0`), log growth delta, GPU activity. Stop when any check fails AND another agrees. Hard timeout via the loop bound (60 × 60s = 60 min in the example). NEVER unbounded `while true`.
+Multiple `--for` flags combine; the wait returns on the first matching condition. The JSON output's `exit_reason` and `triggered_by` identify which condition fired (process-exited / log-stalled / gpu-idle / timed-out). Process / log-growth / gpu-* watches do not require an evo workspace; the workspace-anchored watches (`--for experiments`, `--for ideators`) still work for ideator-proposal and commit waits.
 
-Forward-compatible note: once `evo wait --for process=… --for log-growth=… --for gpu-active --timeout 60m --json` lands, it replaces this whole loop with one CLI call. See issue #52.
+Full surface, exit codes, JSON shape, and examples in `references/evo-wait.md`.
+
+If `evo wait` is not available for some reason (older CLI on PATH), fall back to a bounded poll loop that checks all three signals -- process liveness via `kill -0 $PID`, log growth via `wc -c` delta, GPU via `nvidia-smi --query-gpu=utilization.gpu` -- and exits on any one going negative. NEVER unbounded `while true`.
 
 ## Inspection commands (for debugging, reference only)
 

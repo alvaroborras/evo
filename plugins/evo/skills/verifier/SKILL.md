@@ -1,7 +1,7 @@
 ---
 name: verifier
 description: Deprecated -- the verifier moved from a skill to a subagent. Loading this skill returns a pointer to the new invocation path. No behavior change for callers that follow the redirect.
-evo_version: 0.5.0-alpha.2
+evo_version: 0.5.0-alpha.3
 ---
 
 # Verifier (moved)
