@@ -99,6 +99,49 @@ else:
 
 Override only when the brief explicitly asks for a fresh-from-base ablation (e.g. comparing a new technique against the base, or when parent is suspected of overfitting in a way the current method should not inherit). The full I/O contract is in `references/glue.md`.
 
+## Cache expensive intermediates
+
+LoRA adapters, filtered/curated datasets, tokenized datasets, computed embeddings, generated rollouts -- expensive to produce, large, and gitignored. They don't ride the experiment branch. They also don't have to be rebuilt per experiment.
+
+Write expensive artifacts to a stable, workspace-level path; check for them first, compute only on miss. Subsequent experiments (siblings, descendants, or re-runs of the same experiment after a worktree clean) read the same path.
+
+Convention: under `.evo/cache/`, sibling to `run_<NNNN>/`. Already gitignored (via `.evo/` in the workspace's git excludes). Survives across runs -- it's not nested inside any `run_<id>/`, so `evo new`/`evo run`/`evo reset` don't touch it.
+
+Pattern:
+
+```python
+import os
+from pathlib import Path
+# walk up from cwd to find the workspace root (the dir that has .evo/)
+def _workspace_root() -> Path:
+    p = Path.cwd().resolve()
+    for d in [p, *p.parents]:
+        if (d / ".evo").is_dir():
+            return d
+    raise RuntimeError("not inside an evo workspace")
+
+cache = _workspace_root() / ".evo" / "cache" / "datasets"
+cache.mkdir(parents=True, exist_ok=True)
+# Cache key embeds every input that changes the artifact: dataset name,
+# filter recipe version, tokenizer, max length, etc. Different recipe ->
+# different key, so a sibling experiment with a different filter keeps
+# its own cache without trampling yours.
+key = cache / "numina-cot-r1-filter-v2-qwen3-tok-3072.arrow"
+if key.exists():
+    ds = datasets.Dataset.load_from_disk(str(key))
+else:
+    ds = build_and_filter_dataset()
+    ds.save_to_disk(str(key))
+```
+
+High-value caches (not exhaustive): curated/tokenized training corpora (tokenization is the slow part on millions of rows); LoRA adapters produced by prior experiments that a sibling might warm-start from (the parent path is already handled by `EVO_PARENT_POLICY` above; this is for sibling-reachable named adapters); computed embeddings, retrieval indexes, precomputed eval-time generations.
+
+Don't duplicate the HuggingFace Hub cache (`~/.cache/huggingface/`). That handles `from_pretrained` downloads automatically and is user-level, already shared across all experiments.
+
+Anti-pattern: writing the artifact inside the experiment's worktree (`<worktree>/some_cache/`). Worktrees are gitignored for these files, the artifact doesn't propagate to descendants via the git tree, and a worktree clean / gc removes it. Use the workspace-level `.evo/cache/` instead.
+
+A first-class named registry (`evo asset put/get/list/use`) for these is tracked in issue #55. The path convention above is the lightweight version anyone can adopt today.
+
 ## References
 
 - `references/glue.md` — training I/O contract: what evo provides, what to emit.
