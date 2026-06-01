@@ -266,6 +266,12 @@ Trace quality is part of the benchmark contract. After a failed baseline or fail
 
 The trace format is forward-compatible -- extra fields are preserved. Do NOT change the score computation or gate logic -- only add observability.
 
+## Reuse expensive intermediates
+
+If your experiment needs an artifact that is slow to produce and stable across sibling/descendant experiments -- curated/tokenized datasets, fine-tuned weights or adapters, embeddings, retrieval indexes, precomputed eval generations, large compiled assets -- check `.evo/cache/` (workspace-level, sibling to `run_<NNNN>/`) before recomputing. Write back what you compute, keyed by every input that changes the artifact (recipe version, source, parameters). The next experiment that asks for the same artifact reads from disk instead of rebuilding from scratch.
+
+`.evo/cache/` is already gitignored via the workspace's `.evo/` exclude and is not touched by `evo new` / `evo run` / `evo reset`. Anti-pattern: writing the artifact inside your experiment's worktree -- it's worktree-local, doesn't propagate to descendants, and disappears on cleanup. The full read-or-compute pattern (workspace-root lookup, cache-key construction, deferring to the per-user HF cache where relevant) is in the **finetuning skill** under "Cache expensive intermediates." Apply it in any domain where the artifact shape fits.
+
 ## Rules
 
 - Do NOT run `evo init` or `evo reset`
