@@ -4424,23 +4424,60 @@ def cmd_direct(args: argparse.Namespace) -> int:
     return 0
 
 
-# Hard cap so an orchestrator that miscomputes --timeout can't block its
-# session for hours. 1 hour matches the user's stated upper bound; users
-# who legitimately need longer should issue multiple `evo wait` calls.
-_WAIT_TIMEOUT_CAP = 3600
+# Default timeout for `evo wait`: 1 hour. Hard ceiling: 24h to prevent
+# runaway waits if the orchestrator miscomputes a duration.
+_WAIT_TIMEOUT_DEFAULT = 3600
+_WAIT_TIMEOUT_CAP = 24 * 3600
 
 
-def _wait_timeout_seconds(raw: float | int) -> int:
-    """Clamp the user-supplied timeout into [1, 3600]. Test seam."""
-    try:
-        n = int(raw)
-    except (TypeError, ValueError):
-        n = _WAIT_TIMEOUT_CAP
+def _wait_timeout_seconds(raw: float | int | str) -> int:
+    """Parse and clamp the user-supplied timeout into [1, 24h]. Test seam.
+
+    Accepts seconds as int/float, or duration strings like '60m', '2h'.
+    """
+    n = _parse_duration_seconds(raw, default=_WAIT_TIMEOUT_DEFAULT)
     if n < 1:
         return 1
     if n > _WAIT_TIMEOUT_CAP:
         return _WAIT_TIMEOUT_CAP
     return n
+
+
+_DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(s|sec|secs|m|min|mins|h|hr|hrs)?\s*$")
+
+
+def _parse_duration_seconds(raw: Any, default: int) -> int:
+    """Convert raw (int/float seconds or '60m'/'2h'/'30s') to integer seconds.
+
+    Returns `default` on parse failure. Used by --timeout, --stall-threshold,
+    and --poll-interval so they accept the same human-friendly forms.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, (int, float)):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(raw, str):
+        m = _DURATION_RE.match(raw)
+        if not m:
+            try:
+                return int(float(raw))
+            except (TypeError, ValueError):
+                return default
+        value = float(m.group(1))
+        unit = (m.group(2) or "s").lower()
+        if unit in ("s", "sec", "secs"):
+            mult = 1
+        elif unit in ("m", "min", "mins"):
+            mult = 60
+        elif unit in ("h", "hr", "hrs"):
+            mult = 3600
+        else:
+            mult = 1
+        return int(value * mult)
+    return default
 
 
 def _experiments_dir_snapshot(run_dir: Path) -> dict[str, float]:
@@ -4522,6 +4559,162 @@ def _describe_change(before: dict[str, float], after: dict[str, float]) -> str:
         exp_id = first.split("/", 1)[0]
         return f"updated: {exp_id}"
     return "experiments dir changed"
+
+
+# --- evo wait: process / log / gpu probes --------------------------------
+# These back the extended `--for` surface (process=<pid>, log-growth=<path>,
+# gpu-active, gpu-idle). Pure functions; cmd_wait orchestrates the polling.
+
+def _process_alive(pid: int) -> bool:
+    """Liveness check via `os.kill(pid, 0)`. Does not signal the process.
+
+    Returns False when the pid is dead, never existed, or is owned by a
+    different user (EPERM). EPERM is treated as "alive" since the process
+    exists -- the caller just can't signal it.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists, owned by a different user.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _log_size(path: Path) -> int:
+    """File size in bytes, 0 if missing or unreadable."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _log_last_line(path: Path, max_bytes: int = 4096) -> str:
+    """Return the last newline-terminated line of the log, or '' on failure.
+
+    Reads the trailing `max_bytes` only -- safe to call on multi-GB logs.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size <= 0:
+        return ""
+    try:
+        with path.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(-max_bytes, os.SEEK_END)
+            tail = fh.read()
+    except OSError:
+        return ""
+    # Strip a trailing newline so the last printed line isn't an empty string.
+    tail = tail.rstrip(b"\r\n")
+    if not tail:
+        return ""
+    last_nl = tail.rfind(b"\n")
+    line = tail[last_nl + 1:] if last_nl >= 0 else tail
+    try:
+        return line.decode("utf-8", errors="replace")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _nvidia_smi_query() -> dict[str, Any] | None:
+    """Query nvidia-smi for utilization + memory. Returns None if unavailable.
+
+    Aggregates across all visible GPUs: util is the max (so any active GPU
+    keeps the host marked active), memory is the sum. Returns None when
+    `nvidia-smi` isn't on PATH or the call fails.
+    """
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    util = 0
+    mem_used = 0
+    seen = False
+    for line in out.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            u = int(parts[0])
+            m = int(parts[1])
+        except ValueError:
+            continue
+        util = max(util, u)
+        mem_used += m
+        seen = True
+    if not seen:
+        return None
+    return {"util": util, "mem_used_mb": mem_used}
+
+
+def _parse_wait_for(
+    raw_for: list[str] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Parse the list of --for values into a list of condition descriptors.
+
+    Returns (conditions, error). `error` is set on the first malformed entry
+    and `conditions` is whatever was successfully parsed up to that point.
+
+    Each condition is a dict with `kind` and any kind-specific fields.
+    Valid kinds: experiments, ideators, process, log_growth, gpu_active,
+    gpu_idle.
+    """
+    conditions: list[dict[str, Any]] = []
+    if not raw_for:
+        return conditions, None
+    for spec in raw_for:
+        s = (spec or "").strip()
+        if not s:
+            continue
+        if s == "experiments":
+            conditions.append({"kind": "experiments"})
+        elif s == "ideators":
+            conditions.append({"kind": "ideators"})
+        elif s == "gpu-active":
+            conditions.append({"kind": "gpu_active"})
+        elif s == "gpu-idle":
+            conditions.append({"kind": "gpu_idle"})
+        elif s.startswith("process="):
+            arg = s[len("process="):].strip()
+            try:
+                pid = int(arg)
+            except ValueError:
+                return conditions, f"--for process=<pid>: invalid pid {arg!r}"
+            if pid <= 0:
+                return conditions, f"--for process=<pid>: pid must be positive, got {pid}"
+            conditions.append({"kind": "process", "pid": pid})
+        elif s.startswith("log-growth="):
+            arg = s[len("log-growth="):].strip()
+            if not arg:
+                return conditions, "--for log-growth=<path>: path is required"
+            conditions.append({"kind": "log_growth", "path": Path(arg)})
+        else:
+            return (
+                conditions,
+                f"--for {s!r}: unknown form; expected one of "
+                "experiments, ideators, process=<pid>, log-growth=<path>, "
+                "gpu-active, gpu-idle",
+            )
+    return conditions, None
 
 
 def _halt_discard_active(root: Path) -> tuple[list[str], list[tuple[str, str]]]:
@@ -4787,25 +4980,32 @@ def cmd_subagents_only(args: argparse.Namespace) -> int:
 
 
 def cmd_wait(args: argparse.Namespace) -> int:
-    """Block until something interesting happens in the active run, or --timeout.
+    """Block until a `--for` condition matches, or `--timeout` elapses.
 
-    Default watches BOTH:
-      - experiments: outcome.json appearing (committed/evaluated/failed) or
-        an experiment dir vanishing (discarded). Per-task trace flushes ignored.
-      - ideators: new proposals appended to `<run>/ideator/proposals.jsonl`.
-    Wakes on whichever changes first; prints which source woke it.
+    Default (no `--for`) watches BOTH experiments and ideators in the
+    active run, wakes on whichever fires first:
+      - experiments: outcome.json appearing (committed/evaluated/failed)
+        or an experiment dir vanishing (discarded).
+      - ideators: new lines appended to `<run>/ideator/proposals.jsonl`.
 
-    `--for {experiments,ideators}` narrows the watch to one source (a filter,
-    not a selector). Useful when the orchestrator is blocking specifically
-    for ideators after a stall and doesn't want incidental experiment
-    activity to wake it.
+    Extended conditions (combine freely; any match wakes wait):
+      --for process=<pid>     wake when the pid is no longer alive.
+      --for log-growth=<path> wake when the file's size stops growing for
+                              `--stall-threshold` seconds (default 2m).
+                              Initial absence counts as stalled.
+      --for gpu-active        wake when nvidia-smi reports util > 0.
+      --for gpu-idle          wake when nvidia-smi reports util == 0 for
+                              `--stall-threshold` consecutive seconds.
 
-    `--count N` (only meaningful with `--for`) blocks until N additional
-    items of that kind have landed since wait started. Without `--for`,
-    `--count` is rejected as ambiguous.
+    `--count N` (requires --for experiments or --for ideators alone)
+    blocks until N items of that kind have landed since wait started.
 
-    Returns 0 on detected change with a one-line summary, 124 (POSIX
-    timeout convention) on timeout. Polls every 1s.
+    `--json` emits a structured exit record on stdout with
+    `exit_reason`, per-condition state, and `waited_seconds`. The
+    non-JSON form prints a one-line summary.
+
+    Exit 0 on any match. Exit 124 (POSIX timeout convention) on
+    `--timeout`. Exit 2 on argument errors.
     """
     try:
         root = repo_root()
@@ -4815,72 +5015,295 @@ def cmd_wait(args: argparse.Namespace) -> int:
     if not (root / ".evo").exists():
         print("ERROR: not in an evo workspace", file=sys.stderr)
         return 2
-    # Locate the active run dir (lexicographically last run_*).
+
+    raw_for = list(getattr(args, "wait_for", []) or [])
+    conditions, parse_err = _parse_wait_for(raw_for)
+    if parse_err is not None:
+        print(f"ERROR: {parse_err}", file=sys.stderr)
+        return 2
+
+    # Backwards-compat: no --for flags means watch experiments + ideators
+    # together (the original behaviour).
+    if not conditions:
+        conditions = [{"kind": "experiments"}, {"kind": "ideators"}]
+        implicit_both = True
+    else:
+        implicit_both = False
+
+    timeout = _wait_timeout_seconds(getattr(args, "timeout", _WAIT_TIMEOUT_DEFAULT))
+    stall_threshold = _parse_duration_seconds(
+        getattr(args, "stall_threshold", None), default=120,
+    )
+    if stall_threshold < 1:
+        stall_threshold = 1
+    poll_interval = _parse_duration_seconds(
+        getattr(args, "poll_interval", None), default=5,
+    )
+    if poll_interval < 1:
+        poll_interval = 1
+    json_out = bool(getattr(args, "json_out", False))
+
+    count_raw = getattr(args, "count", None)
+    count = max(1, int(count_raw or 1)) if count_raw is not None else 1
+    # --count is only meaningful with a single experiments-or-ideators wait.
+    if count_raw is not None and int(count_raw or 1) > 1:
+        kinds = [c["kind"] for c in conditions]
+        if len(kinds) != 1 or kinds[0] not in ("experiments", "ideators"):
+            print(
+                "ERROR: --count > 1 requires exactly one --for "
+                "experiments|ideators (otherwise ambiguous which kind to count)",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Locate the active run dir (lexicographically last run_*). Required
+    # for experiments/ideators conditions; process/log/gpu conditions
+    # don't depend on it but we still need a workspace to be in.
     evo_dir = root / ".evo"
     runs = sorted(p for p in evo_dir.iterdir() if p.is_dir() and p.name.startswith("run_"))
-    if not runs:
+    needs_run_dir = any(c["kind"] in ("experiments", "ideators") for c in conditions)
+    if needs_run_dir and not runs:
         print("ERROR: no run dir under .evo/", file=sys.stderr)
         return 2
-    run_dir = runs[-1]
+    run_dir = runs[-1] if runs else None
 
-    timeout = _wait_timeout_seconds(getattr(args, "timeout", _WAIT_TIMEOUT_CAP))
-    subject = getattr(args, "wait_for", None)  # None = watch both
-    count_raw = getattr(args, "count", 1)
-    count = max(1, int(count_raw or 1))
+    # Baseline state per condition.
+    started_at = time.time()
+    for c in conditions:
+        kind = c["kind"]
+        if kind == "experiments":
+            c["baseline"] = _experiments_dir_snapshot(run_dir) if run_dir else {}
+        elif kind == "ideators":
+            mtime, lines = (
+                _ideator_proposals_snapshot(run_dir) if run_dir else (0.0, 0)
+            )
+            c["base_mtime"] = mtime
+            c["base_lines"] = lines
+        elif kind == "process":
+            c["initial_alive"] = _process_alive(int(c["pid"]))
+        elif kind == "log_growth":
+            path = c["path"]
+            c["last_size"] = _log_size(path)
+            c["last_growth_ts"] = started_at
+        elif kind == "gpu_active":
+            c["last_seen_active_ts"] = None
+        elif kind == "gpu_idle":
+            c["last_seen_active_ts"] = started_at
+            # Track whether nvidia-smi is reachable; if not, skip cleanly.
+            probe = _nvidia_smi_query()
+            c["nvidia_smi_available"] = probe is not None
 
-    # --count > 1 only makes sense paired with --for (otherwise: count what?)
-    if subject is None and count_raw is not None and int(count_raw or 1) > 1:
-        print(
-            "ERROR: --count > 1 requires --for {experiments|ideators} "
-            "(otherwise ambiguous which kind to count)",
-            file=sys.stderr,
-        )
-        return 2
+    def _gpu_snapshot() -> dict[str, Any] | None:
+        return _nvidia_smi_query()
 
-    watch_exp = subject in (None, "experiments")
-    watch_ide = subject in (None, "ideators")
+    def _emit_result(
+        exit_reason: str,
+        triggering: dict[str, Any] | None,
+        rc: int,
+    ) -> int:
+        waited = int(time.time() - started_at)
+        if json_out:
+            payload: dict[str, Any] = {
+                "exit_reason": exit_reason,
+                "waited_seconds": waited,
+            }
+            # Attach freshest probe data per condition so callers can
+            # inspect the state regardless of which one fired.
+            for c in conditions:
+                kind = c["kind"]
+                if kind == "process":
+                    pid = int(c["pid"])
+                    payload["process"] = {
+                        "pid": pid,
+                        "alive": _process_alive(pid),
+                        # Without being the parent we cannot reap a
+                        # real exit_code; document that honestly.
+                        "exit_code": None,
+                    }
+                elif kind == "log_growth":
+                    path = c["path"]
+                    payload["log"] = {
+                        "path": str(path),
+                        "size": _log_size(path),
+                        "grew_in_last_window": (
+                            _log_size(path) > int(c.get("last_size", 0))
+                        ),
+                        "last_line": _log_last_line(path),
+                    }
+                elif kind in ("gpu_active", "gpu_idle"):
+                    snap = _gpu_snapshot()
+                    if snap is None:
+                        payload["gpu"] = {"note": "nvidia-smi unavailable"}
+                    else:
+                        payload["gpu"] = snap
+            if triggering is not None:
+                payload["triggered_by"] = triggering
+            print(json.dumps(payload))
+        else:
+            if triggering:
+                detail = triggering.get("summary") or triggering.get("kind", "")
+                print(f"[evo wait] {exit_reason}: {detail}")
+            else:
+                print(f"[evo wait] {exit_reason} after {waited}s")
+        return rc
 
-    baseline_exp = _experiments_dir_snapshot(run_dir) if watch_exp else None
-    base_ide_mtime, base_ide_lines = (
-        _ideator_proposals_snapshot(run_dir) if watch_ide else (0.0, 0)
-    )
+    # If conditions are already satisfied before the first poll (e.g.
+    # process is already dead, log is already missing), fire immediately.
+    # `experiments`/`ideators` are change-based and intentionally skip
+    # this early-fire pass.
+    early = _evaluate_immediate(conditions, stall_threshold, started_at)
+    if early is not None:
+        return _emit_result(early["exit_reason"], early, 0)
 
-    deadline = time.time() + timeout
-    poll_interval = 1.0
+    deadline = started_at + timeout
     while time.time() < deadline:
         time.sleep(poll_interval)
-        if watch_exp:
-            now_exp = _experiments_dir_snapshot(run_dir)
-            if now_exp != baseline_exp:
-                summary = _describe_change(baseline_exp, now_exp)
-                print(f"[evo wait] change detected: {summary}")
-                return 0
-        if watch_ide:
-            now_mtime, now_lines = _ideator_proposals_snapshot(run_dir)
-            new_proposals = now_lines - base_ide_lines
-            if new_proposals >= count:
-                print(f"[evo wait] {new_proposals} new ideator proposal(s) landed")
-                return 0
+        now = time.time()
+        for c in conditions:
+            kind = c["kind"]
+            if kind == "experiments":
+                if run_dir is None:
+                    continue
+                snap = _experiments_dir_snapshot(run_dir)
+                if snap != c["baseline"]:
+                    summary = _describe_change(c["baseline"], snap)
+                    return _emit_result(
+                        "experiments-changed",
+                        {"kind": "experiments", "summary": summary},
+                        0,
+                    )
+            elif kind == "ideators":
+                if run_dir is None:
+                    continue
+                _, now_lines = _ideator_proposals_snapshot(run_dir)
+                new_proposals = now_lines - int(c["base_lines"])
+                if new_proposals >= count:
+                    return _emit_result(
+                        "ideators-landed",
+                        {
+                            "kind": "ideators",
+                            "summary": f"{new_proposals} new ideator proposal(s) landed",
+                            "new_proposals": new_proposals,
+                        },
+                        0,
+                    )
+            elif kind == "process":
+                pid = int(c["pid"])
+                if not _process_alive(pid):
+                    return _emit_result(
+                        "process-exited",
+                        {"kind": "process", "pid": pid,
+                         "summary": f"pid {pid} no longer alive"},
+                        0,
+                    )
+            elif kind == "log_growth":
+                path = c["path"]
+                size = _log_size(path)
+                if size > int(c["last_size"]):
+                    c["last_size"] = size
+                    c["last_growth_ts"] = now
+                    continue
+                if now - float(c["last_growth_ts"]) >= stall_threshold:
+                    return _emit_result(
+                        "log-stalled",
+                        {
+                            "kind": "log_growth",
+                            "summary": (
+                                f"{path} stalled at {size}B for "
+                                f">={stall_threshold}s"
+                            ),
+                            "path": str(path),
+                            "size": size,
+                        },
+                        0,
+                    )
+            elif kind == "gpu_active":
+                snap = _gpu_snapshot()
+                if snap is None:
+                    # nvidia-smi missing -- skip, surface in JSON result.
+                    continue
+                if snap.get("util", 0) > 0:
+                    return _emit_result(
+                        "gpu-active",
+                        {"kind": "gpu_active",
+                         "summary": f"gpu util={snap['util']}%",
+                         "gpu": snap},
+                        0,
+                    )
+            elif kind == "gpu_idle":
+                if not c.get("nvidia_smi_available"):
+                    # Re-probe in case nvidia-smi became available; otherwise
+                    # this condition can never fire and the wait will time out.
+                    probe = _gpu_snapshot()
+                    if probe is None:
+                        continue
+                    c["nvidia_smi_available"] = True
+                snap = _gpu_snapshot()
+                if snap is None:
+                    continue
+                if snap.get("util", 0) > 0:
+                    c["last_seen_active_ts"] = now
+                    continue
+                if now - float(c["last_seen_active_ts"]) >= stall_threshold:
+                    return _emit_result(
+                        "gpu-idle",
+                        {"kind": "gpu_idle",
+                         "summary": (
+                             f"gpu idle for >={stall_threshold}s (util=0)"
+                         ),
+                         "gpu": snap},
+                        0,
+                    )
 
-    # Timeout. Surface partial progress for ideator-counted waits; otherwise
-    # the standard "nothing happened" message.
-    if watch_ide and subject == "ideators" and count > 1:
+    # Timed out. Surface partial progress for ideator counts when relevant.
+    if (
+        count_raw is not None
+        and count > 1
+        and len(conditions) == 1
+        and conditions[0]["kind"] == "ideators"
+        and run_dir is not None
+    ):
         _, now_lines = _ideator_proposals_snapshot(run_dir)
-        new_proposals = now_lines - base_ide_lines
-        if new_proposals > 0:
+        new_proposals = now_lines - int(conditions[0]["base_lines"])
+        if new_proposals > 0 and not json_out:
             print(
                 f"[evo wait] timed out after {timeout}s with {new_proposals}/"
                 f"{count} ideator proposals (partial)"
             )
             return 124
 
-    what = {
-        None: "experiment or ideator",
-        "experiments": "experiment",
-        "ideators": "new ideator proposal",
-    }[subject]
-    print(f"[evo wait] timed out after {timeout}s with no {what} activity")
-    return 124
+    if not json_out:
+        kinds = ", ".join(sorted({c["kind"] for c in conditions}))
+        if implicit_both:
+            kinds = "experiment or ideator"
+        print(f"[evo wait] timed out after {timeout}s with no {kinds} activity")
+    return _emit_result("timed-out", None, 124) if json_out else 124
+
+
+def _evaluate_immediate(
+    conditions: list[dict[str, Any]], stall_threshold: int, started_at: float,
+) -> dict[str, Any] | None:
+    """Check whether any non-change-based condition is already satisfied.
+
+    `process=<pid>` fires immediately if the pid is already dead.
+    `log-growth=<path>` does NOT fire on absence -- we treat a missing log
+    as "size 0, waiting for it to appear and grow" so a wait launched
+    before the log file exists doesn't return instantly.
+
+    Change-based conditions (experiments/ideators) and stall-window
+    conditions (gpu-idle) never satisfy at t=0; they need a poll.
+    """
+    for c in conditions:
+        if c["kind"] == "process":
+            pid = int(c["pid"])
+            if not _process_alive(pid):
+                return {
+                    "exit_reason": "process-exited",
+                    "kind": "process",
+                    "pid": pid,
+                    "summary": f"pid {pid} was already not alive",
+                }
+    return None
 
 
 def cmd_ack(args: argparse.Namespace) -> int:
@@ -5924,42 +6347,79 @@ def build_parser() -> argparse.ArgumentParser:
 
     wait_p = sub.add_parser(
         "wait",
-        help="Block until experiment or ideator activity in the active run; --timeout caps (max 1h)",
+        help="Block until a --for condition matches; --timeout caps (default 1h, max 24h)",
         description=(
-            "Default: watches BOTH experiments and ideators; wakes on whichever "
-            "changes first.\n"
+            "Default (no --for): watches BOTH experiments and ideators in the "
+            "active run; wakes on whichever changes first.\n"
             "  Experiments wake on outcome.json appearing (committed/evaluated/"
             "failed) or an experiment dir vanishing (discarded). Per-task trace "
             "writes are ignored.\n"
             "  Ideators wake on new lines appended to <run>/ideator/proposals.jsonl.\n"
             "\n"
-            "--for {experiments,ideators} narrows the watch to one source (a "
-            "filter). Use when blocking specifically for ideators after a stall "
-            "and incidental experiment activity should not wake the wait.\n"
+            "--for accepts (may be repeated; any match wakes the wait):\n"
+            "  experiments            -- watch outcome.json activity\n"
+            "  ideators               -- watch ideator proposals\n"
+            "  process=<pid>          -- wake when pid is no longer alive.\n"
+            "                            (exit_code is only available if `evo "
+            "wait` is the parent process, which is usually not the case; the "
+            "JSON output reports exit_code: null in that situation.)\n"
+            "  log-growth=<path>      -- wake when the file's size stops growing "
+            "for --stall-threshold seconds\n"
+            "  gpu-active             -- wake when nvidia-smi reports util > 0\n"
+            "  gpu-idle               -- wake when nvidia-smi reports util == 0 "
+            "for --stall-threshold consecutive seconds\n"
             "\n"
-            "--count N (requires --for) blocks until N additional items of that "
-            "kind land. Without --for, --count > 1 is rejected as ambiguous.\n"
+            "--count N requires exactly one --for experiments|ideators; blocks "
+            "until N items land.\n"
             "\n"
-            "Exit 0 with one-line summary on change; 124 on timeout (partial "
-            "ideator counts surfaced in the summary)."
+            "--json emits a structured exit record with exit_reason, per-"
+            "condition state, and waited_seconds.\n"
+            "\n"
+            "Exit 0 on match. 124 on --timeout. 2 on argument errors."
         ),
     )
     wait_p.add_argument(
         "--for",
         dest="wait_for",
-        choices=["experiments", "ideators"],
+        action="append",
         default=None,
-        help="Narrow the watch to one source. Default: both.",
+        metavar="CONDITION",
+        help=(
+            "Add a wait condition. Repeatable. Values: experiments, ideators, "
+            "process=<pid>, log-growth=<path>, gpu-active, gpu-idle. "
+            "Default (no --for): experiments + ideators."
+        ),
     )
     wait_p.add_argument(
         "--count",
         type=int,
         default=None,
-        help="Block until N items of --for's kind land. Requires --for.",
+        help=(
+            "Block until N items of --for's kind land. Requires exactly one "
+            "--for experiments|ideators."
+        ),
     )
     wait_p.add_argument(
-        "--timeout", type=float, default=3600,
-        help="Seconds to block before giving up. Default 3600, capped at 3600.",
+        "--timeout", default="1h",
+        help=(
+            "Duration before giving up. Accepts seconds, e.g. 60, or 60m/2h. "
+            "Default 1h, capped at 24h."
+        ),
+    )
+    wait_p.add_argument(
+        "--stall-threshold", dest="stall_threshold", default="2m",
+        help=(
+            "Stall window for log-growth and gpu-idle conditions. "
+            "Accepts seconds or 60m/2h. Default 2m."
+        ),
+    )
+    wait_p.add_argument(
+        "--poll-interval", dest="poll_interval", default="5s",
+        help="Polling interval. Accepts seconds or 1m. Default 5s.",
+    )
+    wait_p.add_argument(
+        "--json", dest="json_out", action="store_true",
+        help="Emit a structured JSON exit record instead of the one-line summary.",
     )
     wait_p.set_defaults(func=cmd_wait)
 
