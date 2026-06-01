@@ -65,6 +65,7 @@ from .core import (
     worktrees_path,
     workspace_path,
     allocate_experiment,
+    capture_experiment_diff,
     remove_worktree_only,
     render_git_diff,
 )
@@ -2628,8 +2629,17 @@ def _cmd_run_impl(
     else:
         parent_node = _read_node(root, node["parent"])
         parent_ref = parent_node.get("commit") or parent_node["branch"]
-    diff_text = render_git_diff(
-        root, parent_ref, worktree, relative_target(config), executor=executor,
+    # Whole-repo diff against parent (covers both committed-then-run and
+    # dirty-worktree workflows). Scoping to relative_target(config) drops
+    # all source edits outside that one path -- the bug fixed by #51.
+    diff_text = capture_experiment_diff(
+        root,
+        args.exp_id,
+        attempt_n,
+        parent_ref,
+        worktree,
+        executor=executor,
+        exclude_patterns=config.get("diff_exclude_patterns"),
     )
     (a_dir / "diff.patch").write_text(diff_text, encoding="utf-8")
 

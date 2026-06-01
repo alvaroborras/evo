@@ -866,6 +866,29 @@ def maybe_commit_worktree(
     return head.stdout.strip() if head.exit_code == 0 else None
 
 
+# Pathspec defaults that keep diff.patch dashboard-renderable. The agent
+# commits big training artifacts (weights, optimizer state, tokenizer
+# blobs) to the experiment branch; scoping them out of the patch keeps
+# the file in the KB range without losing the source changes that
+# explain the score. Override per workspace via
+# config["diff_exclude_patterns"].
+DEFAULT_DIFF_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    "**/*.safetensors",
+    "**/*.bin",
+    "**/*.pt",
+    "**/optimizer.pt",
+    "**/scheduler.pt",
+    "**/rng_state.pth",
+    "**/training_args.bin",
+    "**/tokenizer.json",
+    "**/checkpoint-*/**",
+)
+
+
+def _diff_exclude_pathspecs(patterns: list[str] | tuple[str, ...]) -> list[str]:
+    return [f":(exclude,glob){pat}" for pat in patterns]
+
+
 def render_git_diff(
     root: Path,
     parent_ref: str,
@@ -889,6 +912,53 @@ def render_git_diff(
     if result.exit_code != 0:
         raise RuntimeError(
             f"git diff {parent_ref} -- {relative_path} failed: "
+            f"{result.stderr[:500]}"
+        )
+    return result.stdout
+
+
+def capture_experiment_diff(
+    root: Path,
+    exp_id: str,
+    attempt: int,
+    parent_ref: str,
+    worktree: Path,
+    executor: Any = None,
+    exclude_patterns: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Capture parent..exp diff for the worktree as a single patch.
+
+    Compares the experiment worktree (HEAD + uncommitted changes) against
+    `parent_ref`, the experiment's parent commit. Covers both the
+    pre-commit workflow (agent commits to the experiment branch, then
+    invokes `evo run` against a clean worktree) and the dirty-worktree
+    workflow (agent leaves edits unstaged for `maybe_commit_worktree` to
+    pick up later).
+
+    Scoped to the whole repo (not the configured `target` path) so changes
+    outside the target file -- training configs, prompt files, helper
+    scripts -- aren't silently dropped from the patch the dashboard renders.
+
+    Binary / large artifacts are excluded via pathspec to keep the patch
+    in the KB range. Pass `exclude_patterns` to override; default is
+    `DEFAULT_DIFF_EXCLUDE_PATTERNS`.
+
+    `executor` (a `WorkspaceExecutor`) routes through the active backend
+    so the diff runs inside the sandbox for remote backends.
+    """
+    if executor is None:
+        from .workspace_executor import LocalExecutor
+        executor = LocalExecutor()
+    patterns = (
+        list(exclude_patterns)
+        if exclude_patterns is not None
+        else list(DEFAULT_DIFF_EXCLUDE_PATTERNS)
+    )
+    cmd = ["git", "diff", parent_ref, "--"] + _diff_exclude_pathspecs(patterns)
+    result = executor.run(cmd, cwd=worktree)
+    if result.exit_code != 0:
+        raise RuntimeError(
+            f"git diff {parent_ref} (exp={exp_id}, attempt={attempt}) failed: "
             f"{result.stderr[:500]}"
         )
     return result.stdout
