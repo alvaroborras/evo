@@ -25,13 +25,17 @@ Decide on the reward first, technique second. Choosing the comfortable technique
 
 Run the full pipeline on ~10 examples for ~1 minute. Must produce: a checkpoint the benchmark can load AND a non-zero eval on a held-out item. If not, the recipe is broken — fix it, don't scale it. dtype mismatch, tokenizer/template drift, OOM at this batch size, empty artifacts dir despite falling loss — all surface on 10 examples. Running longer doesn't surface them differently, just more expensively.
 
-## Three diagnostics
+## Four diagnostics
 
 **Stuck at 0 on a verifiable benchmark after 2+ SFT runs.** Technique class is wrong, not the recipe. Pivot to RL with the verifier as reward; SFT loss can be healthy while the model emits unparseable output.
 
 **Base scores below random before any training (knowledge-heavy benchmark).** Model lacks the knowledge, not the format. Post-training shapes existing knowledge; it does not install new knowledge. Right axis: continued pre-training on a domain corpus, distillation from a stronger model that has the knowledge, or retrieval-augmented inference.
 
 **`delta <= 0` across several committed train moves.** Method exhausted on this target. Try a different method, change the data, or improve the harness instead of the weights.
+
+**Stuck at the same non-zero score across 3+ experiments spanning distinct techniques.** When 3+ committed experiments — across structurally different techniques (e.g. SFT, GRPO, RFT) — all land at the same non-zero score, the bottleneck is not the training method. The most common cause is a train↔verifier objective mismatch: the model has learned to emit answers in one format, but the verifier expects a different one. Examples: training data uses `\boxed{X}` but the verifier prompt requests `ANSWER: X` (or vice versa); training uses one chat template, eval uses another; training optimizes step-by-step CoT but the verifier wants the answer alone.
+
+Diagnostic action: spot-check 3 training examples and 3 eval-prompt examples side by side. If a perfect-score training example would NOT pass the verifier (or vice versa), the objective is mismatched. Realign the training data format to the verifier's expected output, OR change the eval prompt (if rules allow). Do NOT try a fourth training-technique variant before doing this spot-check.
 
 ## What never counts as progress
 
