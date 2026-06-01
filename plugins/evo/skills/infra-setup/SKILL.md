@@ -1,7 +1,6 @@
 ---
 name: infra-setup
 description: Non-user-invocable provider/setup reference for evo backend switching, prerequisite checks, and auth/install guidance.
-disable-model-invocation: true
 evo_version: 0.5.0-alpha.1
 ---
 
