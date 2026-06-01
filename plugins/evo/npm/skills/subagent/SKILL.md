@@ -1,7 +1,7 @@
 ---
 name: subagent
 description: Internal protocol for evo optimization subagents. Loaded by subagents spawned from /optimize via their host's skill loader. Not for orchestrator use.
-evo_version: 0.4.4
+evo_version: 0.5.0-alpha.2
 ---
 
 # Evo Subagent Protocol
@@ -160,7 +160,22 @@ For multi-line edits, `evo edit --json-stdin` reads `{"old":...,"new":...,"repla
 
 You may edit anything within the target scope. Do NOT modify benchmark, gate, or framework code.
 
-### 4. Run the experiment
+### 4. Verify the experiment design (pre-`evo run`)
+
+Before `evo run` burns compute, invoke the **evo verifier subagent** via your host's Task tool. Static analysis, ~30s.
+
+```
+Task(subagent_type="evo:verifier",
+     prompt="workspace=<workspace abs path>\nexperiment_id=<your exp_id>\nphase=pre")
+```
+
+The verifier checks for test-set leakage in your training data, subsetted eval commands, missing gates for new artifacts, generic hypotheses, and concurrent-resource conflicts. It returns a JSON report (`{passed, verdict, findings}`) and writes the same verdict as an `evo annotation` on the experiment. See `plugins/evo/agents/verifier.md` for the full check list.
+
+If the verifier returns `passed: false` (verdict `fail`), address every flagged `block` finding and re-invoke until it returns `passed: true`. Skipping or fudging a `fail` verdict is a stop-the-line bug -- the verdict is the precondition for compute spend.
+
+If the verifier returns verdict `warn`, you may proceed but address the warnings in your annotation (step 7).
+
+### 5. Run the experiment
 
 ```bash
 evo run <exp_id>
@@ -195,7 +210,7 @@ evo run <exp_id> --i-staged-new-files yes
 
 The ack flag is required when the worktree has any untracked, non-gitignored file. Without it, `evo run` errors closed and lists the files. For each file, decide: source (then `git add`) or warm state (leave untracked -- it persists in the slot for future experiments). Then re-run with `--i-staged-new-files yes`. The flag value must be exactly `yes`. In `commit_strategy=all` workspaces (default for `--backend worktree`) the flag is a silent no-op; safe to always pass.
 
-### 5. Analyze the result
+### 6. Analyze the result
 
 `evo run` prints one of three outcomes:
 
@@ -215,7 +230,7 @@ The ack flag is required when the worktree has any untracked, non-gitignored fil
   - Structural (benchmark broken, evo misconfigured): report to orchestrator and stop.
   - Not worth fixing: `evo discard <id> --reason "..."`.
 
-### 6. Annotate
+### 7. Annotate
 
 ```bash
 evo annotate <exp_id> "<what you changed, what happened, and why>"
@@ -223,7 +238,7 @@ evo annotate <exp_id> "<what you changed, what happened, and why>"
 
 Always annotate so other agents can learn from your experiments.
 
-### 6b. Add gates for fixed behaviors
+### 7b. Add gates for fixed behaviors
 
 When you fix a critical, easy-to-regress behavior, lock it in as a gate so future experiments on this branch can't break it:
 
@@ -233,7 +248,7 @@ evo gate add <exp_id> --name "social_eng_resistance" --command "python3 {worktre
 
 Good candidates: a specific benchmark task that was hard to fix, a test for a critical policy rule, a smoke test for a fragile behavior. The gate command must exit non-zero when the protected behavior regresses; a bare benchmark invocation that prints a low score but exits 0 is decorative and should not be registered. Do NOT gate every passing task -- that over-constrains the search.
 
-### 7. Decide: continue or stop
+### 8. Decide: continue or stop
 
 Continue if budget remains AND (last outcome was committed, OR you have a meaningfully different idea after an evaluated/discarded outcome). When continuing after a committed experiment, update your parent to the newly committed ID.
 

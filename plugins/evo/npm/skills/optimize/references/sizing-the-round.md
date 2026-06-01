@@ -30,6 +30,14 @@ Read `.evo/project.md`'s resource-profile line first (discover records it). If i
 
 When a run needs an exclusive resource, serializing benchmark *execution* (width 1) is correct even though the *edits* are independent — on the worktree backend `evo run` executes the benchmark in-place, so concurrent `evo run` means concurrent benchmark processes on that one resource.
 
+**Latency / timing / throughput benchmarks deserve a per-workspace judgment call, not a fixed answer.** When the metric IS time, jitter, or rate, sibling-process CPU/cache/memory-bandwidth pressure can BIAS the measurement (not just add noise) — and the orchestrator may then promote a "winner" that's just a contention artifact. But this doesn't always happen, and harness softeners (warmup, min-over-N batches, outlier rejection) reduce the risk. Things to weigh case-by-case before picking width:
+- How big is the optimization's expected effect vs. the variance the harness reports under parallel runs? If the effect is much larger than measurement jitter, modest parallelism is fine.
+- How much of the benchmark's wall-clock is the actual timed section? Long edit/compile phases overlap safely; only the timed section needs isolation.
+- Can a winner be cheaply re-confirmed solo before being promoted? If yes, going wider for exploration with a solo-confirm gate is reasonable.
+- Does the harness already filter contention (e.g., reject batches with outlier jitter)?
+
+If unsure, start narrower and widen once you've confirmed measurements are stable. Width 1 is the safe default for *unknown* timing-sensitive benchmarks; don't apply it reflexively when the workspace has data that says otherwise.
+
 ## 3. Depth — `budget` (iterations per subagent within its branch)
 
 Depth trades exploration against spend, and keys off cost per run, not concurrency:
