@@ -14,10 +14,17 @@ The only **firm** things are evo's guardrails: a held-out eval you never train o
 
 ## When to do what
 
-- **SFT** -- install a capability the base lacks: format, tone, chat, curated data.
-- **RFT** (rejection-sampling / STaR) -- SFT on filtered high-reward samples. Highest-return next step once you can score outputs; stable and cheap.
-- **DPO / preference** -- quality is taste/pairwise, not verifiable; you have chosen/rejected pairs and don't want an RL loop.
-- **RL (GRPO/PPO)** -- you have a reward you trust and offline methods plateaued; gets gains they can't, at more cost and fuss. Bigger models benefit more.
+Decide by **reward shape first**, not by familiarity. The training method that fits your reward beats a more-comfortable method that doesn't.
+
+- **Reward is verifiable** (exact-match integer answers, unit-test pass/fail, deterministic checker, parser-decidable) -- start with **RL (GRPO/RLOO/PPO)**. The reward shapes correctness AND output-format simultaneously: the model gets reward only when its output is BOTH right AND in the format the verifier can parse. SFT on the same task often trains good reasoning but the model never learns to emit answers in the verifier-expected shape -- you end up at score 0.0 even with healthy training loss, because reasoning != verifier-acceptance. Math benchmarks with integer answers (AIME, GSM8K), code benchmarks with unit tests (HumanEval, MBPP), and any benchmark where "did I get the right answer" is mechanically checkable fall here. **This is where SOTA reasoning models actually come from in 2026** -- DeepSeek-R1, Qwen3 reasoning, etc. all use verifiable RL, not SFT alone.
+
+- **Reward is taste / preference pairs** (chosen vs rejected, RLHF-style labels) -- use **DPO / KTO / ORPO**. Cheaper than full RL, no rollouts. Right when you have pair labels but no verifier.
+
+- **No reward, just demonstrations** (curated trajectories, expert traces, chat data) -- use **SFT**. The classic "install a capability the base lacks" case: format, tone, chat. Default when the only signal you have is "here's what good looks like."
+
+- **You can score outputs but want SFT's stability** -- use **RFT** (rejection-sampling / STaR): generate samples, filter by reward, SFT on the survivors. Cheap, stable, often a strong warm-start before full RL.
+
+**Diagnostic for "stuck at 0.0 on a verifiable benchmark":** if you've run 2+ SFT experiments and committed score is still 0.0 (the verifier accepts no outputs), the technique-class is wrong, not the recipe. Pivot to RL with the verifier-as-reward -- more SFT data won't fix it. Verifiable-reward RL gets format-acceptance for free because the reward includes it.
 
 ## What actually matters (roughly in order)
 
@@ -32,7 +39,7 @@ Method- and provider-specific numbers (LR, KL, group size) live in the recipe yo
 
 Don't state these as rules -- they're situational, decide empirically against the gate:
 
-- "Always SFT before RL" -- RL-from-base works for strong base models; SFT is a warm-start, not a prerequisite.
+- "Always SFT before RL" -- **RL-from-base works for strong base models** (Qwen3-Base, Llama-3-Base scale and up). SFT is a warm-start when the base can't produce parseable outputs at all; for verifiable-reward benchmarks with a competent base, GRPO-from-base often beats SFT-then-GRPO end-to-end.
 - "Only RL with verifiable rewards" -- preference-RL on a learned reward is valid where correctness isn't checkable.
 - "Always keep the KL penalty" -- some reasoning-RL runs drop it; it's a tunable.
 - Fixed β / rank / LR as universal -- scale- and task-dependent.
