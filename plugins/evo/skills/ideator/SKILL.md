@@ -1,7 +1,7 @@
 ---
 name: ideator
 description: Deprecated -- the ideator moved from a skill to a subagent. Loading this skill returns a pointer to the new invocation path. No behavior change for callers that follow the redirect.
-evo_version: 0.5.0-alpha.4
+evo_version: 0.5.0-alpha.5
 ---
 
 # Ideator (moved)

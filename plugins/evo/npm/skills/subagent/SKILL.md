@@ -1,7 +1,7 @@
 ---
 name: subagent
 description: Internal protocol for evo optimization subagents. Loaded by subagents spawned from /optimize via their host's skill loader. Not for orchestrator use.
-evo_version: 0.5.0-alpha.4
+evo_version: 0.5.0-alpha.5
 ---
 
 # Evo Subagent Protocol
@@ -265,6 +265,12 @@ Trace quality is part of the benchmark contract. After a failed baseline or fail
 - **LLM / agent benchmarks**: log the task input, observation/frame summary, prompt or message summary, model/tool response, selected action, retries/errors, and final task outcome. If the project already has a separate recorder, decide whether evo traces mirror the important fields or whether the recorder artifact is explicitly linked from the evo trace.
 
 The trace format is forward-compatible -- extra fields are preserved. Do NOT change the score computation or gate logic -- only add observability.
+
+## Reuse expensive intermediates
+
+If your experiment needs an artifact that is slow to produce and stable across sibling/descendant experiments -- curated/tokenized datasets, fine-tuned weights or adapters, embeddings, retrieval indexes, precomputed eval generations, large compiled assets -- check `.evo/cache/` (workspace-level, sibling to `run_<NNNN>/`) before recomputing. Write back what you compute, keyed by every input that changes the artifact (recipe version, source, parameters). The next experiment that asks for the same artifact reads from disk instead of rebuilding from scratch.
+
+`.evo/cache/` is already gitignored via the workspace's `.evo/` exclude and is not touched by `evo new` / `evo run` / `evo reset`. Anti-pattern: writing the artifact inside your experiment's worktree -- it's worktree-local, doesn't propagate to descendants, and disappears on cleanup. The full read-or-compute pattern (workspace-root lookup, cache-key construction, deferring to the per-user HF cache where relevant) is in the **finetuning skill** under "Cache expensive intermediates." Apply it in any domain where the artifact shape fits.
 
 ## Rules
 
