@@ -857,7 +857,139 @@ def create_app(root: Path | None = None) -> Flask:
                 target = attempt_dir(_root(), exp_id, attempt) / filename
         if not target.exists():
             return Response("", mimetype="text/plain")
-        return Response(target.read_text(encoding="utf-8"), mimetype="text/plain")
+        # Query params for incremental tailing:
+        #   ?tail=N  -> return only the last N lines (cheap when N << file size).
+        #   ?offset=M -> return bytes from offset M onward; pair with the
+        #                "X-Log-Size" response header so the client can poll
+        #                with offset=<prev-size> for a true append-only feed.
+        try:
+            tail = int(request.args.get("tail", "0"))
+        except ValueError:
+            tail = 0
+        try:
+            offset = int(request.args.get("offset", "0"))
+        except ValueError:
+            offset = 0
+        size = target.stat().st_size
+        if offset:
+            with target.open("rb") as fh:
+                fh.seek(min(offset, size))
+                data = fh.read()
+            text = data.decode("utf-8", errors="replace")
+        elif tail > 0:
+            # Cheap last-N-lines: read a bounded tail (4 KiB per line cap)
+            # then split; avoids loading huge files for a short tail.
+            window = min(size, max(tail * 4096, 65536))
+            with target.open("rb") as fh:
+                fh.seek(max(0, size - window))
+                chunk = fh.read()
+            text = chunk.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            text = "\n".join(lines[-tail:])
+        else:
+            text = target.read_text(encoding="utf-8")
+        resp = Response(text, mimetype="text/plain")
+        resp.headers["X-Log-Size"] = str(size)
+        return resp
+
+    @app.get("/api/node/<exp_id>/logs")
+    def node_logs(exp_id: str):
+        # List candidate log files in the latest attempt dir. Returns file
+        # name + byte size so the client can pick one and poll incrementally.
+        attempt = _latest_attempt_n(_root(), exp_id)
+        if attempt is None:
+            return jsonify({"attempt": None, "files": []})
+        dirpath = attempt_dir(_root(), exp_id, attempt)
+        files: list[dict[str, Any]] = []
+        if dirpath.exists():
+            # Surface .log and .out at the attempt root and one level under
+            # logs/ (the convention training scripts typically use).
+            patterns = ["*.log", "*.out", "logs/*.log", "logs/*.out"]
+            seen: set[Path] = set()
+            for pat in patterns:
+                for p in sorted(dirpath.glob(pat)):
+                    if p in seen or not p.is_file():
+                        continue
+                    seen.add(p)
+                    files.append({
+                        "name": str(p.relative_to(dirpath)),
+                        "size": p.stat().st_size,
+                        "mtime": p.stat().st_mtime,
+                    })
+        return jsonify({"attempt": attempt, "files": files})
+
+    @app.get("/api/node/<exp_id>/trackio")
+    def node_trackio(exp_id: str):
+        # Reads .trackio_url written by the training callback (see
+        # posttrainbench-evo/scripts/trl_trackio_callback.py). File format:
+        #   url=<space url>
+        #   space_id=<owner>/<name>
+        #   project=<project>
+        #   run_name=<run>
+        # If huggingface_hub + pandas + pyarrow are importable AND the
+        # corresponding HF Dataset exists, also return the last ~60 rows
+        # of the run's metrics for a sparkline. All optional -- if any
+        # piece is missing, return what we have and let the client render
+        # just the link.
+        attempt = _latest_attempt_n(_root(), exp_id)
+        if attempt is None:
+            return jsonify({"url": None})
+        marker = attempt_traces_dir(_root(), exp_id, attempt) / ".trackio_url"
+        if not marker.exists():
+            return jsonify({"url": None})
+        meta: dict[str, str] = {}
+        for line in marker.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                meta[k.strip()] = v.strip()
+        url = meta.get("url")
+        if not url:
+            return jsonify({"url": None})
+        result: dict[str, Any] = {
+            "url": url,
+            "space_id": meta.get("space_id"),
+            "project": meta.get("project"),
+            "run_name": meta.get("run_name"),
+            "scalars": None,
+        }
+        space_id = meta.get("space_id")
+        project = meta.get("project")
+        run_name = meta.get("run_name")
+        if space_id and project:
+            try:
+                from huggingface_hub import hf_hub_download
+                import pandas as pd  # type: ignore
+                dataset_id = f"{space_id}-dataset"
+                pq_path = hf_hub_download(
+                    repo_id=dataset_id,
+                    repo_type="dataset",
+                    filename=f"{project}.parquet",
+                )
+                df = pd.read_parquet(pq_path)
+                if run_name:
+                    df = df[df["run_name"] == run_name]
+                # Take last 60 rows for the sparkline; collect numeric cols.
+                df = df.sort_values("step").tail(60)
+                scalars: dict[str, list[dict[str, float]]] = {}
+                for col in df.columns:
+                    if col in ("id", "timestamp", "run_name", "step"):
+                        continue
+                    series = df[col].dropna()
+                    if series.empty:
+                        continue
+                    # Only keep numeric (loss/lr/grad_norm style) cols.
+                    try:
+                        vals = [float(x) for x in series.tolist()]
+                    except (TypeError, ValueError):
+                        continue
+                    steps = df.loc[series.index, "step"].astype(int).tolist()
+                    scalars[col] = [{"step": s, "value": v} for s, v in zip(steps, vals)]
+                result["scalars"] = scalars
+            except Exception:
+                # Any failure (no deps, dataset missing, parquet schema
+                # mismatch) -- just return the link, no sparkline.
+                pass
+        return jsonify(result)
 
     @app.get("/api/active")
     def active():

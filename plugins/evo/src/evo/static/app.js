@@ -36,6 +36,10 @@ const state = {
   _scatterResizeBound: false,  // scatter overlay drag-resize handler
   _barHoverTipsBound: false,   // hover-tooltips on compact off-spine bars
   _scatterTipsBound: false,    // hover-tooltips on scatter dots
+  // Logs tab state (per-drawer; resets when the drawer or file changes).
+  logsSelected: null,    // currently-displayed log file name
+  logsOffset: 0,         // byte offset for incremental append polling
+  logsAutoRefresh: false, // whether the 2s poll timer is active
 };
 
 // ─── Helpers ─────────────────────────────────────────────
@@ -2070,7 +2074,7 @@ async function openDrawer(expId, opts) {
   const deltaColor = deltaColorFor(delta);
   const statusColor = STATUS_COLORS[node.status] || '#52525b';
   const hasChildren = (node.children || []).length > 0;
-  const activeTab = ['summary', 'diff', 'tasks'].includes(state.sidebarTab)
+  const activeTab = ['summary', 'diff', 'tasks', 'logs'].includes(state.sidebarTab)
     ? state.sidebarTab
     : 'summary';
   // Drives the diff-tab fill layout in CSS (.sidebar[data-tab="diff"]).
@@ -2100,6 +2104,7 @@ async function openDrawer(expId, opts) {
       ${drawerTabButton('summary', 'Summary', activeTab)}
       ${drawerTabButton('diff', 'Diff', activeTab)}
       ${drawerTabButton('tasks', 'Tasks', activeTab)}
+      ${drawerTabButton('logs', 'Logs', activeTab)}
     </div>`;
 
   if (activeTab === 'summary') {
@@ -2159,6 +2164,11 @@ async function openDrawer(expId, opts) {
       <div class="drawer-meta-row"><span class="drawer-meta-key">Score</span><span class="drawer-meta-val mono">${check.score != null ? Number(check.score).toFixed(2) : '--'}</span></div>
       <div class="drawer-meta-row"><span class="drawer-meta-key">Traces</span><span class="drawer-meta-val mono">${check.trace_count || 0}</span></div>
       <div class="drawer-meta-row"><span class="drawer-meta-key">Artifacts</span><span class="drawer-meta-val mono">${esc(check.artifact_path || '--')}</span></div>
+      <div class="drawer-meta-row" id="drawer-trackio-row" style="display:none">
+        <span class="drawer-meta-key">Metrics</span>
+        <span class="drawer-meta-val" id="drawer-trackio-val"></span>
+      </div>
+      <div id="drawer-trackio-spark"></div>
       ${check.error ? `<div class="failure-box"><span class="failure-box-title">Failure: ${esc(check.error)}</span></div>` : ''}
     </div>` : ''}`;
   } else if (activeTab === 'diff') {
@@ -2281,10 +2291,158 @@ async function openDrawer(expId, opts) {
     } else {
       html += `<div class="drawer-section"><div class="sidebar-empty">No benchmark task results recorded.</div></div>`;
     }
+  } else if (activeTab === 'logs') {
+    let payload = { attempt: null, files: [] };
+    try {
+      payload = await fetch(`/api/node/${expId}/logs`).then(r => r.json());
+      if (isStale()) return;
+    } catch (e) { /* empty list */ }
+    if (!payload.files.length) {
+      html += `<div class="drawer-section"><div class="sidebar-empty">No log files in latest attempt. Training scripts write to logs/*.log under the experiment worktree.</div></div>`;
+    } else {
+      // Default to the largest file (= most active). User can switch via picker.
+      const sorted = [...payload.files].sort((a, b) => b.size - a.size);
+      const initial = state.logsSelected && payload.files.find(f => f.name === state.logsSelected)
+        ? state.logsSelected
+        : sorted[0].name;
+      const options = payload.files.map(f =>
+        `<option value="${esc(f.name)}" ${f.name === initial ? 'selected' : ''}>${esc(f.name)} (${formatBytes(f.size)})</option>`
+      ).join('');
+      html += `<div class="drawer-section">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <span class="drawer-section-title" style="margin-bottom:0">Logs</span>
+          <select id="logs-file-picker" onchange="onLogsFileChange()" style="font:inherit;padding:2px 6px">${options}</select>
+          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-1);cursor:pointer">
+            <input type="checkbox" id="logs-autorefresh" onchange="onLogsAutorefreshChange()" ${state.logsAutoRefresh ? 'checked' : ''}>
+            auto-refresh
+          </label>
+          <button onclick="refreshLogsTail(true)" style="font:inherit;padding:2px 8px;cursor:pointer">refresh</button>
+        </div>
+        <pre id="logs-tail" style="background:#0c0c10;color:#d4d4d8;padding:10px;border-radius:4px;font-size:11px;line-height:1.4;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0">Loading...</pre>
+      </div>`;
+    }
   }
 
   if (isStale()) return;
   content.innerHTML = html;
+
+  // Post-render side effects: kick off async fetches that populate placeholders
+  // already in the DOM. Done after innerHTML so the main panel paints first.
+  if (activeTab === 'summary') {
+    loadTrackioPreview(expId);
+  } else if (activeTab === 'logs') {
+    const picker = document.getElementById('logs-file-picker');
+    if (picker) {
+      state.logsSelected = picker.value;
+      state.logsOffset = 0;
+      refreshLogsTail(true);
+      if (state.logsAutoRefresh) startLogsAutorefresh(expId);
+    }
+  }
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / 1024 / 1024).toFixed(1)}MB`;
+}
+
+async function loadTrackioPreview(expId) {
+  try {
+    const r = await fetch(`/api/node/${expId}/trackio`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data.url) return;
+    const row = document.getElementById('drawer-trackio-row');
+    const val = document.getElementById('drawer-trackio-val');
+    const spark = document.getElementById('drawer-trackio-spark');
+    if (!row || !val) return;
+    const label = data.run_name ? `${data.project}: ${data.run_name}` : (data.project || 'trackio');
+    val.innerHTML = `<a href="${esc(data.url)}" target="_blank" rel="noopener" style="color:var(--indigo);text-decoration:none">${esc(label)} ↗</a>`;
+    row.style.display = '';
+    if (spark && data.scalars) {
+      spark.innerHTML = renderSparklines(data.scalars);
+    }
+  } catch (e) { /* silent */ }
+}
+
+function renderSparklines(scalars) {
+  // Render at most 3 series. Order: prefer loss, lr, then anything else.
+  const preferred = ['loss', 'learning_rate', 'lr', 'reward', 'kl', 'grad_norm'];
+  const keys = Object.keys(scalars).sort((a, b) => {
+    const ai = preferred.indexOf(a); const bi = preferred.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  }).slice(0, 3);
+  return keys.map(k => {
+    const series = scalars[k];
+    if (!series || series.length < 2) return '';
+    const vals = series.map(p => p.value);
+    const min = Math.min(...vals); const max = Math.max(...vals);
+    const range = max - min || 1;
+    const W = 140, H = 24;
+    const pts = series.map((p, i) => {
+      const x = (i / (series.length - 1)) * W;
+      const y = H - ((p.value - min) / range) * H;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    const last = vals[vals.length - 1];
+    const lastStr = Math.abs(last) >= 100 ? last.toFixed(1) : Math.abs(last) >= 1 ? last.toFixed(3) : last.toExponential(2);
+    return `<div style="display:flex;align-items:center;gap:8px;margin-top:4px;font-size:11px">
+      <span class="mono" style="color:var(--text-1);min-width:80px">${esc(k)}</span>
+      <svg width="${W}" height="${H}" style="flex-shrink:0"><polyline points="${pts}" fill="none" stroke="var(--indigo)" stroke-width="1.2"/></svg>
+      <span class="mono" style="color:var(--text-0)">${lastStr}</span>
+    </div>`;
+  }).join('');
+}
+
+let _logsTimer = null;
+function startLogsAutorefresh(expId) {
+  stopLogsAutorefresh();
+  _logsTimer = setInterval(() => refreshLogsTail(false), 2000);
+}
+function stopLogsAutorefresh() {
+  if (_logsTimer) { clearInterval(_logsTimer); _logsTimer = null; }
+}
+function onLogsFileChange() {
+  const picker = document.getElementById('logs-file-picker');
+  if (!picker) return;
+  state.logsSelected = picker.value;
+  state.logsOffset = 0;
+  refreshLogsTail(true);
+}
+function onLogsAutorefreshChange() {
+  const cb = document.getElementById('logs-autorefresh');
+  state.logsAutoRefresh = !!cb?.checked;
+  if (state.logsAutoRefresh) {
+    const expId = state.selectedNode;
+    if (expId) startLogsAutorefresh(expId);
+  } else {
+    stopLogsAutorefresh();
+  }
+}
+async function refreshLogsTail(reset) {
+  const pre = document.getElementById('logs-tail');
+  if (!pre || !state.selectedNode || !state.logsSelected) return;
+  const params = new URLSearchParams();
+  if (reset) {
+    params.set('tail', '500');
+  } else {
+    params.set('offset', String(state.logsOffset || 0));
+  }
+  try {
+    const r = await fetch(`/api/node/${state.selectedNode}/log/${encodeURIComponent(state.logsSelected)}?${params}`);
+    if (!r.ok) return;
+    const text = await r.text();
+    const size = parseInt(r.headers.get('X-Log-Size') || '0', 10);
+    if (reset) {
+      pre.textContent = text;
+    } else if (text) {
+      pre.textContent += text;
+    }
+    state.logsOffset = size;
+    // Stick to bottom on append
+    pre.scrollTop = pre.scrollHeight;
+  } catch (e) { /* network blip; next tick will retry */ }
 }
 
 function drawerTabButton(tab, label, activeTab) {
@@ -2292,8 +2450,10 @@ function drawerTabButton(tab, label, activeTab) {
 }
 
 function setSidebarTab(tab) {
-  if (!['summary', 'diff', 'tasks'].includes(tab)) return;
+  if (!['summary', 'diff', 'tasks', 'logs'].includes(tab)) return;
   state.sidebarTab = tab;
+  // Stop log-tail polling when navigating away from the Logs tab.
+  if (tab !== 'logs') stopLogsAutorefresh();
   if (state.selectedNode) openDrawer(state.selectedNode);
 }
 
@@ -2369,6 +2529,7 @@ function closeSidebar() {
   const backdrop = document.getElementById('sidebar-backdrop');
   if (backdrop) backdrop.classList.add('hidden');
   state.selectedNode = null;
+  stopLogsAutorefresh();
   // Reset history — the next open is a fresh navigation chain.
   state.drawerHistory.length = 0;
   state.drawerHistoryIndex = -1;
