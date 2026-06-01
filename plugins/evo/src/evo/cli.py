@@ -5007,15 +5007,9 @@ def cmd_wait(args: argparse.Namespace) -> int:
     Exit 0 on any match. Exit 124 (POSIX timeout convention) on
     `--timeout`. Exit 2 on argument errors.
     """
-    try:
-        root = repo_root()
-    except Exception:  # noqa: BLE001 — repo_root raises on non-git cwd
-        print("ERROR: not in an evo workspace", file=sys.stderr)
-        return 2
-    if not (root / ".evo").exists():
-        print("ERROR: not in an evo workspace", file=sys.stderr)
-        return 2
-
+    # Parse --for first so we can decide whether this invocation needs an
+    # evo workspace at all. process / log-growth / gpu-* watch external
+    # state and don't read or write anything under .evo/.
     raw_for = list(getattr(args, "wait_for", []) or [])
     conditions, parse_err = _parse_wait_for(raw_for)
     if parse_err is not None:
@@ -5023,12 +5017,36 @@ def cmd_wait(args: argparse.Namespace) -> int:
         return 2
 
     # Backwards-compat: no --for flags means watch experiments + ideators
-    # together (the original behaviour).
+    # together (the original behaviour). That implicit default still needs
+    # a workspace; the explicit non-workspace watches (process, log-growth,
+    # gpu-*) do not.
     if not conditions:
         conditions = [{"kind": "experiments"}, {"kind": "ideators"}]
         implicit_both = True
     else:
         implicit_both = False
+
+    needs_workspace = any(
+        c["kind"] in ("experiments", "ideators") for c in conditions
+    )
+    root: Path | None = None
+    if needs_workspace:
+        try:
+            root = repo_root()
+        except Exception:  # noqa: BLE001 — repo_root raises on non-git cwd
+            print(
+                "ERROR: not in an evo workspace "
+                "(required for --for experiments|ideators)",
+                file=sys.stderr,
+            )
+            return 2
+        if not (root / ".evo").exists():
+            print(
+                "ERROR: not in an evo workspace "
+                "(required for --for experiments|ideators)",
+                file=sys.stderr,
+            )
+            return 2
 
     timeout = _wait_timeout_seconds(getattr(args, "timeout", _WAIT_TIMEOUT_DEFAULT))
     stall_threshold = _parse_duration_seconds(
@@ -5056,16 +5074,23 @@ def cmd_wait(args: argparse.Namespace) -> int:
             )
             return 2
 
-    # Locate the active run dir (lexicographically last run_*). Required
-    # for experiments/ideators conditions; process/log/gpu conditions
-    # don't depend on it but we still need a workspace to be in.
-    evo_dir = root / ".evo"
-    runs = sorted(p for p in evo_dir.iterdir() if p.is_dir() and p.name.startswith("run_"))
-    needs_run_dir = any(c["kind"] in ("experiments", "ideators") for c in conditions)
-    if needs_run_dir and not runs:
-        print("ERROR: no run dir under .evo/", file=sys.stderr)
-        return 2
-    run_dir = runs[-1] if runs else None
+    # Locate the active run dir (lexicographically last run_*) when a
+    # workspace-anchored condition needs it. process / log-growth / gpu-*
+    # conditions don't require a workspace at all (root is None then).
+    run_dir = None
+    if root is not None:
+        evo_dir = root / ".evo"
+        runs = sorted(
+            p for p in evo_dir.iterdir()
+            if p.is_dir() and p.name.startswith("run_")
+        )
+        needs_run_dir = any(
+            c["kind"] in ("experiments", "ideators") for c in conditions
+        )
+        if needs_run_dir and not runs:
+            print("ERROR: no run dir under .evo/", file=sys.stderr)
+            return 2
+        run_dir = runs[-1] if runs else None
 
     # Baseline state per condition.
     started_at = time.time()

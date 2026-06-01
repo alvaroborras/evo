@@ -155,6 +155,41 @@ class TestEvoWait(unittest.TestCase):
             finally:
                 os.chdir(self.root)
 
+    def test_non_workspace_watches_work_outside_workspace(self):
+        """process / log-growth / gpu-* watches don't read or write .evo/ —
+        running them outside an evo workspace must succeed, not bail with
+        the workspace-required error.
+
+        Regression guard for issue #53. Uses --for log-growth (no zombie /
+        reaping subtleties like --for process=<child-pid> has under pytest).
+        """
+        import argparse
+        from evo.cli import cmd_wait
+        with tempfile.TemporaryDirectory() as elsewhere:
+            os.chdir(elsewhere)
+            try:
+                # log file exists, never grows -> stalls after threshold
+                log = Path(elsewhere) / "test.log"
+                log.write_text("static\n")
+                out_buf = io.StringIO()
+                err_buf = io.StringIO()
+                with patch("sys.stdout", out_buf), patch("sys.stderr", err_buf):
+                    rc = cmd_wait(argparse.Namespace(
+                        wait_for=[f"log-growth={log}"],
+                        count=None, timeout=6.0, stall_threshold=2,
+                        poll_interval=1, json_out=True,
+                    ))
+                self.assertEqual(
+                    rc, 0,
+                    f"log-growth watch outside workspace must succeed; "
+                    f"got {rc}; stderr={err_buf.getvalue()!r}",
+                )
+                self.assertIn("log-stalled", out_buf.getvalue())
+                # Specifically, must not have bailed with the workspace error.
+                self.assertNotIn("not in an evo workspace", err_buf.getvalue())
+            finally:
+                os.chdir(self.root)
+
     def test_bare_experiment_dir_creation_does_not_wake_wait(self):
         """A bare `mkdir experiments/<id>/` (subagent allocating a worktree
         before benchmarking) must NOT wake the wait. The orchestrator only
