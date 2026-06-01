@@ -128,14 +128,18 @@ class TestEvoWait(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("exp_0001", out)
 
-    def test_timeout_capped_at_3600(self):
-        """A user/agent passing --timeout 99999 must be silently capped to 3600.
+    def test_timeout_capped_at_24h(self):
+        """A user/agent passing a too-large --timeout is silently capped to 24h.
         Confirmed via the cmd_wait function caps the value internally; we
-        don't actually wait an hour — we just verify the cap logic."""
-        from evo.cli import _wait_timeout_seconds
+        don't actually wait — we just verify the cap logic. Cap was 1h in
+        v0.4.x; raised to 24h alongside the process/log-growth/gpu watch
+        extension so long external waits (a 10h training run) are expressible."""
+        from evo.cli import _wait_timeout_seconds, _WAIT_TIMEOUT_CAP
+        self.assertEqual(_WAIT_TIMEOUT_CAP, 24 * 3600)
         self.assertEqual(_wait_timeout_seconds(3600), 3600)
-        self.assertEqual(_wait_timeout_seconds(99999), 3600)
-        self.assertEqual(_wait_timeout_seconds(-5), 1)   # min floor 1s
+        self.assertEqual(_wait_timeout_seconds(86400), 86400)
+        self.assertEqual(_wait_timeout_seconds(99999), 86400)   # capped
+        self.assertEqual(_wait_timeout_seconds(-5), 1)          # min floor 1s
         self.assertEqual(_wait_timeout_seconds(0), 1)
         self.assertEqual(_wait_timeout_seconds(120), 120)
 
@@ -271,7 +275,7 @@ class TestEvoWaitDefaultWatchesBoth(unittest.TestCase):
         """--count > 1 without --for is ambiguous; CLI must reject."""
         rc, out, err = self._run_wait(count=3, timeout=0.3)
         self.assertEqual(rc, 2, f"want 2 (usage error); got {rc}; err={err!r}")
-        self.assertIn("--count > 1 requires --for", err)
+        self.assertIn("--count > 1 requires exactly one --for", err)
 
     def test_count_1_without_for_is_allowed(self):
         """--count=1 (or unset) is the default; should still work without --for."""
@@ -303,15 +307,18 @@ class TestEvoWaitForIdeators(unittest.TestCase):
         import argparse
         buf = io.StringIO()
         with patch("sys.stdout", buf):
+            # `--for` is now action="append"; the namespace value is a list.
+            # Passing a bare string here would be iterated character-by-character
+            # by the new parser ('i', 'd', 'e', ...), failing as unknown form.
             rc = cmd_wait(argparse.Namespace(
-                wait_for="ideators", count=count, timeout=timeout,
+                wait_for=["ideators"], count=count, timeout=timeout,
             ))
         return rc, buf.getvalue()
 
     def test_timeout_when_no_proposals_arrive(self):
         rc, out = self._run_wait(count=1, timeout=0.3)
         self.assertEqual(rc, 124, f"want 124 (timeout), got {rc}; output: {out!r}")
-        self.assertIn("new ideator proposal", out)
+        self.assertIn("ideators", out)
         self.assertIn("timed out", out)
 
     def test_returns_0_when_proposals_appended_during_wait(self):
