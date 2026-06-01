@@ -62,6 +62,24 @@ Write the dataset URL, method choice, user-imposed constraints, and hyperparamet
 
 Method/provider-specific numbers (LR, KL, group size) live in the recipe under `references/`.
 
+## Warm-start from parent (default for non-root experiments)
+
+`evo run` populates the `EVO_PARENT_POLICY` env var pointing at the parent experiment's checkpoint URI. The training script should warm-start from this checkpoint by default for any non-root experiment, rather than re-training from base. Re-training from base for every experiment burns the budget on duplicated work and prevents the experiment tree from accumulating capability across generations.
+
+Concrete pattern:
+
+```python
+parent_policy = os.environ.get("EVO_PARENT_POLICY")
+if parent_policy and os.path.exists(parent_policy):
+    print(f"warm-starting from parent: {parent_policy}")
+    model = AutoModelForCausalLM.from_pretrained(parent_policy, ...)
+else:
+    print("no parent policy; loading base")
+    model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, ...)
+```
+
+Override only when the brief explicitly asks for a fresh-from-base ablation (e.g. comparing a new technique against the base, or when parent is suspected of overfitting in a way the current method should not inherit). The full I/O contract is in `references/glue.md`.
+
 ## References
 
 - `references/glue.md` — training I/O contract: what evo provides, what to emit.

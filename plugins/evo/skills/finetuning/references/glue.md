@@ -6,9 +6,27 @@ You write this per task in the experiment worktree. evo provides inputs by conve
 
 - `EVO_DATASET` — path to the assembled scored-trajectory JSONL (train split only;
   selection already applied). See `trace-schema.md`.
-- `EVO_PARENT_POLICY` — base model id, or a parent checkpoint to warm-start from.
+- `EVO_PARENT_POLICY` — for a root experiment, the base model id; for any
+  non-root experiment, the local path to the parent experiment's checkpoint.
+  The training script **must** warm-start from this when the value is a
+  checkpoint path. Re-training from base on every experiment burns the budget
+  on duplicated work and breaks capability accumulation across the tree.
 - `EVO_RUN_DIR` / `EVO_ARTIFACTS_DIR` — where to write the checkpoint + traces.
 - Held-out data is **not** provided — evo scores on it independently.
+
+### Warm-start pattern
+
+```python
+parent_policy = os.environ.get("EVO_PARENT_POLICY")
+if parent_policy and os.path.exists(parent_policy):
+    model = AutoModelForCausalLM.from_pretrained(parent_policy, ...)
+else:
+    model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, ...)
+```
+
+Branch on `os.path.exists` rather than presence-only — for the root
+experiment the value is a model id, not a path, so `from_pretrained` should
+treat it as the base.
 
 ## What you produce
 
