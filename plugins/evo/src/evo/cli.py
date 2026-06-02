@@ -1591,6 +1591,66 @@ def _run_command(command: str, cwd: Path, env: dict[str, str], stdout_path: Path
     return result
 
 
+def _capture_discard_time_diff(root: Path, exp_id: str, node: dict, graph: dict) -> Path | None:
+    """Capture parent..exp diff into <experiment_dir>/diff.patch before
+    delete_discarded_experiment wipes the worktree+branch.
+
+    Returns the patch path on success, None when the diff was skipped
+    (no worktree, no parent ref). Best-effort: any unexpected failure
+    is logged and swallowed so the discard itself never blocks. See
+    evo-hq/evo#57.
+    """
+    try:
+        from .core import capture_experiment_diff
+        worktree_path = Path(node.get("worktree") or "")
+        if not worktree_path.is_dir():
+            return None
+        parent_id = node.get("parent")
+        parent_node = graph["nodes"].get(parent_id) if parent_id else None
+        parent_ref = (parent_node or {}).get("commit") or (parent_node or {}).get("branch")
+        if not parent_ref:
+            return None
+        diff_text = capture_experiment_diff(
+            root, exp_id, 0, parent_ref, worktree_path,
+        )
+        # experiment_result_path -> <experiment_dir>/result.json; take its
+        # parent. Created at evo new time, but mkdir is defensive in case
+        # discard runs against a partially-initialized experiment.
+        exp_dir = experiment_result_path(root, exp_id).parent
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        patch_path = exp_dir / "diff.patch"
+        patch_path.write_text(diff_text, encoding="utf-8")
+        return patch_path
+    except Exception as exc:  # noqa: BLE001
+        print(f"NOTE: failed to capture discard-time diff for {exp_id}: {exc}", file=sys.stderr)
+        return None
+
+
+def _assert_tasks_aggregated(traces_dir: Path, parsed: Any) -> None:
+    """Catch rolled-own log_task/write_result that emit per-task traces
+    but omit `tasks` from the aggregate result. The dashboard's per-task
+    panel reads outcome.benchmark.result.tasks for committed experiments
+    (no fallback to the traces dir), so these benchmarks silently render
+    "No benchmark task results recorded" even with N traces on disk.
+
+    Raises RuntimeError when the benchmark wrote 2+ per-task traces but
+    `parsed.tasks` is missing/empty. Single-trace benchmarks are exempt
+    (a benchmark that produces one aggregate measurement legitimately
+    skips the tasks array). See evo-hq/evo#56.
+    """
+    trace_count = len(list(traces_dir.glob("task_*.json")))
+    result_has_tasks = isinstance(parsed, dict) and bool(parsed.get("tasks"))
+    if trace_count > 1 and not result_has_tasks:
+        raise RuntimeError(
+            f"tasks_missing_from_result (benchmark wrote {trace_count} per-task "
+            f"traces to traces/ but result.json has no `tasks` array -- your "
+            f"write_result() is likely not aggregating per-task scores. Replace "
+            f"the rolled-own log_task/write_result with the canonical "
+            f"plugins/evo/skills/discover/references/inline_instrumentation.py "
+            f"paste-in -- it does the aggregation for you.)"
+        )
+
+
 def _finalize_result(root: Path, exp_id: str, node: dict, score: float | None, status: str, extra: dict | None = None) -> None:
     payload = {
         "experiment_id": exp_id,
@@ -2361,25 +2421,7 @@ def _cmd_run_check(
             raise RuntimeError("missing_result_json")
         score, parsed = load_result(result_path, bench.stdout)
         benchmark_record = {"command": benchmark_cmd, "returncode": 0, "result": parsed}
-
-        # Catch rolled-own log_task/write_result that emit per-task traces
-        # but drop the tasks aggregation from result.json. The dashboard's
-        # per-task panel reads outcome.benchmark.result.tasks (committed
-        # experiments don't fall back to the traces dir), so a benchmark
-        # like that shows an empty Tasks panel even when 30 traces exist
-        # on disk. Fail the check here so the issue is caught before the
-        # baseline commits. See evo-hq/evo#56.
-        trace_count = len(list(traces_dir.glob("task_*.json")))
-        result_has_tasks = isinstance(parsed, dict) and bool(parsed.get("tasks"))
-        if trace_count > 1 and not result_has_tasks:
-            raise RuntimeError(
-                f"tasks_missing_from_result (benchmark wrote {trace_count} per-task "
-                f"traces to traces/ but result.json has no `tasks` array -- your "
-                f"write_result() is likely not aggregating per-task scores. Replace "
-                f"the rolled-own log_task/write_result with the canonical "
-                f"plugins/evo/skills/discover/references/inline_instrumentation.py "
-                f"paste-in -- it does the aggregation for you.)"
-            )
+        _assert_tasks_aggregated(traces_dir, parsed)
 
         post_records, post_failures = _run_gate_batch(
             post_gates, gate_origins=gate_origins, config=config,
@@ -2818,22 +2860,7 @@ def _cmd_run_impl(
         )
         score, parsed = load_result(result_path, bench_stdout)
         benchmark_record = {"command": benchmark_cmd, "returncode": 0, "result": parsed}
-
-        # Catch rolled-own log_task/write_result -- see _cmd_run_check for
-        # rationale. Same assertion duplicated here so the real run path
-        # also rejects benchmarks that emit per-task traces without the
-        # aggregation in result.json. See evo-hq/evo#56.
-        trace_count = len(list(traces_dir.glob("task_*.json")))
-        result_has_tasks = isinstance(parsed, dict) and bool(parsed.get("tasks"))
-        if trace_count > 1 and not result_has_tasks:
-            raise RuntimeError(
-                f"tasks_missing_from_result (benchmark wrote {trace_count} per-task "
-                f"traces to traces/ but result.json has no `tasks` array -- your "
-                f"write_result() is likely not aggregating per-task scores. Replace "
-                f"the rolled-own log_task/write_result with the canonical "
-                f"plugins/evo/skills/discover/references/inline_instrumentation.py "
-                f"paste-in -- it does the aggregation for you.)"
-            )
+        _assert_tasks_aggregated(traces_dir, parsed)
 
         _write_attempt_state(
             root, args.exp_id, attempt_n,
@@ -3164,35 +3191,7 @@ def cmd_discard(args: argparse.Namespace) -> int:
     update_node(root, args.exp_id, _mark)
     _finalize_result(root, args.exp_id, node, node.get("score"), "discarded", {"reason": args.reason})
 
-    # Capture diff of the experiment branch vs its parent BEFORE
-    # delete_discarded_experiment removes the worktree + branch. Without
-    # this, code changes the subagent made (e.g. train.py rewrites to
-    # handle a flaky download, prompt experiments, helper-script edits)
-    # are lost on discard; the only thing surviving is the one-sentence
-    # discard_reason. See evo-hq/evo#57. Best-effort: log + continue on
-    # failure so a missing parent commit / orphaned worktree doesn't
-    # block the discard itself.
-    try:
-        from .core import capture_experiment_diff
-        worktree_path = Path(node.get("worktree") or "")
-        if worktree_path.is_dir():
-            parent_id = node.get("parent")
-            parent_node = graph["nodes"].get(parent_id) if parent_id else None
-            parent_ref = (parent_node or {}).get("commit") or (parent_node or {}).get("branch")
-            if parent_ref:
-                diff_text = capture_experiment_diff(
-                    root, args.exp_id, 0, parent_ref, worktree_path,
-                )
-                # experiment_result_path -> <experiment_dir>/result.json;
-                # take its parent. Created at evo new time, but mkdir
-                # is defensive in case discard runs against a partially-
-                # initialized experiment.
-                exp_dir = experiment_result_path(root, args.exp_id).parent
-                exp_dir.mkdir(parents=True, exist_ok=True)
-                (exp_dir / "diff.patch").write_text(diff_text, encoding="utf-8")
-    except Exception as _diff_exc:  # noqa: BLE001
-        # Discard observability is best-effort; never block the discard.
-        print(f"NOTE: failed to capture discard-time diff for {args.exp_id}: {_diff_exc}", file=sys.stderr)
+    _capture_discard_time_diff(root, args.exp_id, node, graph)
 
     delete_discarded_experiment(root, node)
     print(f"DISCARDED {args.exp_id}: {args.reason}")

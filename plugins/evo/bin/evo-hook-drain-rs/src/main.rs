@@ -581,13 +581,18 @@ fn main() {
 /// so SessionStart's engage=true call no-ops; first PostToolUse registers
 /// with engage=false; a later `evo` invocation should then upgrade).
 ///
-/// Substring-match `evo ` to accept the common wrappers:
+/// Matches `evo` as a standalone command with a word-boundary on the left
+/// (start-of-string or any non-word char) and whitespace on the right.
+/// Accepts the common wrappers:
 ///   - `evo init --name foo` (direct)
-///   - `bash -c '... && evo init ...'` (shell-wrapped)
+///   - `bash -c '... && evo init ...'` (shell-wrapped, picks up the
+///     `evo` after `& ` boundary)
 ///   - `source ~/.bashrc && evo init` (snapshot-shell wrapped, as
 ///     emitted by claude-code's bash-snapshot mechanism)
-/// False positives (e.g. `evolution.py`) are vanishingly rare in
-/// practice. Refine to word-boundary if collisions surface.
+///   - `cd /path && evo run` (chained commands)
+///
+/// Rejects false positives where `evo` is a substring of another word:
+///   `servo init`, `levo build`, `evolution.py`, `evolved.sh`, etc.
 fn is_evo_invocation(stdin_buf: &str) -> bool {
     if find_json_string(stdin_buf, "tool_name").as_deref() != Some("Bash") {
         return false;
@@ -596,7 +601,35 @@ fn is_evo_invocation(stdin_buf: &str) -> bool {
         Some(c) => c,
         None => return false,
     };
-    command.contains("evo ") || command.contains("evo\\t")
+    contains_evo_word(&command)
+}
+
+/// Word-boundary check for the bare command `evo` followed by whitespace.
+/// Pure stdlib byte scan -- no regex dep, no allocation.
+fn contains_evo_word(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let needle: &[u8] = b"evo";
+    let n = needle.len();
+    if bytes.len() < n + 1 {
+        return false;
+    }
+    let mut i = 0;
+    while i + n < bytes.len() {
+        if &bytes[i..i + n] == needle {
+            let left_ok = i == 0 || !is_word_byte(bytes[i - 1]);
+            let right = bytes[i + n];
+            let right_ok = right == b' ' || right == b'\t';
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Read a session record and report whether it's already engaged.
@@ -627,5 +660,172 @@ fn is_subagent_context(stdin_buf: &str) -> bool {
     match find_json_string(stdin_buf, "agent_id") {
         Some(aid) => !aid.is_empty(),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    // -------- contains_evo_word --------
+
+    #[test]
+    fn evo_word_direct() {
+        assert!(contains_evo_word("evo init --name foo"));
+        assert!(contains_evo_word("evo new --parent root"));
+        assert!(contains_evo_word("evo run exp_0001"));
+    }
+
+    #[test]
+    fn evo_word_chained() {
+        assert!(contains_evo_word("cd /path && evo run exp_0001"));
+        assert!(contains_evo_word("source ~/.bashrc && evo init --name x"));
+        assert!(contains_evo_word("bash -c 'evo init'"));
+        // Real claude-code shell-snapshot pattern:
+        assert!(contains_evo_word(
+            "source /tmp/snapshot.sh && shopt -u extglob 2>/dev/null || true && eval 'evo init --name foo'"
+        ));
+    }
+
+    #[test]
+    fn evo_word_tab_separator() {
+        assert!(contains_evo_word("evo\tinit"));
+    }
+
+    #[test]
+    fn evo_word_rejects_substring_in_word() {
+        // The whole point of the word-boundary check.
+        assert!(!contains_evo_word("servo init"));
+        assert!(!contains_evo_word("levo build"));
+        assert!(!contains_evo_word("revolution.py"));
+        assert!(!contains_evo_word("evolved.sh"));
+        assert!(!contains_evo_word("evolution"));
+        assert!(!contains_evo_word("sevo --help"));
+    }
+
+    #[test]
+    fn evo_word_rejects_no_whitespace_after() {
+        // `evo-hq-cli`, `evo.py`, etc. — "evo" followed by non-whitespace.
+        assert!(!contains_evo_word("cargo install evo-hq-cli"));
+        assert!(!contains_evo_word("python evo.py"));
+        assert!(!contains_evo_word("vim evo_helper.py"));
+    }
+
+    #[test]
+    fn evo_word_rejects_lone_evo_at_end() {
+        // `... evo` with nothing after isn't really a command invocation
+        // (would just print help). Acceptable to miss this edge case.
+        assert!(!contains_evo_word("echo evo"));
+        assert!(!contains_evo_word("evo"));
+    }
+
+    #[test]
+    fn evo_word_rejects_empty() {
+        assert!(!contains_evo_word(""));
+        assert!(!contains_evo_word("ev"));
+        assert!(!contains_evo_word("e"));
+    }
+
+    #[test]
+    fn evo_word_at_start_of_string() {
+        // No left boundary needed — start of string IS a boundary.
+        assert!(contains_evo_word("evo "));
+        assert!(contains_evo_word("evo init"));
+    }
+
+    // -------- is_evo_invocation (full JSON payload check) --------
+
+    #[test]
+    fn invocation_matches_bash_with_evo() {
+        let payload = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"evo init --name foo","description":"init evo"}}"#;
+        assert!(is_evo_invocation(payload));
+    }
+
+    #[test]
+    fn invocation_matches_bash_with_shell_snapshot_wrapper() {
+        // The actual claude-code Bash invocation shape.
+        let payload = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"source /tmp/snapshot.sh && shopt -u extglob 2>/dev/null || true && eval 'evo new --parent root'","description":"create exp"}}"#;
+        assert!(is_evo_invocation(payload));
+    }
+
+    #[test]
+    fn invocation_rejects_non_bash_tools() {
+        let read_payload = r#"{"hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":"/tmp/evo init.txt"}}"#;
+        assert!(!is_evo_invocation(read_payload));
+
+        let write_payload = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/evo init.py","content":"evo run"}}"#;
+        assert!(!is_evo_invocation(write_payload));
+    }
+
+    #[test]
+    fn invocation_rejects_bash_without_command_field() {
+        let payload = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{}}"#;
+        assert!(!is_evo_invocation(payload));
+    }
+
+    #[test]
+    fn invocation_rejects_bash_with_non_evo_command() {
+        let payload = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls -la /home/user"}}"#;
+        assert!(!is_evo_invocation(payload));
+
+        let with_substring = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cargo install evo-hq-cli"}}"#;
+        assert!(!is_evo_invocation(with_substring));
+
+        let revolution = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"python evolution.py --steps 1000"}}"#;
+        assert!(!is_evo_invocation(revolution));
+    }
+
+    #[test]
+    fn invocation_rejects_evo_in_file_path_argument() {
+        // `tool_name=Bash` + a command that mentions a path containing
+        // "evo" but isn't invoking the evo CLI. find_json_string picks
+        // up tool_input.command; if that command isn't actually `evo`,
+        // we don't engage. (False positive if the path is e.g. "/tmp/evo dir/script.sh")
+        // -- this is acceptable since paths-with-spaces in /tmp/evo are rare.
+        let payload = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls /home/user/.evo/"}}"#;
+        assert!(!is_evo_invocation(payload));
+    }
+
+    // -------- is_session_engaged --------
+
+    #[test]
+    fn session_engaged_true() {
+        let tmp = std::env::temp_dir().join(format!("evo-test-engaged-{}", std::process::id()));
+        let _ = fs::create_dir_all(&tmp);
+        let path = tmp.join("session.json");
+        fs::write(&path, r#"{"session_id":"abc","has_evo_engaged":true,"engaged_at":"..."}"#).unwrap();
+        assert!(is_session_engaged(&path));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_engaged_false() {
+        let tmp = std::env::temp_dir().join(format!("evo-test-not-engaged-{}", std::process::id()));
+        let _ = fs::create_dir_all(&tmp);
+        let path = tmp.join("session.json");
+        fs::write(&path, r#"{"session_id":"abc","has_evo_engaged":false,"engaged_at":null}"#).unwrap();
+        assert!(!is_session_engaged(&path));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_engaged_missing_file() {
+        assert!(!is_session_engaged(Path::new("/nonexistent/path/that/should/not/exist.json")));
+    }
+
+    #[test]
+    fn session_engaged_substring_robust_to_whitespace_variants() {
+        // Defensive: our register_session output has no whitespace inside
+        // the JSON, so the substring match is exact. If a future change
+        // adds spaces around the colon ("has_evo_engaged" : true), the
+        // current check would miss. Documented as a known limitation;
+        // covered by integration tests that exercise the full path.
+        let tmp = std::env::temp_dir().join(format!("evo-test-ws-{}", std::process::id()));
+        let _ = fs::create_dir_all(&tmp);
+        let path = tmp.join("session.json");
+        fs::write(&path, r#"{"has_evo_engaged" : true}"#).unwrap();
+        assert!(!is_session_engaged(&path));  // intentional: register_session never emits this
+        let _ = fs::remove_file(&path);
     }
 }
