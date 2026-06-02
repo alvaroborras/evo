@@ -2119,6 +2119,8 @@ async function openDrawer(expId, opts) {
       detail = `<div class="drawer-summary-detail error">${esc(node.error)}</div>`;
     } else if (node.status === 'pruned' && node.pruned_reason) {
       detail = `<div class="drawer-summary-detail">${esc(node.pruned_reason)}</div>`;
+    } else if (node.status === 'discarded' && node.discard_reason) {
+      detail = `<div class="drawer-summary-detail">${esc(node.discard_reason)}</div>`;
     } else if (isFrontierCandidate(node)) {
       detail = `<div class="drawer-summary-detail accent">Frontier candidate — evo may branch from this node next.</div>`;
     }

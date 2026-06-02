@@ -2362,6 +2362,25 @@ def _cmd_run_check(
         score, parsed = load_result(result_path, bench.stdout)
         benchmark_record = {"command": benchmark_cmd, "returncode": 0, "result": parsed}
 
+        # Catch rolled-own log_task/write_result that emit per-task traces
+        # but drop the tasks aggregation from result.json. The dashboard's
+        # per-task panel reads outcome.benchmark.result.tasks (committed
+        # experiments don't fall back to the traces dir), so a benchmark
+        # like that shows an empty Tasks panel even when 30 traces exist
+        # on disk. Fail the check here so the issue is caught before the
+        # baseline commits. See evo-hq/evo#56.
+        trace_count = len(list(traces_dir.glob("task_*.json")))
+        result_has_tasks = isinstance(parsed, dict) and bool(parsed.get("tasks"))
+        if trace_count > 1 and not result_has_tasks:
+            raise RuntimeError(
+                f"tasks_missing_from_result (benchmark wrote {trace_count} per-task "
+                f"traces to traces/ but result.json has no `tasks` array -- your "
+                f"write_result() is likely not aggregating per-task scores. Replace "
+                f"the rolled-own log_task/write_result with the canonical "
+                f"plugins/evo/skills/discover/references/inline_instrumentation.py "
+                f"paste-in -- it does the aggregation for you.)"
+            )
+
         post_records, post_failures = _run_gate_batch(
             post_gates, gate_origins=gate_origins, config=config,
             target=target, worktree=worktree, run_cwd=run_cwd,
@@ -2799,6 +2818,23 @@ def _cmd_run_impl(
         )
         score, parsed = load_result(result_path, bench_stdout)
         benchmark_record = {"command": benchmark_cmd, "returncode": 0, "result": parsed}
+
+        # Catch rolled-own log_task/write_result -- see _cmd_run_check for
+        # rationale. Same assertion duplicated here so the real run path
+        # also rejects benchmarks that emit per-task traces without the
+        # aggregation in result.json. See evo-hq/evo#56.
+        trace_count = len(list(traces_dir.glob("task_*.json")))
+        result_has_tasks = isinstance(parsed, dict) and bool(parsed.get("tasks"))
+        if trace_count > 1 and not result_has_tasks:
+            raise RuntimeError(
+                f"tasks_missing_from_result (benchmark wrote {trace_count} per-task "
+                f"traces to traces/ but result.json has no `tasks` array -- your "
+                f"write_result() is likely not aggregating per-task scores. Replace "
+                f"the rolled-own log_task/write_result with the canonical "
+                f"plugins/evo/skills/discover/references/inline_instrumentation.py "
+                f"paste-in -- it does the aggregation for you.)"
+            )
+
         _write_attempt_state(
             root, args.exp_id, attempt_n,
             phase="artifacts" if remote else "benchmark",
@@ -3127,6 +3163,37 @@ def cmd_discard(args: argparse.Namespace) -> int:
 
     update_node(root, args.exp_id, _mark)
     _finalize_result(root, args.exp_id, node, node.get("score"), "discarded", {"reason": args.reason})
+
+    # Capture diff of the experiment branch vs its parent BEFORE
+    # delete_discarded_experiment removes the worktree + branch. Without
+    # this, code changes the subagent made (e.g. train.py rewrites to
+    # handle a flaky download, prompt experiments, helper-script edits)
+    # are lost on discard; the only thing surviving is the one-sentence
+    # discard_reason. See evo-hq/evo#57. Best-effort: log + continue on
+    # failure so a missing parent commit / orphaned worktree doesn't
+    # block the discard itself.
+    try:
+        from .core import capture_experiment_diff
+        worktree_path = Path(node.get("worktree") or "")
+        if worktree_path.is_dir():
+            parent_id = node.get("parent")
+            parent_node = graph["nodes"].get(parent_id) if parent_id else None
+            parent_ref = (parent_node or {}).get("commit") or (parent_node or {}).get("branch")
+            if parent_ref:
+                diff_text = capture_experiment_diff(
+                    root, args.exp_id, 0, parent_ref, worktree_path,
+                )
+                # experiment_result_path -> <experiment_dir>/result.json;
+                # take its parent. Created at evo new time, but mkdir
+                # is defensive in case discard runs against a partially-
+                # initialized experiment.
+                exp_dir = experiment_result_path(root, args.exp_id).parent
+                exp_dir.mkdir(parents=True, exist_ok=True)
+                (exp_dir / "diff.patch").write_text(diff_text, encoding="utf-8")
+    except Exception as _diff_exc:  # noqa: BLE001
+        # Discard observability is best-effort; never block the discard.
+        print(f"NOTE: failed to capture discard-time diff for {args.exp_id}: {_diff_exc}", file=sys.stderr)
+
     delete_discarded_experiment(root, node)
     print(f"DISCARDED {args.exp_id}: {args.reason}")
     return 0

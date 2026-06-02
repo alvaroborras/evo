@@ -492,10 +492,16 @@ fn main() {
     // Batch mode (`claude --print`) never fires UserPromptSubmit, so the
     // UserPromptSubmit recovery path above misses any session whose `.evo/`
     // is created after SessionStart (e.g. the agent runs `evo init`
-    // mid-session). PostToolUse fires on every tool call, so the first tool
-    // the agent runs after `evo init` registers the session and `evo direct`
-    // fanout can reach it. engage=false: PostToolUse is a tool callback, not
-    // an orchestrator engagement signal.
+    // mid-session). PostToolUse fires on every tool call:
+    //   - First PostToolUse registers the session (with engage=true only
+    //     if it's an `evo` Bash invocation; otherwise engage=false to
+    //     avoid over-engaging subagent / generic tool callbacks).
+    //   - Subsequent PostToolUse can UPGRADE engagement: if a session is
+    //     registered with engage=false (a non-evo tool ran first) and a
+    //     later PostToolUse is an `evo` invocation, flip has_evo_engaged
+    //     to true so mid-run `evo direct` fanout reaches the session.
+    // See is_evo_invocation() for the detection logic.
+    let already_engaged = sessions_file.is_file() && is_session_engaged(&sessions_file);
     if !sessions_file.is_file() {
         if hook_event == "UserPromptSubmit" {
             // A resumed orchestrator's first prompt. Engage unless this is
@@ -505,10 +511,24 @@ fn main() {
             let engage = !is_subagent_context(&stdin_buf);
             let _ = register_session(&run_dir, &sid, host, engage);
         } else if hook_event == "PostToolUse" {
-            let _ = register_session(&run_dir, &sid, host, false);
+            // First-time registration. Engage only on `evo` invocations
+            // (strong signal). Generic tool callbacks register with
+            // engage=false; engagement can be upgraded by a later evo call
+            // via the branch below.
+            let engage = is_evo_invocation(&stdin_buf) && !is_subagent_context(&stdin_buf);
+            let _ = register_session(&run_dir, &sid, host, engage);
         } else {
             emit_ok();
         }
+    } else if !already_engaged
+        && hook_event == "PostToolUse"
+        && is_evo_invocation(&stdin_buf)
+        && !is_subagent_context(&stdin_buf)
+    {
+        // Engagement upgrade: session registered earlier with engage=false,
+        // now seeing its first `evo` invocation. Rewrite the session
+        // record with engage=true so mid-run directives fan out to it.
+        let _ = register_session(&run_dir, &sid, host, true);
     }
 
     let marker = marker_exists(&run_dir, &sid);
@@ -553,6 +573,41 @@ fn main() {
     handoff_to_drain(&run_dir, &sid, host, &stdin_buf);
 }
 
+
+/// PostToolUse engagement signal: a Bash tool call invoking the `evo` CLI.
+///
+/// Used to upgrade a session's `has_evo_engaged` flag when the workspace
+/// is created mid-session (the `.evo/` dir doesn't exist at SessionStart,
+/// so SessionStart's engage=true call no-ops; first PostToolUse registers
+/// with engage=false; a later `evo` invocation should then upgrade).
+///
+/// Substring-match `evo ` to accept the common wrappers:
+///   - `evo init --name foo` (direct)
+///   - `bash -c '... && evo init ...'` (shell-wrapped)
+///   - `source ~/.bashrc && evo init` (snapshot-shell wrapped, as
+///     emitted by claude-code's bash-snapshot mechanism)
+/// False positives (e.g. `evolution.py`) are vanishingly rare in
+/// practice. Refine to word-boundary if collisions surface.
+fn is_evo_invocation(stdin_buf: &str) -> bool {
+    if find_json_string(stdin_buf, "tool_name").as_deref() != Some("Bash") {
+        return false;
+    }
+    let command = match find_json_string(stdin_buf, "command") {
+        Some(c) => c,
+        None => return false,
+    };
+    command.contains("evo ") || command.contains("evo\\t")
+}
+
+/// Read a session record and report whether it's already engaged.
+/// Substring check on the serialized JSON; the file is small + flat,
+/// and `register_session`'s output format is fixed, so this is safe.
+fn is_session_engaged(path: &Path) -> bool {
+    match fs::read_to_string(path) {
+        Ok(text) => text.contains("\"has_evo_engaged\":true"),
+        Err(_) => false,
+    }
+}
 
 fn is_subagent_context(stdin_buf: &str) -> bool {
     // Claude-code includes `agent_id` (and `agent_type`) fields in hook
