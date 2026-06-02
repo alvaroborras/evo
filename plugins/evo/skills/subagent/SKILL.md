@@ -14,13 +14,17 @@ What you can pull/dispatch/read as a subagent. Each line is a triggering conditi
 
 ```
 skills you may pull (Skill tool)
-└── evo:finetuning     before writing or changing any train.py
+└── evo:finetuning     before writing or changing any train.py -- technique
+                       choice, training recipe, observability, retry discipline.
 
 subagents you dispatch (Task tool, subagent_type=...)
-└── evo:verifier       MANDATORY pre AND post every evo run.
-                       Pre: ~30s static analysis BEFORE the experiment runs
-                            (block on failure -- fix and retry).
-                       Post: result-validity audit AFTER it commits.
+├── evo:verifier              MANDATORY pre AND post every `evo run`.
+│                             Pre: static analysis before the experiment runs
+│                                  (block on failure -- fix and retry).
+│                             Post: result-validity audit after it commits.
+└── evo:benchmark-reviewer    POST-COMMIT only, mode=review-experiment --
+                              per-task failure classification + annotations.
+                              Skip on evaluated/discarded/failed outcomes.
 
 references (Read tool, on demand)
 ├── discover/references/
@@ -34,6 +38,9 @@ references (Read tool, on demand)
 │
 └── finetuning/references/
     ├── glue.md                          train.py I/O contract evo expects
+    ├── observability.md                 wandb/trackio/mlflow wiring -- env-driven
+    │                                    detection, TRL report_to options, custom-loop
+    │                                    patterns. Read when writing a training script.
     ├── diagnostics.md                   per-failure-mode diagnostics
     ├── false-progress.md                what doesn't count as improvement
     ├── trace-schema.md                  per-task trace JSON schema

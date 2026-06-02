@@ -44,6 +44,40 @@ Run this **once before `exp_0001`**, and again whenever the optimize loop hits a
 
 Run the full pipeline on ~10 examples for ~1 minute. Must produce: a checkpoint the benchmark can load AND a non-zero eval on a held-out item. If not, the recipe is broken — fix it, don't scale it. dtype mismatch, tokenizer/template drift, OOM at this batch size, empty artifacts dir despite falling loss — all surface on 10 examples. Running longer doesn't surface them differently, just more expensively.
 
+## Long training: checkpoint, mid-eval, early-stop in-script
+
+Training for an hour and getting one number at the end is the wrong granularity for evo's tree search. By the time you know the recipe failed, you've spent the budget. Build the verification *into* the training script, not around it.
+
+Pattern for any training run expected to exceed ~30 min wall-clock:
+
+1. **Periodic checkpoint** every N steps (e.g. every 0.25 epoch, or every 200 steps — whichever is faster).
+2. **Mini-eval after each checkpoint** on a small held-out subset (5–10 items, not the full held-out — that's reserved for the final committed score). Same scorer as the real eval; the model just sees fewer items.
+3. **Early-stop on regression**: track best mid-eval score; stop if it hasn't improved in `patience` checkpoints (typically 2). Don't burn 60 more minutes once the trajectory has flattened or reverted.
+4. **Save the BEST checkpoint, not the last.** Early-stop means the current model is probably past its peak; the checkpoint you commit should be the one that scored highest mid-training, not whatever the trainer happened to leave behind.
+5. **Log every mid-eval score to your tracker** (see `## Stream training metrics live`). The user watching the live dashboard sees the trajectory build up step-by-step instead of staring at the loss curve hoping it transfers.
+
+HuggingFace TRL: implement as a `TrainerCallback` on `on_step_end` — save checkpoint, run the mini-eval via vLLM or HF transformers, compare to `best_score`, set `control.should_training_stop = True` on stall. Pattern is one ~30-line class.
+
+Keep vLLM warm across mid-evals when you can (one serve process, reload adapter between checkpoints) — cold-starting vLLM every 200 steps adds 5 min of overhead per checkpoint.
+
+Use a tighter mini-eval subset than the full held-out. The mini-eval is a *signal*, not the score that gets committed. If the mini-eval scores ≥ baseline on its subset, run the full held-out as the eval-gate scoring pass at the end. If it doesn't, early-stop.
+
+This is Pattern B from the design tradeoff with multi-node staging (Pattern A — break the training into multiple committed evo nodes, each a stage). Pattern B keeps the experiment as one evo node with the verification logic inside the script; it's simpler to write and avoids per-stage vLLM spin-up, at the cost of less tree-search introspection. Multi-stage as separate nodes is preferable when you want the orchestrator to be able to branch alternative continuations from any mid-training checkpoint.
+
+## Cap retries at training scale
+
+`evo run` allows up to `max_attempts=3` retries per experiment by default. That budget was designed for second-scale benchmarks where retrying after an edit-bug fix is free. At training scale (~hours per attempt), it's the wrong tradeoff — by attempt 2 you've spent more compute than just trying a fresh hypothesis would cost.
+
+For training-heavy workspaces, set the cap to 1 once at init:
+
+```bash
+evo config set max-attempts 1
+```
+
+One attempt, one shot. Regression → `evo discard` → new branch from parent with a different hypothesis. This pairs with the in-script early-stop above: each attempt is single-shot, but its internal verification keeps it from burning the budget on a clearly-failing trajectory.
+
+The "fix-and-rerun" retry pattern still applies for sub-minute benchmarks; leave the default `max_attempts=3` there.
+
 ## Four diagnostics
 
 **Stuck at 0 on a verifiable benchmark after 2+ SFT runs.** Technique class is wrong, not the recipe. Pivot to RL with the verifier as reward; SFT loss can be healthy while the model emits unparseable output.
