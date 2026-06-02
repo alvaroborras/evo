@@ -81,6 +81,23 @@ Write the dataset URL, method choice, user-imposed constraints, and hyperparamet
 
 Method/provider-specific numbers (LR, KL, group size) live in the recipe under `references/`.
 
+## Stream training metrics live
+
+A long training run is observability-blind until the experiment commits — without a live tracker, nobody can tell if loss is converging, if the GPU is idle, or if the recipe is silently broken. They get one number at the end. Wire a tracker into the training script by default.
+
+Detection prior — apply when the corresponding env var is set, skip otherwise. Don't install a tracker the user didn't opt into:
+
+| Env var | Tracker | TRL one-liner |
+|---|---|---|
+| `WANDB_API_KEY` | wandb | `SFTConfig(report_to="wandb")` |
+| `TRACKIO_SPACE_ID` | trackio (wandb-compatible OSS, logs to a public HF Space) | `SFTConfig(report_to="trackio")` |
+| `MLFLOW_TRACKING_URI` | mlflow | `SFTConfig(report_to="mlflow")` |
+| (none set) | none | train without a tracker; don't invent one |
+
+For custom training loops, use `tracker.init(project=..., name=f"exp_{exp_id}") + tracker.log({"loss": ..., "step": ...})` — concrete patterns in `references/observability.md`.
+
+Use `EVO_EXPERIMENT_ID` as the run name so each experiment shows up as its own line in the tracker dashboard. The same env detection applies to HuggingFace datasets / Hub uploads: if `HF_TOKEN` is set, treat gated datasets and private Hub pushes as available.
+
 ## Warm-start from parent (default for non-root experiments)
 
 `evo run` populates the `EVO_PARENT_POLICY` env var pointing at the parent experiment's checkpoint URI. The training script should warm-start from this checkpoint by default for any non-root experiment, rather than re-training from base. Re-training from base for every experiment burns the budget on duplicated work and prevents the experiment tree from accumulating capability across generations.
@@ -158,6 +175,9 @@ finetuning/references/
 ├── false-progress.md   the five patterns + how to detect them.
 │                       Read when a score improves implausibly fast or
 │                       breaks the smoke gate.
+├── observability.md    wandb / trackio / mlflow wiring -- env-driven detection,
+│                       TRL report_to options, custom-loop patterns.
+│                       Read when writing a training script.
 │
 ├── rl/                 RL framework recipes (rollouts + reward + policy update)
 │   └── art.md          ART (Algorithm-Refined Training)

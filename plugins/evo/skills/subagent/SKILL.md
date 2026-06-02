@@ -271,6 +271,19 @@ The ack flag is required when the worktree has any untracked, non-gitignored fil
   - Structural (benchmark broken, evo misconfigured): report to orchestrator and stop.
   - Not worth fixing: `evo discard <id> --reason "..."`.
 
+### 6b. Review your own failures (committed experiments only)
+
+After a `COMMITTED` outcome, before annotating yourself, spawn `evo:benchmark-reviewer` in review-experiment mode. It reads the per-task traces and the eval-runner log you just produced, classifies failures into a small taxonomy, and writes per-task annotations via `evo annotate <exp> --task K`. This is the data the next experiment's hypothesis is built on -- skip it and the orchestrator picks a frontier from `passed/failed` booleans with no diagnosis.
+
+```
+Task(subagent_type="evo:benchmark-reviewer",
+     prompt="mode=review-experiment\nworkspace=<workspace path>\nexperiment_id=<your exp_id>")
+```
+
+The returned JSON includes `failure_breakdown`, `top_failure_pattern`, and `next_step_signal`. Read it, include the breakdown + top pattern in your final handoff message, but **do not act on `next_step_signal` yourself** -- it's a hint for the next experiment, which isn't yours to design.
+
+Skip this step for `EVALUATED` (regressed, will be discarded), `FAILED` (infra error), or `DISCARDED` outcomes -- there's no meaningful per-task data worth classifying.
+
 ### 7. Annotate
 
 ```bash
