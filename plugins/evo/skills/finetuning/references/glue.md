@@ -1,5 +1,7 @@
 # Writing the training activity (glue)
 
+This is the I/O contract for an already-chosen technique. Invoke the `evo:finetuning` Skill first if you haven't yet -- the technique pick (SFT / DPO / RFT / GRPO / ...) lives in the skill body's reward-shape decision tree, not here.
+
 You write this per task in the experiment worktree. evo provides inputs by convention; you produce a checkpoint + traces; the benchmark loads the checkpoint and emits a scalar score.
 
 ## Inputs evo provides (by convention)

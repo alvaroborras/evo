@@ -11,7 +11,9 @@ Internal procedure for `evo:discover`. The user only sees the user-facing prompt
 
 ## Evo surface
 
-What you can invoke / dispatch / read. Each line is a triggering condition: if you're about to do X, pull/dispatch/read this. Don't preload -- act when the trigger fires.
+General guidance on the skills and tools available in evo. Each line is a triggering condition: if you're about to do X, pull/dispatch/read this. Don't preload -- act when the trigger fires.
+
+**Always have a sense of the skill before jumping into its references.** A skill body carries the decision-making; references are concrete contracts that assume a decision has been made.
 
 ```
 evo plugin
