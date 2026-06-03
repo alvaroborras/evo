@@ -1292,7 +1292,7 @@ body {
 }
 .drawer-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0;
   padding: 0 18px;
   border-bottom: 1px solid var(--border-subtle);
@@ -1303,10 +1303,10 @@ body {
 }
 .drawer-tab {
   border: none;
-  border-bottom: 1px solid transparent;
+  border-bottom: 2px solid transparent;
   border-radius: 0;
   background: transparent;
-  color: var(--text-4);
+  color: var(--text-3);
   cursor: pointer;
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
@@ -1316,18 +1316,141 @@ body {
   padding: 10px 6px;
   margin-bottom: -1px;
   text-align: center;
-  transition: color 0.1s, border-color 0.1s;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
 }
 .drawer-tab:hover {
   color: var(--text-1);
+  background: var(--bg-elevated, rgba(255,255,255,0.03));
 }
 .drawer-tab.active {
   color: var(--text-1);
-  border-bottom-color: var(--text-1);
+  border-bottom-color: var(--indigo);
+  background: var(--bg-elevated, rgba(99,102,241,0.06));
+  font-weight: 700;
 }
 .drawer-tab:focus-visible {
   outline: 2px solid var(--orange);
   outline-offset: -2px;
+}
+
+/* Per-task and global annotations rendered into Summary / Tasks tabs. */
+.drawer-diagnoses {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.drawer-diagnosis {
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.06);
+  border-left: 2px solid var(--orange);
+  border-radius: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-1);
+}
+.drawer-diagnosis-meta {
+  font-size: 10px;
+  color: var(--text-3);
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.drawer-diagnoses-footnote {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 4px;
+  font-style: italic;
+}
+.task-annotation {
+  margin: 6px 0 4px 22px;
+  padding: 6px 10px;
+  background: rgba(245, 158, 11, 0.06);
+  border-left: 2px solid var(--orange);
+  border-radius: 2px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-1);
+}
+.task-annotation-cat {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--orange);
+  margin-right: 6px;
+}
+
+/* Logs tab: replace dropdown with inline tabs; strip ANSI codes server-side
+   in our JS before render; unify card background with the rest of the drawer. */
+.logs-file-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.logs-file-tab {
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 3px;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.logs-file-tab:hover {
+  color: var(--text-1);
+  border-color: var(--text-3);
+}
+.logs-file-tab.active {
+  color: var(--text-1);
+  border-color: var(--indigo);
+  background: rgba(99,102,241,0.08);
+  font-weight: 600;
+}
+.logs-pane {
+  background: var(--bg-canvas);
+  color: var(--text-1);
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+.logs-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.logs-controls label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.logs-controls button {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.logs-controls button:hover {
+  border-color: var(--text-3);
+  color: var(--text-1);
 }
 .drawer-back {
   font-size: 16px;
@@ -1608,7 +1731,7 @@ body {
 .diff-view-btn.active {
   background: var(--bg-hover, rgba(255,255,255,0.08));
   color: var(--text-1);
-  border-color: var(--border);
+  border-color: var(--text-3);
 }
 .diff-files { overflow: auto; }
 .diff-file {
