@@ -1,15 +1,18 @@
 """Tests for codex installer's legacy-marketplace cleanup.
 
-Backstory: codex.py pre-fix used different marketplace names based on
-install mode — `evo-hq` (the GitHub owner) for PyPI mode and
-`evo-hq-evo` (marketplace.json's `name` field) for `--from-path` mode.
-Users hitting both modes ended up with two parallel `[plugins."evo@<X>"]`
-registrations. Both fired hooks; the older one failed exit 127 because
-its cache dir never had the binary staged.
+Canonical codex marketplace name is `evo-hq` — codex 0.130+ names a
+marketplace after the repo OWNER, so `codex plugin marketplace add
+evo-hq/evo` registers `[plugins."evo@evo-hq"]` and resolves the plugin
+root to `cache/evo-hq/evo/<ver>/`. `evo-hq-evo` (marketplace.json's
+top-level `name` field) is the pre-0.4.0 name and is now legacy.
 
-The fix:
-  1. Always read marketplace.json's `name` field as the canonical mkt
-     name (no mode-dependent branching).
+A staging-to-the-wrong-name bug shipped exit-127 hooks: the installer
+used `evo-hq-evo` for the cache dir + binary staging while codex loaded
+the plugin under `evo@evo-hq`, so every hook fired against a binary-less
+cache dir. The fix uses the owner name (`evo-hq`) everywhere.
+
+Cleanup contract:
+  1. The canonical mkt name is the owner name (`evo-hq`).
   2. On every install, scan config.toml for `evo@<other>` entries that
      don't match the target name and remove them + their cache dirs.
 
@@ -62,7 +65,7 @@ class _Base(unittest.TestCase):
 
 class TestLegacyCleanup(_Base):
 
-    def test_removes_stale_evo_hq_plugin_block(self):
+    def test_removes_stale_evo_hq_evo_plugin_block(self):
         from evo.host_install.codex import _cleanup_legacy_codex_registrations
 
         self._write_config(
@@ -72,10 +75,10 @@ class TestLegacyCleanup(_Base):
             '[plugins."evo@evo-hq-evo"]\n'
             'enabled = true\n'
         )
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         text = self._read_config()
-        self.assertNotIn('"evo@evo-hq"', text)
-        self.assertIn('"evo@evo-hq-evo"', text)
+        self.assertNotIn('"evo@evo-hq-evo"', text)
+        self.assertIn('"evo@evo-hq"', text)
 
     def test_removes_stale_marketplace_block(self):
         from evo.host_install.codex import _cleanup_legacy_codex_registrations
@@ -87,12 +90,12 @@ class TestLegacyCleanup(_Base):
             '[plugins."evo@evo-hq-evo"]\n'
             'enabled = true\n'
             '\n'
-            '[marketplaces.evo-hq]\n'
+            '[marketplaces.evo-hq-evo]\n'
             'source = "https://github.com/evo-hq/evo.git"\n'
         )
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         text = self._read_config()
-        self.assertNotIn("[marketplaces.evo-hq]", text)
+        self.assertNotIn("[marketplaces.evo-hq-evo]", text)
 
     def test_removes_stale_hook_state_entries(self):
         from evo.host_install.codex import _cleanup_legacy_codex_registrations
@@ -110,10 +113,10 @@ class TestLegacyCleanup(_Base):
             '[hooks.state."evo@evo-hq-evo:hooks/hooks.json:pre_tool_use:0:0"]\n'
             'trusted_hash = "sha256:def"\n'
         )
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         text = self._read_config()
-        self.assertNotIn('"evo@evo-hq:hooks', text)
-        self.assertIn('"evo@evo-hq-evo:hooks', text)
+        self.assertNotIn('"evo@evo-hq-evo:hooks', text)
+        self.assertIn('"evo@evo-hq:hooks', text)
 
     def test_removes_stale_cache_directory(self):
         from evo.host_install.codex import _cleanup_legacy_codex_registrations
@@ -125,14 +128,14 @@ class TestLegacyCleanup(_Base):
             '[plugins."evo@evo-hq-evo"]\n'
             'enabled = true\n'
         )
-        stale_cache = self._make_cache("evo-hq")
-        target_cache = self._make_cache("evo-hq-evo")
+        target_cache = self._make_cache("evo-hq")
+        stale_cache = self._make_cache("evo-hq-evo")
 
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         self.assertFalse(stale_cache.exists(),
-                         "stale evo-hq cache dir must be removed")
+                         "stale evo-hq-evo cache dir must be removed")
         self.assertTrue(target_cache.exists(),
-                        "target evo-hq-evo cache dir must remain")
+                        "target evo-hq cache dir must remain")
 
     def test_preserves_unrelated_plugins_and_sections(self):
         """Cleanup must only touch evo@<other> registrations. Other
@@ -162,10 +165,10 @@ class TestLegacyCleanup(_Base):
             '[tui]\n'
             'status_line = ["model-with-reasoning"]\n'
         )
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         text = self._read_config()
-        self.assertNotIn('"evo@evo-hq"', text)
-        self.assertIn('"evo@evo-hq-evo"', text)
+        self.assertNotIn('"evo@evo-hq-evo"', text)
+        self.assertIn('"evo@evo-hq"', text)
         self.assertIn('"computer-use@openai-bundled"', text)
         self.assertIn('"github@openai-curated"', text)
         self.assertIn("[marketplaces.openai-bundled]", text)
@@ -176,14 +179,14 @@ class TestLegacyCleanup(_Base):
         from evo.host_install.codex import _cleanup_legacy_codex_registrations
 
         original = (
-            '[plugins."evo@evo-hq-evo"]\n'
+            '[plugins."evo@evo-hq"]\n'
             'enabled = true\n'
             '\n'
             '[plugins."github@openai-curated"]\n'
             'enabled = true\n'
         )
         self._write_config(original)
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         # File untouched when nothing to clean.
         self.assertEqual(self._read_config(), original)
 
@@ -193,7 +196,7 @@ class TestLegacyCleanup(_Base):
 
         self.assertFalse(self.cfg_path.exists())
         # Should silently return, not raise.
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         self.assertFalse(self.cfg_path.exists())
 
     def test_handles_multiple_legacy_names(self):
@@ -216,14 +219,14 @@ class TestLegacyCleanup(_Base):
         self._make_cache("old-alpha")
         self._make_cache("evo-hq-evo")
 
-        _cleanup_legacy_codex_registrations(target_mkt="evo-hq-evo")
+        _cleanup_legacy_codex_registrations(target_mkt="evo-hq")
         text = self._read_config()
-        self.assertNotIn('"evo@evo-hq"', text)
         self.assertNotIn('"evo@old-alpha"', text)
-        self.assertIn('"evo@evo-hq-evo"', text)
-        self.assertFalse((self.codex_home / "plugins" / "cache" / "evo-hq").exists())
+        self.assertNotIn('"evo@evo-hq-evo"', text)
+        self.assertIn('"evo@evo-hq"', text)
         self.assertFalse((self.codex_home / "plugins" / "cache" / "old-alpha").exists())
-        self.assertTrue((self.codex_home / "plugins" / "cache" / "evo-hq-evo").exists())
+        self.assertFalse((self.codex_home / "plugins" / "cache" / "evo-hq-evo").exists())
+        self.assertTrue((self.codex_home / "plugins" / "cache" / "evo-hq").exists())
 
 
 if __name__ == "__main__":

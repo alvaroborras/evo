@@ -215,20 +215,22 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
             )
             return 2
 
-    # Marketplace name: ALWAYS read marketplace.json's top-level `"name"`
-    # field (`evo-hq-evo`) regardless of install mode. The previous
-    # logic split on PyPI vs --from-path and used the cache dir basename
-    # (`evo-hq` — codex's owner-based naming) in PyPI mode, which caused
-    # the two install modes to register the plugin under DIFFERENT names.
-    # Users who upgraded across modes ended up with two parallel
-    # `[plugins."evo@<X>"]` entries and exit-127 errors from the orphaned
-    # one. Migration of pre-fix installs runs at the end of install().
+    # Marketplace name: ALWAYS use marketplace.json's `"owner"."name"`
+    # field (`evo-hq`). Codex 0.130+ names the marketplace after the repo
+    # OWNER, so `codex plugin marketplace add evo-hq/evo` registers
+    # `[plugins."evo@evo-hq"]` and resolves `${CLAUDE_PLUGIN_ROOT}` to
+    # `cache/evo-hq/evo/<ver>/`. The cache dir + binary staging + plugin
+    # registration here MUST land under that same name, or codex fires
+    # hooks against a cache dir we never populated → exit 127 on every
+    # hook event. (Using the top-level `"name"` field — `evo-hq-evo` —
+    # staged the binary into a sibling cache dir codex never reads, which
+    # is exactly that failure.) This matches `_PLUGIN_KEY` above.
     try:
         mkt = _json.loads(marketplace_json.read_text())
     except (OSError, _json.JSONDecodeError) as exc:
         print(f"✗ could not parse {marketplace_json}: {exc}", file=_sys.stderr)
         return 2
-    mkt_name = mkt.get("name") or "evo-hq-evo"
+    mkt_name = (mkt.get("owner") or {}).get("name") or "evo-hq"
     try:
         manifest = _json.loads(codex_manifest.read_text())
         version = manifest.get("version") or "0.0.0"
@@ -304,15 +306,15 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
 
 def _cleanup_legacy_codex_registrations(target_mkt: str) -> None:
     """Remove leftover `evo@<other-mkt>` entries from codex's config.toml
-    that don't match the canonical marketplace name.
+    that don't match the canonical marketplace name (`evo-hq`, the repo
+    owner — see `_install_via_filecopy`).
 
-    Codex installer pre-fix used `mkt_root.name` (the GitHub owner,
-    `evo-hq`) for PyPI installs and marketplace.json's `"name"`
-    (`evo-hq-evo`) for `--from-path` installs. Users who hit both code
-    paths ended up with two parallel `[plugins."evo@<X>"]` blocks. Both
-    are enabled, both fire on every event, the old one fails exit 127
-    because its cache dir is missing the binary that only the most
-    recent install staged.
+    Pre-0.4.0 installs registered the plugin under `evo-hq-evo`
+    (marketplace.json's top-level `name`), while codex itself loads it
+    under `evo@evo-hq` (owner-based naming, 0.130+). Users carrying both
+    end up with two parallel `[plugins."evo@<X>"]` blocks: both enabled,
+    both fire on every event, and the one whose cache dir never had the
+    binary staged fails exit 127.
 
     This cleanup runs at the end of every codex install and removes:
       - `[plugins."evo@<other>"]` blocks and their `enabled` lines
@@ -621,4 +623,39 @@ def doctor(args: argparse.Namespace) -> int:
         print(f"✗ no marketplace cache at {cache}")
         print("  Run: codex plugin marketplace add evo-hq/evo")
         rc = 1
+
+    # The hook drain binary is what every hooks.json command resolves to.
+    # config.toml can have plugin_hooks=true and the plugin enabled while
+    # the binary is missing from the cache dir codex actually loads — then
+    # every hook fires exit 127. Verify it exists + is executable at the
+    # plugin root codex resolves for the active `evo@<owner>` selector.
+    import re as _re
+    plugin_cache_root = _codex_base() / "plugins" / "cache"
+    active_mkts = _re.findall(r'\[plugins\."evo@([^"]+)"\]', cfg_text)
+    if not active_mkts:
+        # No enabled plugin entry to resolve a binary path against; the
+        # checks above already flagged the missing _PLUGIN_KEY.
+        return rc
+    for mkt_name in active_mkts:
+        mkt_cache = plugin_cache_root / mkt_name / "evo"
+        versions = (
+            sorted(p for p in mkt_cache.iterdir() if p.is_dir())
+            if mkt_cache.is_dir() else []
+        )
+        if not versions:
+            print(f"✗ no plugin cache for evo@{mkt_name} at {mkt_cache}")
+            print("  Run: evo install codex --force")
+            rc = 1
+            continue
+        binary = versions[-1] / "bin" / "evo-hook-drain"
+        if binary.exists() and os.access(binary, os.X_OK):
+            print(f"✓ evo-hook-drain present + executable at {binary}")
+        elif binary.exists():
+            print(f"✗ evo-hook-drain at {binary} is not executable")
+            print("  Run: evo install codex --force")
+            rc = 1
+        else:
+            print(f"✗ evo-hook-drain missing at {binary} (hooks fire exit 127)")
+            print("  Run: evo install codex --force")
+            rc = 1
     return rc
