@@ -2,7 +2,7 @@
 name: optimize
 description: Drive structured autoresearch iteration after evo:discover and the baseline commit -- scan-subagent cross-cutting analysis between rounds, frontier-based parent selection, ideator dispatch on stall, verifier pre/post hooks, annotation discipline. Width is set via subagents=N (1 for serial workloads, larger for parallel); the loop's structural value applies at any width.
 argument-hint: "[subagents=N] [budget=N] [stall=N]"
-evo_version: 0.5.0-alpha.7
+evo_version: 0.5.0-alpha.8
 ---
 
 Run the `evo` optimization loop. Each round, the orchestrator writes structured briefs and spawns subagents that execute within them. Each subagent is semi-autonomous: it reads the pointer traces, forms the concrete edit, runs experiments, and can iterate within its branch. Runs until interrupted or the stall limit is reached.
@@ -101,6 +101,18 @@ evo defaults get subagents-only --json
 ```
 
 As your **very first actions, before the loop**, resolve each and arm it: run `evo autonomous on` / `evo subagents-only on` when it resolves on, or `evo autonomous off` / `evo subagents-only off` when an explicit instruction or stored default turned it off. If a behavior resolves off — whether from the user's instruction this run or a stored default — say so in your opening message (e.g. "autonomous off — running one round at a time, as you asked") so it's never invisible.
+
+**Orchestrator driver (Claude Code only).** evo can drive the loop two ways: the prose loop below (default, every host), or a deterministic **dynamic workflow** (Claude Code only, opt-in). Resolve which as part of your very first actions:
+
+1. `evo host show` — must be `claude-code` for the workflow driver. If it prints `<not set>` (a pre-host workspace), determine your actual runtime from your own context (system prompt, env such as `CLAUDECODE=1`, self-identity): **only if you are genuinely Claude Code**, do the one-time host migration now (`evo host set claude-code`) and continue; if you are any other runtime, do NOT stamp the host here — leave it for Step 0.1 to record and use the prose loop. Any non-`claude-code` host uses the prose loop.
+2. `evo config get default-orchestrator` — `workflow` selects the workflow driver; anything else (including unset) resolves to `prose`. An explicit user instruction this run still wins.
+
+If host is `claude-code` **and** the value is `workflow` **and** the Workflow tool is available in this session, do NOT drive the loop turn-by-turn. Launch the bundled workflow once instead:
+
+- Call the **Workflow** tool with `scriptPath: ${CLAUDE_PLUGIN_ROOT}/skills/optimize/workflows/evo-optimize.js` and `args: {pluginRoot: "${CLAUDE_PLUGIN_ROOT}", subagents: <N>, budget: <N>, stall: <N>}`, using the round sizing you resolved above. **Pass all four keys explicitly — never omit one.** For `stall`, use the user's `/optimize stall=N` override if given, else the default 5. (The workflow's stop condition is the stall limit, so a dropped `stall` silently reverts it to 5.)
+- Report the returned `runId` and tell the user to watch progress with `/workflows`. The workflow runs the round loop itself (orient → mandatory scan + cross-history axis check → ideators on stall/periodic → briefs → fan-out + verify → collect → frontier-select → stall); you do **not** execute "The Loop" section below.
+
+Otherwise — any non-`claude-code` host, `default-orchestrator` unset/`prose`, or the Workflow tool unavailable — ignore this and follow **The Loop** below as the canonical driver. The workflow is only an execution strategy over the same `evo` CLI; gates, frontier, dashboard, and recovery are identical either way.
 
 **Autonomous mode.** Off lets you stop naturally at a turn boundary — finish a round, report, and stop. On arms the stop-nudge: at every turn boundary you are re-prompted to keep driving the loop until the **stall** limit is hit or the user interrupts. Without it, the loop does NOT force-continue across turn boundaries. To stop an autonomous run, the user runs `evo autonomous off` or `evo exit-optimize-mode`.
 

@@ -1,7 +1,7 @@
 ---
 name: subagent
 description: Protocol that evo optimization subagents follow when dispatched from /optimize. Auto-loaded by spawned subagents via their host's skill loader. The orchestrator may also invoke this skill to understand the brief shape its dispatched subagents expect + what they're required to emit -- useful when writing briefs or debugging a subagent's behavior.
-evo_version: 0.5.0-alpha.7
+evo_version: 0.5.0-alpha.8
 ---
 
 # Evo Subagent Protocol
@@ -14,13 +14,17 @@ What you can pull/dispatch/read as a subagent. Each line is a triggering conditi
 
 ```
 skills you may pull (Skill tool)
-└── evo:finetuning     before writing or changing any train.py
+└── evo:finetuning     before writing or changing any train.py -- technique
+                       choice, training recipe, observability, retry discipline.
 
 subagents you dispatch (Task tool, subagent_type=...)
-└── evo:verifier       MANDATORY pre AND post every evo run.
-                       Pre: ~30s static analysis BEFORE the experiment runs
-                            (block on failure -- fix and retry).
-                       Post: result-validity audit AFTER it commits.
+├── evo:verifier              MANDATORY pre AND post every `evo run`.
+│                             Pre: static analysis before the experiment runs
+│                                  (block on failure -- fix and retry).
+│                             Post: result-validity audit after it commits.
+└── evo:benchmark-reviewer    POST-COMMIT only, mode=review-experiment --
+                              per-task failure classification + annotations.
+                              Skip on evaluated/discarded/failed outcomes.
 
 references (Read tool, on demand)
 ├── discover/references/
@@ -34,6 +38,9 @@ references (Read tool, on demand)
 │
 └── finetuning/references/
     ├── glue.md                          train.py I/O contract evo expects
+    ├── observability.md                 wandb/trackio/mlflow wiring -- env-driven
+    │                                    detection, TRL report_to options, custom-loop
+    │                                    patterns. Read when writing a training script.
     ├── diagnostics.md                   per-failure-mode diagnostics
     ├── false-progress.md                what doesn't count as improvement
     ├── trace-schema.md                  per-task trace JSON schema
@@ -270,6 +277,19 @@ The ack flag is required when the worktree has any untracked, non-gitignored fil
   - `remote_infra_failure:...`: remote container or agent infrastructure failed. Report it to the orchestrator unless your brief explicitly says to retry infra failures.
   - Structural (benchmark broken, evo misconfigured): report to orchestrator and stop.
   - Not worth fixing: `evo discard <id> --reason "..."`.
+
+### 6b. Review your own failures (committed experiments only)
+
+After a `COMMITTED` outcome, before annotating yourself, spawn `evo:benchmark-reviewer` in review-experiment mode. It reads the per-task traces and the eval-runner log you just produced, classifies failures into a small taxonomy, and writes per-task annotations via `evo annotate <exp> --task K`. This is the data the next experiment's hypothesis is built on -- skip it and the orchestrator picks a frontier from `passed/failed` booleans with no diagnosis.
+
+```
+Task(subagent_type="evo:benchmark-reviewer",
+     prompt="mode=review-experiment\nworkspace=<workspace path>\nexperiment_id=<your exp_id>")
+```
+
+The returned JSON includes `failure_breakdown`, `top_failure_pattern`, and `next_step_signal`. Read it, include the breakdown + top pattern in your final handoff message, but **do not act on `next_step_signal` yourself** -- it's a hint for the next experiment, which isn't yours to design.
+
+Skip this step for `EVALUATED` (regressed, will be discarded), `FAILED` (infra error), or `DISCARDED` outcomes -- there's no meaningful per-task data worth classifying.
 
 ### 7. Annotate
 
