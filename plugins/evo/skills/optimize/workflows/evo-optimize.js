@@ -193,6 +193,10 @@ const LIMIT = Number(A.stall) || 5
 const IDEATE_STALL = Math.max(1, Math.min(3, LIMIT - 1))
 const IDEATE_EVERY_COMMITS = 5   // periodic research cadence (matches prose step 6b)
 const PREVERIFY_MAX = 3          // pre-run verify <-> revise attempts before discarding a rigged edit
+// Experiments per scan agent. Heuristic for the prose "small enough to read in one pass" rule —
+// the workflow can't recursively self-partition like the prose loop, so this is fixed up front.
+// Lower it for heavy traces (many tasks / long messages); raise it for tiny traces.
+const SCAN_BATCH = 6
 
 function betterResult(a, b, direction) {
   if (!a) return b
@@ -208,6 +212,24 @@ function chunk(arr, n) {
   const out = []
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n))
   return out
+}
+
+// Compact label for a batch of ids: factor out the shared leading chars.
+// e.g. ["exp_0003","exp_0004","exp_0005"] -> "exp_000[3,4,5]"
+function commonPrefix(strs) {
+  if (!strs.length) return ''
+  let p = strs[0]
+  for (const s of strs) {
+    while (p && !s.startsWith(p)) p = p.slice(0, -1)
+    if (!p) break
+  }
+  return p
+}
+function batchLabel(b) {
+  if (!b.length) return 'frontier'
+  if (b.length === 1) return b[0]
+  const p = commonPrefix(b)
+  return p.length > 1 ? `${p}[${b.map((x) => x.slice(p.length)).join(',')}]` : b.join(',')
 }
 
 // Diversity check: drop briefs whose pointer-trace sets overlap heavily with an earlier one.
@@ -485,8 +507,8 @@ while (stall < LIMIT) {
   const evaluatedIds = state.evaluatedIds || []
   const frontierIds = (state.frontier || []).map((f) => f.id).filter(Boolean)
   const scanTargets = evaluatedIds.length ? evaluatedIds : frontierIds
-  const batches = chunk(scanTargets, 6)
-  const scanThunks = batches.map((b) => () => agent(scanBrief(b), { schema: FINDINGS, agentType: 'Explore', phase: 'Scan', label: `scan:${b[0] || 'batch'}` }))
+  const batches = chunk(scanTargets, SCAN_BATCH)
+  const scanThunks = batches.map((b) => () => agent(scanBrief(b), { schema: FINDINGS, agentType: 'Explore', phase: 'Scan', label: `scan ${b.length}: ${batchLabel(b)}` }))
   // Aggregate sees BOTH evaluated-undecided nodes (for failure intersections) AND committed
   // frontier nodes (so the improver enumeration has committed experiments to draw from).
   const aggregateIds = [...new Set([...evaluatedIds, ...frontierIds])]
