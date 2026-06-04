@@ -399,7 +399,9 @@ function revisePrompt(expId, worktree, findings) {
 // RUN — evaluate + commit the (pre-verified) experiment.
 function runPrompt(expId) {
   return [
-    `Run \`evo run ${expId}\` to evaluate and (if it improves and passes gates) commit it.`,
+    `First, load the evo subagent skill: Read ${pr}/skills/subagent/SKILL.md IN FULL and follow its run protocol (it covers \`evo run ${expId} --check\` for non-committing wiring validation that does not consume the attempt budget).`,
+    `CRITICAL ordering: if this experiment produces its artifact through a build or training step (e.g. a finetune that writes final_model/), run that step to COMPLETION and confirm the artifact exists BEFORE the real run. Never call \`evo run\` while training is still in flight or before final_model/ exists — evaluating a not-yet-produced model is the "final_model not found" failure and it wastes the attempt. If the experiment trains, the parent checkpoint is in EVO_PARENT_POLICY (warm-start from it; do not retrain from base).`,
+    `Then run \`evo run ${expId}\` to evaluate and (if it improves and passes gates) commit it.`,
     'If it exits GATE_FAILED, do not fight the gate — report status=evaluated.',
     `Return: expIds:["${expId}"]; status (committed|evaluated|failed|none); committedImprover = true ONLY if evo printed COMMITTED;`,
     'bestExpId + bestScore (required when committedImprover is true); any gates added; learnings.',
