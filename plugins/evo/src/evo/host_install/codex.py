@@ -645,15 +645,30 @@ def doctor(args: argparse.Namespace) -> int:
     # plugin root codex resolves for the active `evo@<owner>` selector.
     import re as _re
     plugin_cache_root = _codex_base() / "plugins" / "cache"
-    active_mkts = _re.findall(r'\[plugins\."evo@([^"]+)"\]', cfg_text)
+    # Strip comment lines so a commented-out `# [plugins."evo@old"]` isn't
+    # matched and chased to a non-existent cache dir.
+    uncommented = "\n".join(
+        ln for ln in cfg_text.splitlines() if not ln.lstrip().startswith("#")
+    )
+    active_mkts = _re.findall(r'\[plugins\."evo@([^"]+)"\]', uncommented)
     if not active_mkts:
         # No enabled plugin entry to resolve a binary path against; the
         # checks above already flagged the missing _PLUGIN_KEY.
         return rc
+
+    def _ver_key(name: str):
+        # Numeric-aware so 0.10.0 sorts after 0.9.0 (plain sorted() is
+        # lexicographic and would invert that). Non-numeric segments
+        # (pre-release tags) fall into a separate rank so int/str never
+        # compare.
+        return [(0, int(s)) if s.isdigit() else (1, s)
+                for s in _re.split(r"[.-]", name)]
+
     for mkt_name in active_mkts:
         mkt_cache = plugin_cache_root / mkt_name / "evo"
         versions = (
-            sorted(p for p in mkt_cache.iterdir() if p.is_dir())
+            sorted((p for p in mkt_cache.iterdir() if p.is_dir()),
+                   key=lambda p: _ver_key(p.name))
             if mkt_cache.is_dir() else []
         )
         if not versions:

@@ -276,5 +276,69 @@ class TestDisablePlugin(_Base):
         self.assertEqual(self._read_config(), original)
 
 
+class TestDoctorHookBinary(_Base):
+    """`doctor()` resolves the hook-drain binary at the cache dir codex
+    actually loads. These exercise the version-dir selection (numeric, not
+    lexicographic) and comment-line handling in that resolution."""
+
+    def _healthy_config(self) -> None:
+        self._write_config(
+            '[features]\n'
+            'plugin_hooks = true\n'
+            '\n'
+            '[plugins."evo@evo-hq"]\n'
+            'enabled = true\n'
+        )
+        # `cache` check in doctor() looks at the marketplace clone.
+        (self.codex_home / ".tmp" / "marketplaces" / "evo-hq").mkdir(parents=True)
+
+    def _stage_binary(self, version: str) -> None:
+        b = (self.codex_home / "plugins" / "cache" / "evo-hq" / "evo"
+             / version / "bin" / "evo-hook-drain")
+        b.parent.mkdir(parents=True, exist_ok=True)
+        b.write_text("#!/bin/sh\n")
+        os.chmod(b, 0o755)
+
+    def _run_doctor(self) -> int:
+        import argparse
+        import contextlib
+        import io
+        from evo.host_install.codex import doctor
+        with contextlib.redirect_stdout(io.StringIO()):
+            return doctor(argparse.Namespace())
+
+    def test_picks_numerically_latest_version_dir(self):
+        # Binary only in 0.10.0. Lexicographic sort would pick 0.9.0 and
+        # wrongly report the binary missing.
+        self._healthy_config()
+        (self.codex_home / "plugins" / "cache" / "evo-hq" / "evo"
+         / "0.9.0").mkdir(parents=True)
+        self._stage_binary("0.10.0")
+        self.assertEqual(self._run_doctor(), 0)
+
+    def test_missing_binary_fails(self):
+        self._healthy_config()
+        (self.codex_home / "plugins" / "cache" / "evo-hq" / "evo"
+         / "0.4.5" / "bin").mkdir(parents=True)
+        self.assertEqual(self._run_doctor(), 1)
+
+    def test_ignores_commented_plugin_entry(self):
+        # A commented-out registration must not be chased to a missing
+        # cache dir.
+        self._write_config(
+            '[features]\n'
+            'plugin_hooks = true\n'
+            '\n'
+            '[plugins."evo@evo-hq"]\n'
+            'enabled = true\n'
+            '\n'
+            '# [plugins."evo@ghost"]\n'
+            '# enabled = true\n'
+        )
+        (self.codex_home / ".tmp" / "marketplaces" / "evo-hq").mkdir(parents=True)
+        self._stage_binary("0.4.5")
+        self.assertEqual(self._run_doctor(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
