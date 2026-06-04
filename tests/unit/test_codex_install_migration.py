@@ -229,5 +229,52 @@ class TestLegacyCleanup(_Base):
         self.assertTrue((self.codex_home / "plugins" / "cache" / "evo-hq").exists())
 
 
+class TestDisablePlugin(_Base):
+    """`uninstall` → `_enable_plugin(enable=False)` must remove the
+    `[plugins."evo@evo-hq"]` header AND the `enabled = true` key written
+    beneath it. Removing only the header orphans `enabled = true`, which
+    a TOML parser attaches to the preceding table."""
+
+    def test_disable_removes_header_and_enabled_key(self):
+        from evo.host_install.codex import _enable_plugin
+
+        self._write_config(
+            '[features]\n'
+            'plugin_hooks = true\n'
+            '\n'
+            '[plugins."evo@evo-hq"]\n'
+            'enabled = true\n'
+            '\n'
+            '[plugins."github@openai-curated"]\n'
+            'enabled = true\n'
+        )
+        changed, _ = _enable_plugin(enable=False)
+        self.assertTrue(changed)
+        text = self._read_config()
+        # evo block fully gone — no orphan key.
+        self.assertNotIn('"evo@evo-hq"', text)
+        self.assertNotIn('[features]\nplugin_hooks = true\nenabled = true', text)
+        # Surrounding sections + the other plugin's own enabled key intact.
+        self.assertIn('[features]', text)
+        self.assertIn('plugin_hooks = true', text)
+        self.assertIn('[plugins."github@openai-curated"]', text)
+        self.assertIn('enabled = true', text)  # github's, not evo's
+
+    def test_disable_noop_when_absent(self):
+        from evo.host_install.codex import _enable_plugin
+
+        original = (
+            '[features]\n'
+            'plugin_hooks = true\n'
+            '\n'
+            '[plugins."github@openai-curated"]\n'
+            'enabled = true\n'
+        )
+        self._write_config(original)
+        changed, _ = _enable_plugin(enable=False)
+        self.assertFalse(changed)
+        self.assertEqual(self._read_config(), original)
+
+
 if __name__ == "__main__":
     unittest.main()

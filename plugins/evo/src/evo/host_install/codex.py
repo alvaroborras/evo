@@ -75,9 +75,23 @@ def _enable_plugin(enable: bool) -> tuple[bool, Path]:
     else:
         if not present:
             return False, cfg
-        text = "\n".join(
-            line for line in text.splitlines() if line.strip() != _PLUGIN_KEY.strip()
-        ) + "\n"
+        # Remove the section header AND the key lines that belong to it
+        # (`enabled = true`, written by _install_via_filecopy) up to the
+        # next section. Dropping only the header would orphan
+        # `enabled = true`, which a TOML parser attaches to the preceding
+        # table.
+        new_lines: list[str] = []
+        skip = False
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("["):
+                skip = stripped.rstrip() == _PLUGIN_KEY
+                if skip:
+                    continue
+            if skip:
+                continue
+            new_lines.append(line)
+        text = "\n".join(new_lines).rstrip() + "\n"
 
     cfg.write_text(text)
     return True, cfg
