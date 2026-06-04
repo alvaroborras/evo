@@ -5,7 +5,9 @@
  * opt-in, Claude-Code-only driver; the prose skill remains the canonical, host-agnostic
  * default. The workflow encodes the loop CONTROL: while/stall, mandatory scan + cross-history
  * axis check, research escalation (ideators on stall / every ~5 commits), brief + diversity,
- * fan-out + verify, collect + frontier-select. All domain work goes through the `evo` CLI inside
+ * fan-out + verify, collect + frontier-select. A concurrent ANALYST thread (Opus, self-paced,
+ * read-only) runs alongside the round loop via Promise.all — host + cross-history checks during
+ * rounds, feeding hints into the next brief. All domain work goes through the `evo` CLI inside
  * agents — the script itself never touches the filesystem/shell.
  *
  * Treat this as a TEMPLATE: launch it as-is for the standard loop, or adapt the prompts /
@@ -34,6 +36,7 @@ export const meta = {
     { title: 'Optimize', detail: 'parallel optimization subagents (evo new/run)' },
     { title: 'Verify',   detail: 'validity audit + benchmark-noise confirm' },
     { title: 'Collect',  detail: 'prune dead lineages, record cross-cutting notes' },
+    { title: 'Analyst',  detail: 'concurrent independent observer (Opus) — host + cross-history checks during rounds' },
   ],
 }
 
@@ -175,6 +178,16 @@ const PREVERDICT = {
   },
 }
 
+// Analyst tick output: work-quality hints (fed into the next brief) + runtime/host alerts (surfaced).
+const ANALYST_FINDINGS = {
+  type: 'object',
+  required: ['briefHints', 'alerts'],
+  properties: {
+    briefHints: { type: 'array', items: { type: 'string' } },
+    alerts: { type: 'array', items: { type: 'string' } },
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Helpers (pure JS — control-plane only)
 // ---------------------------------------------------------------------------
@@ -193,6 +206,18 @@ const LIMIT = Number(A.stall) || 5
 const IDEATE_STALL = Math.max(1, Math.min(3, LIMIT - 1))
 const IDEATE_EVERY_COMMITS = 5   // periodic research cadence (matches prose step 6b)
 const PREVERIFY_MAX = 3          // pre-run verify <-> revise attempts before discarding a rigged edit
+// Concurrent analyst thread (runs alongside the round loop, NOT per-round).
+const ANALYST_ENABLED = true
+const ANALYST_MODEL = 'opus'    // the analyst always reasons with Opus (judgment-heavy)
+const ANALYST_INTERVAL_S = 300  // self-pace: observe ~every 5 min, during rounds
+const ANALYST_HOP_S = 15        // the wait is INTERRUPTIBLE in hops of this size: when the optimize loop
+                                // ends mid-wait it drops a sentinel the analyst polls, so the in-flight
+                                // tick exits within ~ANALYST_HOP_S instead of stalling the run for the
+                                // full interval (the script can't interrupt an agent's `sleep` directly).
+const DONE_SENTINEL = '.evo/.wf_optimize_done'  // optimize -> analyst "loop is over" signal (a file,
+                                // since the in-memory `done` flag isn't visible to the agent's process)
+const ANALYST_MAX_FAILS = 3     // consecutive failed ticks before the advisory analyst self-disables
+                                // (guards against a hot-spin when ticks fail instantly, e.g. a bad schema)
 // Experiments per scan agent. Heuristic for the prose "small enough to read in one pass" rule —
 // the workflow can't recursively self-partition like the prose loop, so this is fixed up front.
 // Lower it for heavy traces (many tasks / long messages); raise it for tiny traces.
@@ -305,7 +330,7 @@ function aggregatePrompt(ids) {
   ].join(' ')
 }
 
-function briefPrompt(state, findings, patterns, parents, ideated) {
+function briefPrompt(state, findings, patterns, parents, ideated, analystHints) {
   return [
     'You are the evo orchestrator\'s brief writer.',
     'State summary:', state.summary || '',
@@ -316,6 +341,9 @@ function briefPrompt(state, findings, patterns, parents, ideated) {
       ? '\nFRESH IDEATOR PROPOSALS may be available — read `.evo/run_*/ideator/proposals.jsonl` and reconcile BEFORE writing: skip any whose technique was already tried (`evo discards --like "<keyword>"`); score the rest by expected_score_uplift x confidence (frontier_extrapolation > failure_analysis > literature, all else equal); let the top 1-2 become brief objectives, citing the proposal\'s hypothesis/technique. Proposals are advisory — if none beat the in-graph scan findings, ignore them.'
       : '',
     '\nIf the patterns include an "axis-warning", the current axis is saturated — target the ORTHOGONAL axis it names rather than iterating the plateaued one.',
+    (analystHints && analystHints.length)
+      ? '\nLIVE ANALYST SIGNALS (from the concurrent observer — fold relevant ones into objectives/boundaries, e.g. switch off a saturated axis, avoid a flagged dead direction): ' + JSON.stringify(analystHints)
+      : '',
     `\nWrite up to ${WIDTH} briefs (use the full round width of ${WIDTH} whenever you can find that many genuinely DISTINCT objectives — multiple briefs MAY branch from the SAME parent when fewer than ${WIDTH} frontier parents exist, as long as each attacks a different surface; do not pad with redundant briefs). One per subagent, each with four fields:`,
     '1. objective -- one sentence naming WHERE in system behavior the gain hides, with evidence; NO file/function/edit names.',
     '2. parent -- which experiment id to branch from (choose from the selected parents).',
@@ -420,6 +448,28 @@ function collectPrompt(results, round) {
   ].join(' ')
 }
 
+// One analyst tick (a FRESH Opus agent each call — no memory across ticks, so `reported` carries
+// the dedup state in the loop's closure). Read-only: observes host + cross-history signals DURING
+// rounds, returns work-quality briefHints (folded into the next brief) + runtime alerts (surfaced).
+function analystPrompt(ctx, intervalS, reported) {
+  return [
+    'You are the evo ANALYST — an independent observer running CONCURRENTLY with the optimize loop.',
+    'Read-only: do NOT edit code, run experiments, or mutate evo state.',
+    `FIRST pace yourself with an INTERRUPTIBLE wait, so you stop promptly when the optimize loop ends. Run this single Bash command with a tool timeout of at least ${(intervalS + 30) * 1000} ms:`,
+    `  \`if [ -f ${DONE_SENTINEL} ]; then echo OPTIMIZE_DONE; else for i in $(seq 1 ${Math.ceil(intervalS / ANALYST_HOP_S)}); do sleep ${ANALYST_HOP_S}; [ -f ${DONE_SENTINEL} ] && { echo OPTIMIZE_DONE; break; }; done; fi\``,
+    `If that prints OPTIMIZE_DONE, the optimize loop has finished — return {"briefHints":[],"alerts":[]} immediately WITHOUT gathering any signals. Otherwise the full interval elapsed: now gather signals and report.`,
+    `Current loop state: round=${ctx.round}, stall=${ctx.stall}/${LIMIT}, best=${ctx.bestScore}.`,
+    `Already reported (do NOT repeat — only emit findings NEW since these): ${JSON.stringify(reported || [])}.`,
+    'Walk these checks (skip any whose inputs are unavailable; cite evidence; nothing speculative):',
+    '- Zombie GPU: `nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader` + `ps` — a PID holding >=4GB not tied to an active `evo run`. ALERT with a verify clause (do NOT kill).',
+    '- Buried stderr warning: tail recent experiment stderr under `.evo/run_*/experiments/*/attempts/*/` for tokenizer / EOS / chat_template / parity-mismatch lines not already annotated. ALERT.',
+    '- Stuck experiment / time-budget overrun: from `evo status`/`evo show`, an experiment active far longer than its peers, or a round overrunning the others. ALERT.',
+    '- Stuck axis: from `evo tree`, 3+ structurally-distinct committed hypotheses plateaued at ~the same score → name the saturated axis + one orthogonal axis. BRIEF HINT.',
+    '- Dead direction / ignored mechanism: annotations repeatedly naming a mechanism the recent work ignores, or a direction that keeps regressing. BRIEF HINT.',
+    'Return {briefHints:[...], alerts:[...]}. briefHints feed the NEXT round\'s briefs (work-quality redirections); alerts surface to the user (runtime/host issues). Empty arrays are fine — most ticks should be quiet.',
+  ].join('\n')
+}
+
 // Per-brief lane: implement -> pre-verify <-> revise loop -> run -> post-audit, repeated up to the
 // iteration budget (deepening the branch each time a committed improver lands). The independent
 // evo:verifier gates EACH run for design-time cheating BEFORE the experiment is evaluated; its
@@ -487,82 +537,136 @@ let stall = 0
 let round = 0
 let lastIdeatedCommit = 0      // committedCount at the last ideator dispatch (periodic cadence)
 let ideatedThisStall = false   // fire ideators once per stall episode, not every stalled round
+let lastBestScore = null       // latest best score, surfaced to the concurrent analyst thread
+let done = false               // set when the optimize loop ends -> stops the analyst thread
+const analystSignals = []      // briefHints the analyst pushes; drained into the next round's brief
 
-log(`evo-optimize start: subagents=${WIDTH} budget=${ITER} stall=${LIMIT} | argsType=${typeof args} A.subagents=${A.subagents} A.budget=${A.budget} A.stall=${A.stall}`)
+log(`evo-optimize start: subagents=${WIDTH} budget=${ITER} stall=${LIMIT} analyst=${ANALYST_ENABLED ? ANALYST_MODEL : 'off'} | argsType=${typeof args} A.subagents=${A.subagents} A.budget=${A.budget} A.stall=${A.stall}`)
 
-while (stall < LIMIT) {
-  round += 1
+// The optimize round loop (runs concurrently with analystLoop via Promise.all).
+async function optimizeLoop() {
+  while (stall < LIMIT) {
+    round += 1
 
-  phase('Orient')
-  const state = await agent(statePrompt(), { schema: STATE, agentType: 'Explore', model: 'haiku', phase: 'Orient', label: `state:r${round}` })
-  if (state.bestScore === state.ceiling) { log(`ceiling reached (best=${state.bestScore}) — stopping`); break }
-  const parents = (state.frontier || []).slice(0, WIDTH)
-  if (parents.length === 0) { log('no explorable frontier nodes — stopping'); break }
+    phase('Orient')
+    const state = await agent(statePrompt(), { schema: STATE, agentType: 'Explore', model: 'sonnet', phase: 'Orient', label: `state:r${round}` })
+    lastBestScore = state.bestScore
+    if (state.bestScore === state.ceiling) { log(`ceiling reached (best=${state.bestScore}) — stopping`); break }
+    const parents = (state.frontier || []).slice(0, WIDTH)
+    if (parents.length === 0) { log('no explorable frontier nodes — stopping'); break }
 
-  // N1 + N1.5 — mandatory parallel scan + structural aggregation (barrier).
-  // The scan runs EVERY round (hard rule). When there are no evaluated-undecided nodes yet
-  // (e.g. round 1, right after the baseline), fall back to scanning the committed frontier nodes
-  // so at least one scan agent still runs before briefs.
-  phase('Scan')
-  const evaluatedIds = state.evaluatedIds || []
-  const frontierIds = (state.frontier || []).map((f) => f.id).filter(Boolean)
-  const scanTargets = evaluatedIds.length ? evaluatedIds : frontierIds
-  const batches = chunk(scanTargets, SCAN_BATCH)
-  const scanThunks = batches.map((b) => () => agent(scanBrief(b), { schema: FINDINGS, agentType: 'Explore', phase: 'Scan', label: `scan ${b.length}: ${batchLabel(b)}` }))
-  // Aggregate sees BOTH evaluated-undecided nodes (for failure intersections) AND committed
-  // frontier nodes (so the improver enumeration has committed experiments to draw from).
-  const aggregateIds = [...new Set([...evaluatedIds, ...frontierIds])]
-  const aggThunk = aggregateIds.length
-    ? [() => agent(aggregatePrompt(aggregateIds), { schema: PATTERNS, agentType: 'Explore', phase: 'Scan', label: 'aggregate' })]
-    : []
-  const scanResults = (await parallel([...scanThunks, ...aggThunk])).filter(Boolean)
-  const findings = scanResults.flatMap((r) => (r && r.findings) ? r.findings : [])
-  const patterns = scanResults.flatMap((r) => (r && r.patterns) ? r.patterns : [])
+    // N1 + N1.5 — mandatory parallel scan + structural aggregation (barrier). Scan runs EVERY round
+    // (hard rule); when there are no evaluated-undecided nodes yet (round 1) it falls back to the
+    // committed frontier so at least one scan agent still runs before briefs.
+    phase('Scan')
+    const evaluatedIds = state.evaluatedIds || []
+    const frontierIds = (state.frontier || []).map((f) => f.id).filter(Boolean)
+    const scanTargets = evaluatedIds.length ? evaluatedIds : frontierIds
+    const batches = chunk(scanTargets, SCAN_BATCH)
+    const scanThunks = batches.map((b) => () => agent(scanBrief(b), { schema: FINDINGS, agentType: 'Explore', phase: 'Scan', label: `scan ${b.length}: ${batchLabel(b)}` }))
+    const aggregateIds = [...new Set([...evaluatedIds, ...frontierIds])]
+    const aggThunk = aggregateIds.length
+      ? [() => agent(aggregatePrompt(aggregateIds), { schema: PATTERNS, agentType: 'Explore', phase: 'Scan', label: 'aggregate' })]
+      : []
+    const scanResults = (await parallel([...scanThunks, ...aggThunk])).filter(Boolean)
+    const findings = scanResults.flatMap((r) => (r && r.findings) ? r.findings : [])
+    const patterns = scanResults.flatMap((r) => (r && r.patterns) ? r.patterns : [])
 
-  // N1.7 — research escalation (6b): on stall (before the hard limit) or every ~5 commits, fire
-  // the three ideators in parallel. They append proposals to .evo/run_*/ideator/proposals.jsonl;
-  // parallel() blocks until all return (the "block until proposals land" the prose does via evo wait).
-  const commits = Number(state.committedCount) || 0
-  const stalledTrigger = stall >= IDEATE_STALL && !ideatedThisStall
-  const periodicTrigger = commits - lastIdeatedCommit >= IDEATE_EVERY_COMMITS
-  let ideated = false
-  if (stalledTrigger || periodicTrigger) {
-    phase('Ideate')
-    await parallel(['frontier_extrapolation', 'failure_analysis', 'literature'].map((b) => () =>
-      agent(ideatorPrompt(b), { agentType: 'evo:ideator', phase: 'Ideate', label: `ideate:${b}` })))
-    lastIdeatedCommit = commits
-    if (stalledTrigger) ideatedThisStall = true
-    ideated = true
-    log(`ideators fired (trigger: ${stalledTrigger ? 'stall' : 'periodic'}, stall=${stall}, commits=${commits})`)
+    // N1.7 — research escalation (6b): on stall (before the hard limit) or every ~5 commits, fire the
+    // three ideators in parallel. parallel() blocks until all return (proposals land before briefing).
+    const commits = Number(state.committedCount) || 0
+    const stalledTrigger = stall >= IDEATE_STALL && !ideatedThisStall
+    const periodicTrigger = commits - lastIdeatedCommit >= IDEATE_EVERY_COMMITS
+    let ideated = false
+    if (stalledTrigger || periodicTrigger) {
+      phase('Ideate')
+      await parallel(['frontier_extrapolation', 'failure_analysis', 'literature'].map((b) => () =>
+        agent(ideatorPrompt(b), { agentType: 'evo:ideator', phase: 'Ideate', label: `ideate:${b}` })))
+      lastIdeatedCommit = commits
+      if (stalledTrigger) ideatedThisStall = true
+      ideated = true
+      log(`ideators fired (trigger: ${stalledTrigger ? 'stall' : 'periodic'}, stall=${stall}, commits=${commits})`)
+    }
+
+    // N2 — brief writer: reconciles ideator proposals (6c), acts on axis-warning, and folds in any
+    // live analyst hints accumulated since the last round; JS diversity dedupe afterwards.
+    phase('Brief')
+    const analystHints = analystSignals.splice(0)
+    const briefOut = await agent(briefPrompt(state, findings, patterns, parents, ideated, analystHints), { schema: BRIEFS, phase: 'Brief', label: `briefs:r${round}` })
+    const briefs = dedupeBriefs((briefOut && briefOut.briefs) || [])
+    if (briefs.length === 0) { log('no briefs produced — stopping'); break }
+
+    // N3..N4 — fan out one lane per brief; each lane: implement -> pre-verify<->revise -> run -> post-audit.
+    const results = (await parallel(briefs.map((b) => () => runBrief(b, state)))).filter(Boolean)
+
+    // N5 — collect: prune dead lineages, record notes.
+    phase('Collect')
+    await agent(collectPrompt(results, round), { phase: 'Collect', label: `collect:r${round}` })
+
+    // Loop control: stall resets only when this round produced a VERIFIED committed score that beats
+    // the PRIOR BEST in the metric direction (a beat-its-own-parent commit is branch progress, not a
+    // new best, and does NOT reset stall). No budget in the condition.
+    const dir = state.direction || 'max'
+    const gains = results
+      .filter((r) => r.committedImprover && r.valid !== false && typeof r.bestScore === 'number')
+      .map((r) => r.bestScore)
+    const roundBest = gains.length ? (dir === 'min' ? Math.min(...gains) : Math.max(...gains)) : null
+    const improved = roundBest !== null && (dir === 'min' ? roundBest < state.bestScore : roundBest > state.bestScore)
+    stall = improved ? 0 : stall + 1
+    if (improved) ideatedThisStall = false
+    log(`round ${round}: improved=${improved} roundBest=${roundBest} prevBest=${state.bestScore} stall=${stall}/${LIMIT} spent=${budget.spent()}`)
   }
-
-  // N2 — brief writer (judgment): reconciles ideator proposals (6c) + acts on axis-warning; JS diversity dedupe.
-  phase('Brief')
-  const briefOut = await agent(briefPrompt(state, findings, patterns, parents, ideated), { schema: BRIEFS, phase: 'Brief', label: `briefs:r${round}` })
-  const briefs = dedupeBriefs((briefOut && briefOut.briefs) || [])
-  if (briefs.length === 0) { log('no briefs produced — stopping'); break }
-
-  // N3..N4 — fan out one lane per brief; each lane: implement -> pre-verify<->revise -> run -> post-audit.
-  const results = (await parallel(briefs.map((b) => () => runBrief(b, state)))).filter(Boolean)
-
-  // N5 — collect: prune dead lineages, record notes.
-  phase('Collect')
-  await agent(collectPrompt(results, round), { phase: 'Collect', label: `collect:r${round}` })
-
-  // Loop control: stall resets only when this round produced a VERIFIED committed score that
-  // beats the PRIOR BEST in the metric direction. A committed improver that beat its own parent
-  // but not the global best does NOT reset stall (it's progress on a branch, not a new best).
-  // No budget in the condition.
-  const dir = state.direction || 'max'
-  const gains = results
-    .filter((r) => r.committedImprover && r.valid !== false && typeof r.bestScore === 'number')
-    .map((r) => r.bestScore)
-  const roundBest = gains.length ? (dir === 'min' ? Math.min(...gains) : Math.max(...gains)) : null
-  const improved = roundBest !== null && (dir === 'min' ? roundBest < state.bestScore : roundBest > state.bestScore)
-  stall = improved ? 0 : stall + 1
-  if (improved) ideatedThisStall = false   // new best → a fresh stall episode may re-trigger ideators later
-  log(`round ${round}: improved=${improved} roundBest=${roundBest} prevBest=${state.bestScore} stall=${stall}/${LIMIT} spent=${budget.spent()}`)
+  done = true
+  // Wake any in-flight analyst tick now (its `sleep` can't see the in-memory `done`): the sentinel
+  // makes the tick's interruptible wait exit within ~ANALYST_HOP_S instead of running the full interval.
+  if (ANALYST_ENABLED) await agent(`mkdir -p .evo && : > ${DONE_SENTINEL} && echo signalled`, { phase: 'Collect', label: 'signal:optimize-done' })
+  log(`optimize loop finished after ${round} round(s), final stall=${stall}/${LIMIT}`)
+  return { rounds: round, finalStall: stall }
 }
 
-log(`optimize workflow finished after ${round} round(s), final stall=${stall}/${LIMIT}`)
-return { rounds: round, finalStall: stall }
+// Concurrent analyst thread (P1-sliver/P2-P5/P7): an independent, self-paced Opus observer that runs
+// DURING rounds (not per-round). Each tick is a FRESH agent (no cross-tick memory), so `reported`
+// holds the dedup state in this closure. Work-quality findings -> analystSignals (next brief);
+// runtime/host alerts -> the run log. Stops when optimizeLoop sets `done`.
+async function analystLoop() {
+  if (!ANALYST_ENABLED) return
+  const reported = []   // closure memory across the stateless ticks (caps re-alerting)
+  let t = 0
+  let fails = 0   // consecutive tick failures; trips the self-disable below
+  while (!done) {
+    t += 1
+    // The analyst is purely advisory and read-only: a failed tick must NEVER reject this loop and
+    // abort the optimizer. Swallow any tick error, log it, and continue (or exit if `done` flipped).
+    let tick = null
+    try {
+      tick = await agent(analystPrompt({ round, stall, bestScore: lastBestScore }, ANALYST_INTERVAL_S, reported.slice(-30)), {
+        agentType: 'Explore', model: ANALYST_MODEL, schema: ANALYST_FINDINGS, phase: 'Analyst', label: `analyst#${t}`,
+      })
+    } catch (e) {
+      log(`ANALYST tick #${t} errored (ignored, optimize unaffected): ${(e && e.message) || e}`)
+    }
+    if (tick) {
+      fails = 0   // a real tick resets the failure streak
+      for (const h of (tick.briefHints || [])) { analystSignals.push(h); reported.push(h) }
+      for (const a of (tick.alerts || [])) { log(`ANALYST ALERT: ${a}`); reported.push(a) }
+    } else if (++fails >= ANALYST_MAX_FAILS) {
+      // The pacing wait lives INSIDE the agent, so a tick that fails before sleeping (e.g. a schema
+      // reject) leaves nothing to pace the retry — left unchecked the loop hot-spins agents. The
+      // analyst is optional, so after a short streak of failures, disable it for the rest of the run.
+      log(`ANALYST disabled after ${fails} consecutive failed ticks — optimize continues without it.`)
+      return
+    }
+  }
+}
+
+// Clear any stale sentinel from a prior run BEFORE the threads start, else the analyst's first wait
+// would see it and exit instantly. The script can't touch the filesystem itself, so an agent does it.
+if (ANALYST_ENABLED) await agent(`rm -f ${DONE_SENTINEL}; echo cleared`, { phase: 'Orient', label: 'init:clear-sentinel' })
+
+// optimizeLoop is the run's result; analystLoop is advisory. The `.catch` is the definitive guard that
+// the observer thread can NEVER reject the combined promise and fail an otherwise-good optimize run.
+const [optimizeResult] = await Promise.all([
+  optimizeLoop(),
+  analystLoop().catch((e) => log(`ANALYST thread exited abnormally (ignored): ${(e && e.message) || e}`)),
+])
+return optimizeResult
