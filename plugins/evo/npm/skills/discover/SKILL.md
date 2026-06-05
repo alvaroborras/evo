@@ -2,7 +2,7 @@
 name: discover
 description: Initialize evo for the current repository by exploring the codebase, proposing unexplored optimization dimensions, constructing the benchmark inside a baseline worktree, and running the first experiment. Use when the user invokes /evo:discover, mentions setting up evo, wants to instrument a codebase for autonomous optimization, or asks to start a new evo run on a project.
 argument-hint: <optional context about what to optimize>
-evo_version: 0.5.0-alpha.11
+evo_version: 0.5.0-alpha.12
 ---
 
 # Discover
@@ -116,20 +116,20 @@ evo --version
 The output must be exactly:
 
 ```
-evo-hq-cli 0.5.0-alpha.11
+evo-hq-cli 0.5.0-alpha.12
 ```
 
 Three outcomes:
 
 1. **Matches exactly** — continue to step 1.
 2. **Reports a different version** (`evo-hq-cli 0.4.2`, etc.) — the host refetched a newer/older skill bundle than the CLI on PATH. Drift breaks skills silently. Stop and tell the user:
-   > Your installed evo CLI is on a different version than this skill (`0.5.0-alpha.11`). Run:
+   > Your installed evo CLI is on a different version than this skill (`0.5.0-alpha.12`). Run:
    > ```
-   > uv tool install --force evo-hq-cli==0.5.0-alpha.11
+   > uv tool install --force evo-hq-cli==0.5.0-alpha.12
    > ```
    > Then re-invoke this skill.
 3. **`command not found`, or reports a different package** (commonly `evo 1.x` — the unrelated SLAM tool) — the CLI isn't installed. Tell the user:
-   > `evo-hq-cli` isn't on your PATH. Install it: `uv tool install evo-hq-cli==0.5.0-alpha.11` (or `pipx install evo-hq-cli==0.5.0-alpha.11`). Then re-invoke this skill.
+   > `evo-hq-cli` isn't on your PATH. Install it: `uv tool install evo-hq-cli==0.5.0-alpha.12` (or `pipx install evo-hq-cli==0.5.0-alpha.12`). Then re-invoke this skill.
 
 Do not try to auto-install. Host sandbox + network policy may block it; leaving the install as a user action keeps failure modes clear.
 
@@ -308,10 +308,10 @@ Dashboard live: http://127.0.0.1:8080 (pid 12345)
 **Benchmark commands must be eval-only.** Do NOT wrap training and evaluation into a single benchmark command. If your benchmark command runs training before scoring, every gate revalidation and every `evo run --check` retrains from scratch, and the experiment budget burns on duplicated training instead of new experiments. Training is a separate step the agent invokes BEFORE `evo run`:
 
 1. The agent makes changes (data curation, hyperparameter selection, technique choice, training code edits).
-2. The agent runs training to produce a checkpoint at the experiment worktree's `final_model/` (or wherever the technique's recipe in `evo:finetuning/references/glue.md` specifies).
-3. THEN `evo run <exp_id>` invokes the registered benchmark command, which loads the produced checkpoint and emits a score.
+2. The agent runs the build/training step to produce its artifact — a checkpoint, adapter, index, whatever the recipe makes. Write it to `EVO_CHECKPOINT_DIR` (durable: survives between-attempt cleanup and discard) and declare it in the benchmark result's `artifacts` field so it's preserved + reusable; the per-technique I/O contract is in `evo:finetuning/references/glue.md`. Never hardcode a fixed name like `final_model/`.
+3. THEN `evo run <exp_id>` invokes the registered benchmark command, which loads the produced artifact and emits a score.
 
-The registered benchmark command should call `evaluate.py`, `run_eval.py`, or equivalent -- NOT `train.py`. If the project's only existing evaluation tool runs train+eval together with no eval-only mode, wrap it: add a `--skip-train` flag, or have the wrapper detect an existing checkpoint at `final_model/` and short-circuit the train step. Without this, evo's gate-recheck and re-score mechanics retrain repeatedly and the budget evaporates.
+The registered benchmark command should call `evaluate.py`, `run_eval.py`, or equivalent -- NOT `train.py`. If the project's only existing evaluation tool runs build+eval together with no eval-only mode, wrap it: add a `--skip-build` flag, or have the wrapper detect an existing artifact (under `EVO_CHECKPOINT_DIR`) and short-circuit the build step. Without this, evo's gate-recheck and re-score mechanics rebuild repeatedly and the budget evaporates.
 
 **Runtime environment.** If the benchmark needs keys or other runtime variables, configure them through evo rather than copying `.env` into worktrees or hand-editing `config.json`:
 
@@ -322,6 +322,16 @@ evo env show
 ```
 
 Values are resolved fresh by the orchestrator on each `evo run`. Config stores dotenv source metadata and key names, not secret values. The benchmark and gates receive the resolved env; gates do not receive `EVO_*` artifact variables.
+
+### 7a. Record the task category (`task-skills`)
+
+You already decided what's being optimized (steps 2–4). Record the evo category skill(s) a builder should load for it, so every executing agent — prose subagent or workflow lane — loads the right method knowledge instead of rediscovering it each round:
+
+```bash
+evo config set task-skills finetuning   # any weight-update / training task
+```
+
+Rule of thumb: if the optimization updates model weights (SFT / LoRA / DPO / RL / continued-pretraining), set `task-skills finetuning`. **Leave it unset** for prompt / code / config / harness optimization — the subagent protocol already covers those; only set it when a dedicated category skill applies. Use a comma-separated list if more than one applies. Mirror the choice in `.evo/project.md` (step 12) so it's human-readable and survives as the fallback if config is ever cleared.
 
 ## 8. Set up gates
 

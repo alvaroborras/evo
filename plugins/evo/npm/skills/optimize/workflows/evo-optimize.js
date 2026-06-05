@@ -65,6 +65,8 @@ const STATE = {
     committedCount: { type: 'integer' },    // total committed experiments (drives the periodic ideator trigger)
     verifyRepeats: { type: 'integer' },     // benchmark noise profile (1 = deterministic, no confirm-loop)
     summary: { type: 'string' },            // short scratchpad summary for subagent context
+    taskSkills: { type: 'array', items: { type: 'string' } },     // category skills a builder should load (e.g. ["finetuning"]) — resolved from config/project, never hardcoded in the workflow
+    knownLearnings: { type: 'array', items: { type: 'string' } }, // durable lessons to apply up front (drained from annotations) so a fresh stateless lane doesn't rediscover them
   },
 }
 
@@ -181,10 +183,27 @@ const PREVERDICT = {
 // Analyst tick output: work-quality hints (fed into the next brief) + runtime/host alerts (surfaced).
 const ANALYST_FINDINGS = {
   type: 'object',
-  required: ['briefHints', 'alerts'],
+  required: ['briefHints', 'alerts', 'stops'],
   properties: {
     briefHints: { type: 'array', items: { type: 'string' } },
     alerts: { type: 'array', items: { type: 'string' } },
+    // STOP recommendations for in-flight experiments that are clearly doomed.
+    // A stop is NOT a crash: each carries the diagnosis + a fix so the gated
+    // enforcer can abort, annotate (lesson outlives the worktree), and classify+
+    // preserve — and the fix feeds the next round (and, if general, a skill prior).
+    stops: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['expId', 'failureClass', 'reason', 'fixHint'],
+        properties: {
+          expId: { type: 'string' },
+          failureClass: { enum: ['build', 'eval', 'hypothesis'] },
+          reason: { type: 'string' },    // what's wrong + the concrete evidence
+          fixHint: { type: 'string' },   // what the NEXT experiment must change
+        },
+      },
+    },
   },
 }
 
@@ -281,11 +300,14 @@ function statePrompt() {
     'Read-only. Do NOT edit files or run experiments. Run these and parse their output:',
     '`evo scratchpad`, `evo frontier` (already prints a JSON envelope), `evo status`, `evo awaiting`.',
     'Also read `.evo/project.md` for the metric goal, direction, and the benchmark-determinism line.',
+    'Also run `evo config get task-skills` (if unset/blank, infer the task category from project.md) and read recent `evo annotations` for durable learnings already found this run.',
     'Return: bestScore + bestExpId; the theoretical ceiling (1.0 for max metric, 0.0 for min)',
     'and direction; the frontier nodes ALREADY ranked by the configured strategy',
     '(id, score, rank) — preserve evo\'s ordering, do not re-rank; the list of evaluated-but-',
     'undecided experiment ids; committedCount (number of committed experiments, from `evo status`);',
     'verifyRepeats (from project.md: 1 if deterministic, 3 if sampling-based / variance-expected);',
+    'taskSkills (category skills a builder should load, e.g. ["finetuning"] — from `evo config get task-skills`, else inferred from project.md);',
+    'knownLearnings (short durable lessons from annotations to apply up front: trainer-API quirks, device placement, eval-side config, etc.);',
     'and a 2-3 sentence scratchpad summary for subagent context.',
   ].join(' ')
 }
@@ -305,6 +327,7 @@ function scanBrief(batch) {
     '- Shared failure causes -- root-cause reasons recurring across 2+ experiments (the *why*, not the surface gate name).',
     '- Wall patterns -- approaches or gates multiple experiments consistently fail on.',
     '- Compound-failure standouts -- single experiments hitting multiple failure modes.',
+    '- Axis exhaustion vs fixable plumbing -- read each node\'s `failure_class` (build|eval|hypothesis) from outcome.json. A cluster of `hypothesis` failures across STRUCTURALLY DISTINCT approaches means the axis itself is unpromising (flag it so the next briefs diverge); `build`/`eval` failures are fixable plumbing (recipe/scoring) and must NOT be read as axis exhaustion.',
     '',
     'Evidence must be VERBATIM quotes from outcome.json fields, trace messages, or error text -- not paraphrases. If you cannot cite verbatim evidence for a finding, drop it. Evidence: short quotes (<200 chars), max 3 per finding.',
     'Return JSON only: {"findings":[{"description","experiment_ids":[],"evidence":[]}]}.',
@@ -326,6 +349,10 @@ function aggregatePrompt(ids) {
     '~the same score (a plateau), the bottleneck is not where those hypotheses aimed — emit kind:"axis-warning" whose',
     'label names the saturated axis AND suggests the orthogonal axis (harness, score definition, input data, or a',
     'different mechanism) the next briefs should pivot to. At most one axis-warning.',
+    'Also read DISCARDED nodes (`evo discards` + their outcome.json `failure_class`): a cluster of 3+ failure_class="hypothesis"',
+    'discards across STRUCTURALLY DISTINCT approaches is itself an axis-warning (the direction keeps not helping). IGNORE',
+    'failure_class="build"/"eval" discards for axis purposes — those are fixable plumbing (retry/resume or eval-retest), not',
+    'evidence the axis is wrong.',
     'Return JSON only.',
   ].join(' ')
 }
@@ -356,9 +383,24 @@ function briefPrompt(state, findings, patterns, parents, ideated, analystHints) 
 }
 
 // IMPLEMENT — allocate + edit, but do NOT run (a pre-run verifier audits the edit first).
+// Context capsule shared by every builder/runner lane: which category skills to load on demand,
+// and the durable learnings to apply up front — so a fresh stateless agent inherits the priors and
+// hard-won lessons a prose single-subagent would have had, instead of rediscovering them.
+function capsuleLines(state) {
+  const skills = (state && state.taskSkills) || []
+  const learnings = (state && state.knownLearnings) || []
+  const lines = []
+  lines.push(skills.length
+    ? `Task-category skills — load IN FULL via your host skill loader if the work needs them (they carry this category's priors, recipes, and pre-run checks): ${skills.join(', ')}.`
+    : "Identify the task category from `.evo/project.md` and load the matching evo skill (e.g. evo:finetuning for a training move) IN FULL before you build — it carries this category's priors and pre-run checks.")
+  if (learnings.length) lines.push(`KNOWN LEARNINGS to apply before acting (already found this run — do not rediscover): ${JSON.stringify(learnings)}.`)
+  return lines
+}
+
 function implementPrompt(brief, parent, state) {
   return [
     `First, load and follow the evo subagent skill: Read ${pr}/skills/subagent/SKILL.md IN FULL and follow it as your operating protocol — do not skip it even if the brief looks simple.`,
+    ...capsuleLines(state),
     `Allocate your experiment via \`evo new --parent ${parent}\`, then edit inside the returned worktree to implement the brief.`,
     'IMPORTANT: do NOT run `evo run` yet — a pre-run verifier audits your change first. Stop once the edit is complete.',
     'Do NOT edit benchmark, gate, or framework code; do NOT weaken/bypass any gate.',
@@ -397,12 +439,14 @@ function revisePrompt(expId, worktree, findings) {
 }
 
 // RUN — evaluate + commit the (pre-verified) experiment.
-function runPrompt(expId) {
+function runPrompt(expId, state) {
   return [
     `First, load the evo subagent skill: Read ${pr}/skills/subagent/SKILL.md IN FULL and follow its run protocol (it covers \`evo run ${expId} --check\` for non-committing wiring validation that does not consume the attempt budget).`,
-    `CRITICAL ordering: if this experiment produces its artifact through a build or training step (e.g. a finetune that writes final_model/), run that step to COMPLETION and confirm the artifact exists BEFORE the real run. Never call \`evo run\` while training is still in flight or before final_model/ exists — evaluating a not-yet-produced model is the "final_model not found" failure and it wastes the attempt. If the experiment trains, the parent checkpoint is in EVO_PARENT_POLICY (warm-start from it; do not retrain from base).`,
+    ...capsuleLines(state),
+    `CRITICAL ordering: if this experiment produces an output artifact through a build or training step (whatever your recipe declares — a checkpoint dir, adapter, merged model, index, etc.), run that step to COMPLETION and confirm the artifact exists BEFORE the real run. Never call \`evo run\` while that step is still in flight or before its output exists — evaluating a not-yet-produced artifact wastes the attempt. If the experiment warm-starts, the parent's reusable artifact is in EVO_PARENT_POLICY (start from it; do not redo from scratch).`,
     `Then run \`evo run ${expId}\` to evaluate and (if it improves and passes gates) commit it.`,
     'If it exits GATE_FAILED, do not fight the gate — report status=evaluated.',
+    'If `evo run` is terminated externally mid-flight (the concurrent analyst can STOP a doomed experiment — it aborts the run and discards this node with a diagnosis), do NOT retry: report status:none and stop. The diagnosis is already recorded as an annotation and will steer the next brief.',
     `Return: expIds:["${expId}"]; status (committed|evaluated|failed|none); committedImprover = true ONLY if evo printed COMMITTED;`,
     'bestExpId + bestScore (required when committedImprover is true); any gates added; learnings.',
   ].join(' ')
@@ -468,7 +512,9 @@ function analystPrompt(ctx, intervalS, reported) {
     '- Stuck experiment / time-budget overrun: from `evo status`/`evo show`, an experiment active far longer than its peers, or a round overrunning the others. ALERT.',
     '- Stuck axis: from `evo tree`, 3+ structurally-distinct committed hypotheses plateaued at ~the same score → name the saturated axis + one orthogonal axis. BRIEF HINT.',
     '- Dead direction / ignored mechanism: annotations repeatedly naming a mechanism the recent work ignores, or a direction that keeps regressing. BRIEF HINT.',
-    'Return {briefHints:[...], alerts:[...]}. briefHints feed the NEXT round\'s briefs (work-quality redirections); alerts surface to the user (runtime/host issues). Empty arrays are fine — most ticks should be quiet.',
+    '- Heading toward failure (STOP): an in-flight experiment that is CLEARLY doomed or wasting the budget — a divergent / NaN / flatlined progress metric; projected completion beyond the remaining time budget; or a known-fatal signature (e.g. output the scorer cannot parse; a silent resource mis-placement that tanks throughput with no error; a corrupt input/format that invalidates the result). HIGH PRECISION ONLY: default to NOT stopping — recommend a STOP only with concrete evidence that finishing is wasted, and only for an experiment still `active`. Emit a stop with: expId; failureClass (build = the build/produce step is broken; eval = artifact is fine but scoring/serving is wrong; hypothesis = it runs but won\'t help); reason (the diagnosis + the evidence you saw); fixHint (what the NEXT experiment must change).',
+    'You stay READ-ONLY: do NOT run `evo abort` / `evo discard` yourself. A gated enforcer acts on each stop — it aborts the run + its subprocess tree, annotates your diagnosis (so it outlives the worktree and feeds the next round), and discards with the failureClass so the partial artifact is preserved. A STOP is a diagnosed, recoverable stop, never a silent kill.',
+    'Return {briefHints:[...], alerts:[...], stops:[...]}. briefHints feed the NEXT round\'s briefs; alerts surface to the user; each stop triggers the gated enforcer (and its fixHint also feeds the next brief). All-empty is fine — most ticks should be quiet.',
   ].join('\n')
 }
 
@@ -476,6 +522,16 @@ function analystPrompt(ctx, intervalS, reported) {
 // iteration budget (deepening the branch each time a committed improver lands). The independent
 // evo:verifier gates EACH run for design-time cheating BEFORE the experiment is evaluated; its
 // findings are fed back to a revise agent on the same experiment until it passes or is discarded.
+//
+// Lane decomposition (decompose only at CONTEXT SEAMS): build+eval are a SINGLE agent — `run`
+// produces the artifact and evaluates it end-to-end (one coherent context, no handoff mid-build).
+// The only split is `implement` (write the edit) vs `run`, separated by the read-only evo:verifier
+// seam — a genuinely different concern (adversarial diff audit, different agentType/model) that has
+// to interpose between the edit and the expensive run. The two share state by REFERENCE (the
+// worktree on disk), not by passing a context window, and BOTH receive the capsule (category skills
+// + known learnings via capsuleLines), so neither reverts to base-model defaults. Merging implement
+// into run would erase the verifier gate for no real gain, since the code already lives in the
+// worktree the run agent reads.
 async function runBrief(brief, state) {
   let parent = brief.parent
   let best = null
@@ -504,7 +560,7 @@ async function runBrief(brief, state) {
     }
 
     // run -> evaluate + commit
-    const r = await agent(runPrompt(impl.expId), { schema: SUBAGENT_RESULT, phase: 'Optimize', label: `run:${impl.expId}` })
+    const r = await agent(runPrompt(impl.expId, state), { schema: SUBAGENT_RESULT, phase: 'Optimize', label: `run:${impl.expId}` })
     if (!r) break
 
     // post-run validity audit (evo:verifier, post-phase) on committed improvers
@@ -630,6 +686,23 @@ async function optimizeLoop() {
 // DURING rounds (not per-round). Each tick is a FRESH agent (no cross-tick memory), so `reported`
 // holds the dedup state in this closure. Work-quality findings -> analystSignals (next brief);
 // runtime/host alerts -> the run log. Stops when optimizeLoop sets `done`.
+// Gated ENFORCER for an analyst STOP: detect (analyst) and act (this agent) stay separate. Verifies
+// the experiment is still active, then aborts its run (driver + subprocess tree), annotates the
+// diagnosis (survives the worktree + feeds the next round via knownLearnings), and discards with the
+// failure class so the partial artifact is preserved + classified. A STOP is a diagnosed, recoverable
+// stop — never a silent kill.
+function enforceStopPrompt(s) {
+  return [
+    `A concurrent analyst flagged experiment ${s.expId} as heading toward failure and recommends STOPPING it. You are the gated ENFORCER — read-only except for the three evo commands below; do NOT edit code or run training.`,
+    `First VERIFY: run \`evo show ${s.expId}\`. Only proceed if its status is still \`active\`. If it is committed / evaluated / discarded / not found, do NOTHING and report skipped (it already resolved).`,
+    `If still active, run in order:`,
+    `  1. \`evo abort ${s.expId}\` — stop the evo run driver and its subprocess tree.`,
+    `  2. annotate the diagnosis so it outlives the worktree and feeds the next round: \`evo annotate ${s.expId} "STOPPED (${s.failureClass}): ${s.reason} | FIX: ${s.fixHint}"\` (quote carefully).`,
+    `  3. classify + preserve: \`evo discard ${s.expId} --force --failure-class ${s.failureClass} --reason "analyst stop: ${s.reason}"\` (--force because abort already killed the driver; declared artifacts are preserved).`,
+    `Report what you did (aborted / annotated / discarded) or that you skipped because it was no longer active. This is a diagnosed, recoverable stop, not a crash.`,
+  ].join('\n')
+}
+
 async function analystLoop() {
   if (!ANALYST_ENABLED) return
   const reported = []   // closure memory across the stateless ticks (caps re-alerting)
@@ -651,6 +724,21 @@ async function analystLoop() {
       fails = 0   // a real tick resets the failure streak
       for (const h of (tick.briefHints || [])) { analystSignals.push(h); reported.push(h) }
       for (const a of (tick.alerts || [])) { log(`ANALYST ALERT: ${a}`); reported.push(a) }
+      // STOP recommendations: hand each to a gated enforcer (detect/act separation). The fix also
+      // feeds the next round's brief so the loop corrects rather than just abandons.
+      for (const s of (tick.stops || [])) {
+        if (!s || !s.expId) continue
+        const stopKey = `stop:${s.expId}`
+        if (reported.includes(stopKey)) continue   // never re-enforce the same experiment
+        reported.push(stopKey)
+        log(`ANALYST STOP: ${s.expId} [${s.failureClass}] ${s.reason}`)
+        analystSignals.push(`Experiment ${s.expId} was stopped (${s.failureClass}): ${s.reason} — next: ${s.fixHint}`)
+        try {
+          await agent(enforceStopPrompt(s), { phase: 'Analyst', label: `enforce-stop:${s.expId}` })
+        } catch (e) {
+          log(`ANALYST enforce-stop ${s.expId} errored (ignored): ${(e && e.message) || e}`)
+        }
+      }
     } else if (++fails >= ANALYST_MAX_FAILS) {
       // The pacing wait lives INSIDE the agent, so a tick that fails before sleeping (e.g. a schema
       // reject) leaves nothing to pace the retry — left unchecked the loop hot-spins agents. The
