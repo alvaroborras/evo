@@ -65,6 +65,8 @@ const STATE = {
     committedCount: { type: 'integer' },    // total committed experiments (drives the periodic ideator trigger)
     verifyRepeats: { type: 'integer' },     // benchmark noise profile (1 = deterministic, no confirm-loop)
     summary: { type: 'string' },            // short scratchpad summary for subagent context
+    taskSkills: { type: 'array', items: { type: 'string' } },     // category skills a builder should load (e.g. ["finetuning"]) — resolved from config/project, never hardcoded in the workflow
+    knownLearnings: { type: 'array', items: { type: 'string' } }, // durable lessons to apply up front (drained from annotations) so a fresh stateless lane doesn't rediscover them
   },
 }
 
@@ -281,11 +283,14 @@ function statePrompt() {
     'Read-only. Do NOT edit files or run experiments. Run these and parse their output:',
     '`evo scratchpad`, `evo frontier` (already prints a JSON envelope), `evo status`, `evo awaiting`.',
     'Also read `.evo/project.md` for the metric goal, direction, and the benchmark-determinism line.',
+    'Also run `evo config get task-skills` (if unset/blank, infer the task category from project.md) and read recent `evo annotations` for durable learnings already found this run.',
     'Return: bestScore + bestExpId; the theoretical ceiling (1.0 for max metric, 0.0 for min)',
     'and direction; the frontier nodes ALREADY ranked by the configured strategy',
     '(id, score, rank) — preserve evo\'s ordering, do not re-rank; the list of evaluated-but-',
     'undecided experiment ids; committedCount (number of committed experiments, from `evo status`);',
     'verifyRepeats (from project.md: 1 if deterministic, 3 if sampling-based / variance-expected);',
+    'taskSkills (category skills a builder should load, e.g. ["finetuning"] — from `evo config get task-skills`, else inferred from project.md);',
+    'knownLearnings (short durable lessons from annotations to apply up front: trainer-API quirks, device placement, eval-side config, etc.);',
     'and a 2-3 sentence scratchpad summary for subagent context.',
   ].join(' ')
 }
@@ -356,9 +361,24 @@ function briefPrompt(state, findings, patterns, parents, ideated, analystHints) 
 }
 
 // IMPLEMENT — allocate + edit, but do NOT run (a pre-run verifier audits the edit first).
+// Context capsule shared by every builder/runner lane: which category skills to load on demand,
+// and the durable learnings to apply up front — so a fresh stateless agent inherits the priors and
+// hard-won lessons a prose single-subagent would have had, instead of rediscovering them.
+function capsuleLines(state) {
+  const skills = (state && state.taskSkills) || []
+  const learnings = (state && state.knownLearnings) || []
+  const lines = []
+  lines.push(skills.length
+    ? `Task-category skills — load IN FULL via your host skill loader if the work needs them (they carry this category's priors, recipes, and pre-run checks): ${skills.join(', ')}.`
+    : "Identify the task category from `.evo/project.md` and load the matching evo skill (e.g. evo:finetuning for a training move) IN FULL before you build — it carries this category's priors and pre-run checks.")
+  if (learnings.length) lines.push(`KNOWN LEARNINGS to apply before acting (already found this run — do not rediscover): ${JSON.stringify(learnings)}.`)
+  return lines
+}
+
 function implementPrompt(brief, parent, state) {
   return [
     `First, load and follow the evo subagent skill: Read ${pr}/skills/subagent/SKILL.md IN FULL and follow it as your operating protocol — do not skip it even if the brief looks simple.`,
+    ...capsuleLines(state),
     `Allocate your experiment via \`evo new --parent ${parent}\`, then edit inside the returned worktree to implement the brief.`,
     'IMPORTANT: do NOT run `evo run` yet — a pre-run verifier audits your change first. Stop once the edit is complete.',
     'Do NOT edit benchmark, gate, or framework code; do NOT weaken/bypass any gate.',
@@ -397,10 +417,11 @@ function revisePrompt(expId, worktree, findings) {
 }
 
 // RUN — evaluate + commit the (pre-verified) experiment.
-function runPrompt(expId) {
+function runPrompt(expId, state) {
   return [
     `First, load the evo subagent skill: Read ${pr}/skills/subagent/SKILL.md IN FULL and follow its run protocol (it covers \`evo run ${expId} --check\` for non-committing wiring validation that does not consume the attempt budget).`,
-    `CRITICAL ordering: if this experiment produces its artifact through a build or training step (e.g. a finetune that writes final_model/), run that step to COMPLETION and confirm the artifact exists BEFORE the real run. Never call \`evo run\` while training is still in flight or before final_model/ exists — evaluating a not-yet-produced model is the "final_model not found" failure and it wastes the attempt. If the experiment trains, the parent checkpoint is in EVO_PARENT_POLICY (warm-start from it; do not retrain from base).`,
+    ...capsuleLines(state),
+    `CRITICAL ordering: if this experiment produces an output artifact through a build or training step (whatever your recipe declares — a checkpoint dir, adapter, merged model, index, etc.), run that step to COMPLETION and confirm the artifact exists BEFORE the real run. Never call \`evo run\` while that step is still in flight or before its output exists — evaluating a not-yet-produced artifact wastes the attempt. If the experiment warm-starts, the parent's reusable artifact is in EVO_PARENT_POLICY (start from it; do not redo from scratch).`,
     `Then run \`evo run ${expId}\` to evaluate and (if it improves and passes gates) commit it.`,
     'If it exits GATE_FAILED, do not fight the gate — report status=evaluated.',
     `Return: expIds:["${expId}"]; status (committed|evaluated|failed|none); committedImprover = true ONLY if evo printed COMMITTED;`,
@@ -504,7 +525,7 @@ async function runBrief(brief, state) {
     }
 
     // run -> evaluate + commit
-    const r = await agent(runPrompt(impl.expId), { schema: SUBAGENT_RESULT, phase: 'Optimize', label: `run:${impl.expId}` })
+    const r = await agent(runPrompt(impl.expId, state), { schema: SUBAGENT_RESULT, phase: 'Optimize', label: `run:${impl.expId}` })
     if (!r) break
 
     // post-run validity audit (evo:verifier, post-phase) on committed improvers
