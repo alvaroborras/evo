@@ -183,10 +183,27 @@ const PREVERDICT = {
 // Analyst tick output: work-quality hints (fed into the next brief) + runtime/host alerts (surfaced).
 const ANALYST_FINDINGS = {
   type: 'object',
-  required: ['briefHints', 'alerts'],
+  required: ['briefHints', 'alerts', 'stops'],
   properties: {
     briefHints: { type: 'array', items: { type: 'string' } },
     alerts: { type: 'array', items: { type: 'string' } },
+    // STOP recommendations for in-flight experiments that are clearly doomed.
+    // A stop is NOT a crash: each carries the diagnosis + a fix so the gated
+    // enforcer can abort, annotate (lesson outlives the worktree), and classify+
+    // preserve — and the fix feeds the next round (and, if general, a skill prior).
+    stops: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['expId', 'failureClass', 'reason', 'fixHint'],
+        properties: {
+          expId: { type: 'string' },
+          failureClass: { enum: ['build', 'eval', 'hypothesis'] },
+          reason: { type: 'string' },    // what's wrong + the concrete evidence
+          fixHint: { type: 'string' },   // what the NEXT experiment must change
+        },
+      },
+    },
   },
 }
 
@@ -489,7 +506,9 @@ function analystPrompt(ctx, intervalS, reported) {
     '- Stuck experiment / time-budget overrun: from `evo status`/`evo show`, an experiment active far longer than its peers, or a round overrunning the others. ALERT.',
     '- Stuck axis: from `evo tree`, 3+ structurally-distinct committed hypotheses plateaued at ~the same score → name the saturated axis + one orthogonal axis. BRIEF HINT.',
     '- Dead direction / ignored mechanism: annotations repeatedly naming a mechanism the recent work ignores, or a direction that keeps regressing. BRIEF HINT.',
-    'Return {briefHints:[...], alerts:[...]}. briefHints feed the NEXT round\'s briefs (work-quality redirections); alerts surface to the user (runtime/host issues). Empty arrays are fine — most ticks should be quiet.',
+    '- Heading toward failure (STOP): an in-flight experiment that is CLEARLY doomed or wasting the budget — divergent/NaN loss; projected completion beyond the remaining time budget; or a known-fatal signature (e.g. device_map offload making training run ~5x slow at a fraction of GPU memory; chat-template / tokenizer corruption that invalidates eval). HIGH PRECISION ONLY: default to NOT stopping — recommend a STOP only with concrete evidence that finishing is wasted, and only for an experiment still `active`. Emit a stop with: expId; failureClass (build = the build/train step is broken; eval = artifact is fine but scoring/serving is wrong; hypothesis = it runs but won\'t help); reason (the diagnosis + the evidence you saw); fixHint (what the NEXT experiment must change).',
+    'You stay READ-ONLY: do NOT run `evo abort` / `evo discard` yourself. A gated enforcer acts on each stop — it aborts the run + its subprocess tree, annotates your diagnosis (so it outlives the worktree and feeds the next round), and discards with the failureClass so the partial artifact is preserved. A STOP is a diagnosed, recoverable stop, never a silent kill.',
+    'Return {briefHints:[...], alerts:[...], stops:[...]}. briefHints feed the NEXT round\'s briefs; alerts surface to the user; each stop triggers the gated enforcer (and its fixHint also feeds the next brief). All-empty is fine — most ticks should be quiet.',
   ].join('\n')
 }
 
@@ -661,6 +680,23 @@ async function optimizeLoop() {
 // DURING rounds (not per-round). Each tick is a FRESH agent (no cross-tick memory), so `reported`
 // holds the dedup state in this closure. Work-quality findings -> analystSignals (next brief);
 // runtime/host alerts -> the run log. Stops when optimizeLoop sets `done`.
+// Gated ENFORCER for an analyst STOP: detect (analyst) and act (this agent) stay separate. Verifies
+// the experiment is still active, then aborts its run (driver + subprocess tree), annotates the
+// diagnosis (survives the worktree + feeds the next round via knownLearnings), and discards with the
+// failure class so the partial artifact is preserved + classified. A STOP is a diagnosed, recoverable
+// stop — never a silent kill.
+function enforceStopPrompt(s) {
+  return [
+    `A concurrent analyst flagged experiment ${s.expId} as heading toward failure and recommends STOPPING it. You are the gated ENFORCER — read-only except for the three evo commands below; do NOT edit code or run training.`,
+    `First VERIFY: run \`evo show ${s.expId}\`. Only proceed if its status is still \`active\`. If it is committed / evaluated / discarded / not found, do NOTHING and report skipped (it already resolved).`,
+    `If still active, run in order:`,
+    `  1. \`evo abort ${s.expId}\` — stop the evo run driver and its subprocess tree.`,
+    `  2. annotate the diagnosis so it outlives the worktree and feeds the next round: \`evo annotate ${s.expId} "STOPPED (${s.failureClass}): ${s.reason} | FIX: ${s.fixHint}"\` (quote carefully).`,
+    `  3. classify + preserve: \`evo discard ${s.expId} --force --failure-class ${s.failureClass} --reason "analyst stop: ${s.reason}"\` (--force because abort already killed the driver; declared artifacts are preserved).`,
+    `Report what you did (aborted / annotated / discarded) or that you skipped because it was no longer active. This is a diagnosed, recoverable stop, not a crash.`,
+  ].join('\n')
+}
+
 async function analystLoop() {
   if (!ANALYST_ENABLED) return
   const reported = []   // closure memory across the stateless ticks (caps re-alerting)
@@ -682,6 +718,21 @@ async function analystLoop() {
       fails = 0   // a real tick resets the failure streak
       for (const h of (tick.briefHints || [])) { analystSignals.push(h); reported.push(h) }
       for (const a of (tick.alerts || [])) { log(`ANALYST ALERT: ${a}`); reported.push(a) }
+      // STOP recommendations: hand each to a gated enforcer (detect/act separation). The fix also
+      // feeds the next round's brief so the loop corrects rather than just abandons.
+      for (const s of (tick.stops || [])) {
+        if (!s || !s.expId) continue
+        const stopKey = `stop:${s.expId}`
+        if (reported.includes(stopKey)) continue   // never re-enforce the same experiment
+        reported.push(stopKey)
+        log(`ANALYST STOP: ${s.expId} [${s.failureClass}] ${s.reason}`)
+        analystSignals.push(`Experiment ${s.expId} was stopped (${s.failureClass}): ${s.reason} — next: ${s.fixHint}`)
+        try {
+          await agent(enforceStopPrompt(s), { phase: 'Analyst', label: `enforce-stop:${s.expId}` })
+        } catch (e) {
+          log(`ANALYST enforce-stop ${s.expId} errored (ignored): ${(e && e.message) || e}`)
+        }
+      }
     } else if (++fails >= ANALYST_MAX_FAILS) {
       // The pacing wait lives INSIDE the agent, so a tick that fails before sleeping (e.g. a schema
       // reject) leaves nothing to pace the retry — left unchecked the loop hot-spins agents. The
