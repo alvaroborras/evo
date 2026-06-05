@@ -43,3 +43,19 @@ def test_stop_is_dispatched_and_fed_forward():
     assert "tick.stops" in JS
     assert "enforce-stop" in JS
     assert "analystSignals.push" in JS
+
+
+def test_scan_clusters_on_failure_class_for_divergence():
+    # #7: the EXISTING scan/aggregate own cluster->diverge; they must use failure_class so a cluster
+    # of hypothesis-class failures triggers an axis-warning while build/eval are treated as fixable.
+    assert "failure_class" in JS
+    assert "axis-warning" in JS
+    # hypothesis-class clusters drive divergence; build/eval are fixable plumbing, not axis exhaustion
+    assert "fixable plumbing" in JS
+
+
+def test_run_lane_handles_external_abort_without_retry():
+    # Loop-resume: when the analyst STOP aborts a run mid-flight, the run lane must report none and
+    # NOT retry, so the workflow proceeds cleanly to the next round (which carries the fix).
+    assert "terminated externally" in JS
+    assert "do NOT retry" in JS

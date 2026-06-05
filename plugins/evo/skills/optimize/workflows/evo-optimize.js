@@ -327,6 +327,7 @@ function scanBrief(batch) {
     '- Shared failure causes -- root-cause reasons recurring across 2+ experiments (the *why*, not the surface gate name).',
     '- Wall patterns -- approaches or gates multiple experiments consistently fail on.',
     '- Compound-failure standouts -- single experiments hitting multiple failure modes.',
+    '- Axis exhaustion vs fixable plumbing -- read each node\'s `failure_class` (build|eval|hypothesis) from outcome.json. A cluster of `hypothesis` failures across STRUCTURALLY DISTINCT approaches means the axis itself is unpromising (flag it so the next briefs diverge); `build`/`eval` failures are fixable plumbing (recipe/scoring) and must NOT be read as axis exhaustion.',
     '',
     'Evidence must be VERBATIM quotes from outcome.json fields, trace messages, or error text -- not paraphrases. If you cannot cite verbatim evidence for a finding, drop it. Evidence: short quotes (<200 chars), max 3 per finding.',
     'Return JSON only: {"findings":[{"description","experiment_ids":[],"evidence":[]}]}.',
@@ -348,6 +349,10 @@ function aggregatePrompt(ids) {
     '~the same score (a plateau), the bottleneck is not where those hypotheses aimed — emit kind:"axis-warning" whose',
     'label names the saturated axis AND suggests the orthogonal axis (harness, score definition, input data, or a',
     'different mechanism) the next briefs should pivot to. At most one axis-warning.',
+    'Also read DISCARDED nodes (`evo discards` + their outcome.json `failure_class`): a cluster of 3+ failure_class="hypothesis"',
+    'discards across STRUCTURALLY DISTINCT approaches is itself an axis-warning (the direction keeps not helping). IGNORE',
+    'failure_class="build"/"eval" discards for axis purposes — those are fixable plumbing (retry/resume or eval-retest), not',
+    'evidence the axis is wrong.',
     'Return JSON only.',
   ].join(' ')
 }
@@ -441,6 +446,7 @@ function runPrompt(expId, state) {
     `CRITICAL ordering: if this experiment produces an output artifact through a build or training step (whatever your recipe declares — a checkpoint dir, adapter, merged model, index, etc.), run that step to COMPLETION and confirm the artifact exists BEFORE the real run. Never call \`evo run\` while that step is still in flight or before its output exists — evaluating a not-yet-produced artifact wastes the attempt. If the experiment warm-starts, the parent's reusable artifact is in EVO_PARENT_POLICY (start from it; do not redo from scratch).`,
     `Then run \`evo run ${expId}\` to evaluate and (if it improves and passes gates) commit it.`,
     'If it exits GATE_FAILED, do not fight the gate — report status=evaluated.',
+    'If `evo run` is terminated externally mid-flight (the concurrent analyst can STOP a doomed experiment — it aborts the run and discards this node with a diagnosis), do NOT retry: report status:none and stop. The diagnosis is already recorded as an annotation and will steer the next brief.',
     `Return: expIds:["${expId}"]; status (committed|evaluated|failed|none); committedImprover = true ONLY if evo printed COMMITTED;`,
     'bestExpId + bestScore (required when committedImprover is true); any gates added; learnings.',
   ].join(' ')
