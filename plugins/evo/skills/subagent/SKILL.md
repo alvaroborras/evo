@@ -140,6 +140,7 @@ see `references/cli-quick-reference.md` "Reading workspace state".
 ## First Steps
 
 1. Read `.evo/project.md` to understand the target, what can be changed, and how to interpret results.
+1a. **Load this task's category skill(s).** Run `evo config get task-skills`; for each name returned (e.g. `finetuning`), load that evo skill IN FULL via your host's skill loader before you form an edit — it carries this category's method priors, recipes, and pre-run checks. If it returns blank, infer the category from `.evo/project.md` and load the matching skill if one applies (the subagent protocol alone covers prompt/code/config tasks). Skipping this is how a builder reverts to base-model defaults and reintroduces known mistakes (wrong device placement, stale trainer APIs, eval-before-build).
 2. Read the scratchpad for current state: `evo scratchpad`
    It surfaces: best path (★-marked in the tree), frontier (strategy-ranked branchable nodes), evaluated nodes awaiting decision, gates, annotations, what not to try, infra events, and notes. The Drill-downs section at the bottom lists the read-only commands for going deeper on any section.
 3. Study the pointer traces from your brief:

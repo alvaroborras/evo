@@ -76,7 +76,7 @@ Settable / gettable fields:
 
 ```
 project-name | target | benchmark | metric | commit-strategy
-max-attempts | gate | frontier-strategy
+max-attempts | gate | frontier-strategy | default-orchestrator | task-skills
 ```
 
 Examples:
@@ -107,6 +107,7 @@ exist for a reason and the dashboard may be writing concurrently).
 | `max_attempts`         | `evo config set max-attempts`       | `evo config get max-attempts`       | Per-experiment retry cap. Default 3.                   |
 | `gate`                 | `evo config set gate`               | `evo config get gate`               | Workspace-default gate. Per-node gates: `evo gate add`. |
 | `frontier_strategy`    | `evo config set frontier-strategy`  | `evo config get frontier-strategy`  | Kinds: `argmax`, `top_k`, `epsilon_greedy`, `softmax`, `pareto_per_task`. |
+| `task_skills`          | `evo config set task-skills`        | `evo config get task-skills`        | Comma-separated evo skill name(s) a builder loads for this task's category (e.g. `finetuning`). Set by `discover`; read by prose subagents + workflow lanes. Empty = subagent protocol suffices. |
 | `runtime` recipe       | `evo config runtime set`            | `evo config runtime show`           | `--prepare`, `--before-run`, `--prefix`.               |
 | `runtime_env`          | `evo env load/inherit-shell/clear`  | `evo env show`                      | Separate top-level command.                            |
 | `execution_backend`    | `evo config backend <name>`         | `evo config backend show`           | `worktree`, `pool`, `remote`.                          |

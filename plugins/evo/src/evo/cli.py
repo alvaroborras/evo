@@ -592,6 +592,7 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     print(f"default_autonomous: {str(bool(data.get('default_autonomous'))).lower()}")
     print(f"default_subagents_only: {str(bool(data.get('default_subagents_only'))).lower()}")
     print(f"default_orchestrator: {data.get('default_orchestrator') or 'prose'}")
+    print(f"task_skills: {', '.join(data.get('task_skills') or []) or '<none>'}")
     print(f"execution_backend: {data.get('execution_backend', 'worktree')}")
     backend_config = data.get("execution_backend_config") or {}
     if backend_config:
@@ -618,6 +619,7 @@ _CONFIG_FIELD_TO_KEY: dict[str, str] = {
     "default-subagents-only": "default_subagents_only",
     "per-exp-timeout": "per_exp_timeout",
     "default-orchestrator": "default_orchestrator",
+    "task-skills": "task_skills",
 }
 
 # Workspace run-behavior defaults captured at discover time. Off by default;
@@ -715,6 +717,12 @@ def cmd_config_set(args: argparse.Namespace) -> int:
             if value not in {"prose", "workflow"}:
                 raise RuntimeError("default-orchestrator must be 'prose' or 'workflow'")
             config["default_orchestrator"] = value
+        elif args.field == "task-skills":
+            # Free-form, comma-separated evo skill names a builder should load for
+            # this task's category (e.g. "finetuning"). Resolved once by discover,
+            # read by every executing agent (prose subagent or workflow lane).
+            names = [s.strip() for s in args.value.split(",") if s.strip()]
+            config["task_skills"] = names or None
         elif args.field in _CONFIG_BOOL_FIELDS:
             config[_CONFIG_FIELD_TO_KEY[args.field]] = _parse_onoff(args.value)
         else:
@@ -5921,6 +5929,7 @@ def build_parser() -> argparse.ArgumentParser:
             "default-subagents-only",
             "per-exp-timeout",
             "default-orchestrator",
+            "task-skills",
         ],
     )
     config_set_p.add_argument(
@@ -5953,6 +5962,7 @@ def build_parser() -> argparse.ArgumentParser:
             "default-subagents-only",
             "per-exp-timeout",
             "default-orchestrator",
+            "task-skills",
         ],
     )
     config_get_p.add_argument("--json", action="store_true",
