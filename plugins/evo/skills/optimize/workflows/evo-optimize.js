@@ -497,6 +497,16 @@ function analystPrompt(ctx, intervalS, reported) {
 // iteration budget (deepening the branch each time a committed improver lands). The independent
 // evo:verifier gates EACH run for design-time cheating BEFORE the experiment is evaluated; its
 // findings are fed back to a revise agent on the same experiment until it passes or is discarded.
+//
+// Lane decomposition (decompose only at CONTEXT SEAMS): build+eval are a SINGLE agent — `run`
+// produces the artifact and evaluates it end-to-end (one coherent context, no handoff mid-build).
+// The only split is `implement` (write the edit) vs `run`, separated by the read-only evo:verifier
+// seam — a genuinely different concern (adversarial diff audit, different agentType/model) that has
+// to interpose between the edit and the expensive run. The two share state by REFERENCE (the
+// worktree on disk), not by passing a context window, and BOTH receive the capsule (category skills
+// + known learnings via capsuleLines), so neither reverts to base-model defaults. Merging implement
+// into run would erase the verifier gate for no real gain, since the code already lives in the
+// worktree the run agent reads.
 async function runBrief(brief, state) {
   let parent = brief.parent
   let best = null
