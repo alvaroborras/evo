@@ -108,7 +108,9 @@ class TestResolvePreservedArtifact(unittest.TestCase):
             with _cd(root):
                 r = _resolve_preserved_artifact(root, "exp_0001")
             self.assertEqual(r["source_exp"], "exp_0001")
-            self.assertTrue(r["path"].endswith("artifacts/discarded/ckpt"))
+            # r["path"] is a native filesystem path (backslashes on Windows);
+            # normalize separators before comparing the suffix.
+            self.assertTrue(r["path"].replace(os.sep, "/").endswith("artifacts/discarded/ckpt"))
 
     def test_multi_source_duplicates_are_deduped(self):
         # the manifest records the same artifact once per declaring source — must
@@ -254,19 +256,26 @@ class TestTaskSkillsConfig(unittest.TestCase):
 class TestDescendantPids(unittest.TestCase):
     def test_finds_child_tree(self):
         from evo.cli import _descendant_pids
-        # parent python that spawns a child sleep, then sleeps itself
-        parent = subprocess.Popen(
-            [PY, "-c", "import subprocess,time; subprocess.Popen(['sleep','30']); time.sleep(30)"]
+        # parent python spawns a child python that sleeps, then sleeps itself.
+        # A python child (not the `sleep` binary) keeps this portable to Windows.
+        spawn = (
+            "import subprocess, sys, time; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            "time.sleep(30)"
         )
+        parent = subprocess.Popen([PY, "-c", spawn])
+        kids = []
         try:
-            time.sleep(1.5)  # let the child spawn
+            time.sleep(2.5)  # let the child spawn and the process table settle
             kids = _descendant_pids(parent.pid)
             self.assertTrue(len(kids) >= 1, f"expected >=1 descendant, got {kids}")
         finally:
-            parent.kill()
-            for pid in _descendant_pids(parent.pid):
+            # captured before killing the parent (descendants reparent on kill);
+            # os.kill(pid, 9) maps to TerminateProcess on Windows.
+            for pid in kids:
                 try:
                     os.kill(pid, 9)
                 except OSError:
                     pass
+            parent.kill()
             parent.wait(timeout=5)

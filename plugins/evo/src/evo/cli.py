@@ -1425,17 +1425,28 @@ def _cmd_dispatch_status(args: argparse.Namespace) -> int:
 def _descendant_pids(pid: int) -> list[int]:
     """Best-effort descendant PIDs of `pid` (children, grandchildren, ...).
 
-    Unix-only via `ps -eo pid=,ppid=`; returns [] on any failure (Windows,
-    missing ps). Used so `evo abort` can take down the benchmark subprocess
-    tree, not just the driver — otherwise a detached/long benchmark child
-    (e.g. a training process) survives as an orphan after the driver dies.
-    Children are captured BEFORE the parent is signalled, while the tree is
-    still intact. killpg is deliberately avoided: the driver may share the
-    caller's process group, and killing the group could take down the shell.
+    Cross-platform: `ps -eo pid=,ppid=` on POSIX, `Win32_Process` via
+    PowerShell on Windows. Returns [] on any failure (missing tool, timeout).
+    Used so `evo abort` can take down the benchmark subprocess tree, not just
+    the driver — otherwise a detached/long benchmark child (e.g. a training
+    process) survives as an orphan after the driver dies. Children are
+    captured BEFORE the parent is signalled, while the tree is still intact.
+    killpg is deliberately avoided: the driver may share the caller's process
+    group, and killing the group could take down the shell.
     """
+    if sys.platform == "win32":
+        # Emit one "<pid> <ppid>" line per process to match the `ps` format
+        # parsed below.
+        cmd = [
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            "Get-CimInstance Win32_Process | "
+            "ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+        ]
+    else:
+        cmd = ["ps", "-eo", "pid=,ppid="]
     try:
         out = subprocess.run(
-            ["ps", "-eo", "pid=,ppid="], capture_output=True, text=True, timeout=5,
+            cmd, capture_output=True, text=True, timeout=10,
         ).stdout
     except Exception:
         return []
