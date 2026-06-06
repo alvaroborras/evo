@@ -2415,8 +2415,8 @@ function formatBytes(n) {
 function stripAnsi(text) {
   if (!text) return '';
   return text
-    .replace(/\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/\[[0-9;]*m/g, '');
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/\[[0-9;]+[A-Za-z]/g, '');
 }
 
 // Fetch all annotations and return {global: [...], byTask: {tid: ann}}
