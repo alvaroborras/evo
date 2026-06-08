@@ -444,18 +444,24 @@ Proposals are advisory, not mandatory. If none look better than what step 3's sc
 - User hasn't interrupted
 - Score hasn't reached the theoretical maximum
 
+To continue, go back to step 1.
+
 **Stop** if:
 - Stall counter >= stall limit (N consecutive rounds with no improvement)
 - Score reached theoretical maximum (1.0 for max metric, 0.0 for min metric)
 - User interrupted
 
-On stop, print a final summary:
+On stop, the loop is done -- do not go back to step 1. Print a final summary:
 - Best score achieved and experiment ID
 - Total experiments run across all rounds
 - The winning diff: `evo diff <best_exp_id>`
 - Suggested next steps if the score hasn't converged
-
-Go back to step 1.
+- **How to land it:** point the user at `/evo:ship` to turn the winning
+  experiment into a mergeable change (a PR when the repo has a remote, else a
+  merge into the working branch). The raw winning diff is not the artifact to
+  merge by hand -- `/evo:ship` distills it to the minimal clean change and
+  attaches a mergeability report. Mention this whenever the run produced a
+  committed experiment that beats the baseline.
 
 ## Polling discipline
 
