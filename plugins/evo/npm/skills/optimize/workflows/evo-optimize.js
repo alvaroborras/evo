@@ -5,7 +5,7 @@
  * opt-in, Claude-Code-only driver; the prose skill remains the canonical, host-agnostic
  * default. The workflow encodes the loop CONTROL: while/stall, mandatory scan + cross-history
  * axis check, research escalation (ideators on stall / every ~5 commits), brief + diversity,
- * fan-out + verify, collect + frontier-select. A concurrent META thread (Opus, self-paced,
+ * fan-out + verify, collect + frontier-select. A concurrent META thread (session model, self-paced,
  * read-only) runs alongside the round loop via Promise.all — host + cross-history checks during
  * rounds, feeding hints into the next brief. All domain work goes through the `evo` CLI inside
  * agents — the script itself never touches the filesystem/shell.
@@ -36,7 +36,7 @@ export const meta = {
     { title: 'Optimize', detail: 'parallel optimization subagents (evo new/run)' },
     { title: 'Verify',   detail: 'validity audit + benchmark-noise confirm' },
     { title: 'Collect',  detail: 'prune dead lineages, record cross-cutting notes' },
-    { title: 'Meta',      detail: 'concurrent controller (Opus) — host/cross-history checks, STOP doomed runs, suggest directions, AND restructure the workflow live (logic flow + prompts)' },
+    { title: 'Meta',      detail: 'concurrent controller (session model) — host/cross-history checks, STOP doomed runs, suggest directions, AND restructure the workflow live (logic flow + prompts)' },
     { title: 'Meta-step', detail: 'extra agent step the meta injected into the round via an inject-step harness edit' },
   ],
 }
@@ -188,6 +188,10 @@ const META_FINDINGS = {
   properties: {
     briefHints: { type: 'array', items: { type: 'string' } },
     alerts: { type: 'array', items: { type: 'string' } },
+    // META-LOG: a working note to the meta's FUTURE ticks (each tick is a fresh agent — this is
+    // its only reasoning memory). Observations, pending hypotheses, evidence trails, watch-items.
+    // The loop accumulates these and feeds recent entries back into every tick's prompt.
+    journal: { type: 'string' },
     // STOP recommendations for in-flight experiments that are clearly doomed.
     // A stop is NOT a crash: each carries the diagnosis + a fix so the gated
     // enforcer can abort, annotate (lesson outlives the worktree), and classify+
@@ -206,10 +210,10 @@ const META_FINDINGS = {
       },
     },
     // FREE-WILL harness edits: the meta agent restructures the WORKFLOW itself, live
-    // (its logic flow + prompts). Applied directly each tick — no allow-list, no caps —
-    // and audited (editLog + run log + returned state). It edits only the search harness;
-    // it never touches the benchmark / grader / verifier (those are not part of the
-    // workflow it controls, so they stay fixed and the score stays comparable).
+    // (its logic flow + prompts, including the two verifier-gate prompts). Applied directly
+    // each tick — no allow-list, no caps — and audited (editLog + run log + returned state).
+    // It never touches the benchmark / grader / scorer (those define how results are judged,
+    // so they stay fixed and the score stays comparable).
     harnessEdits: {
       type: 'array',
       items: {
@@ -224,8 +228,10 @@ const META_FINDINGS = {
           // toggle-phase — turn a discretionary phase on/off
           phaseName: { enum: ['scan', 'ideate'] },
           enabled: { type: 'boolean' },
-          // set-prompt — edit a prompt the workflow uses (append a directive or replace it wholesale)
-          target: { enum: ['state', 'scan', 'aggregate', 'brief', 'implement', 'run', 'ideator', 'collect'] },
+          // set-prompt — edit a prompt the workflow uses. Appends ACCUMULATE (each adds a standing
+          // directive); replace swaps the base prompt wholesale. preverify/audit cover the two
+          // verifier gates (design-time cheating audit, post-run validity audit).
+          target: { enum: ['state', 'scan', 'aggregate', 'brief', 'implement', 'run', 'ideator', 'collect', 'preverify', 'audit'] },
           mode: { enum: ['append', 'replace'] },
           text: { type: 'string' },
           // inject-step — add an extra agent step at a fixed seam each round
@@ -257,7 +263,7 @@ const IDEATE_EVERY_COMMITS = 5   // periodic research cadence (matches prose ste
 const PREVERIFY_MAX = 3          // pre-run verify <-> revise attempts before discarding a rigged edit
 // Concurrent meta thread (runs alongside the round loop, NOT per-round).
 const META_ENABLED = true
-const META_MODEL = 'opus'    // the meta always reasons with Opus (judgment-heavy)
+const META_MODEL = 'inherit' // the meta reasons with the session model (judgment-heavy; never below the loop it supervises)
 const META_INTERVAL_S = 300  // self-pace: observe ~every 5 min, during rounds
 const META_HOP_S = 15        // the wait is INTERRUPTIBLE in hops of this size: when the optimize loop
                                 // ends mid-wait it drops a sentinel the meta polls, so the in-flight
@@ -524,18 +530,21 @@ function collectPrompt(results, round) {
   ].join(' ')
 }
 
-// One meta tick (a FRESH Opus agent each call — no memory across ticks, so `reported` carries
-// the dedup state in the loop's closure). Read-only: observes host + cross-history signals DURING
+// One meta tick (a FRESH agent each call — no memory across ticks: `reported` carries the dedup
+// state and `metaJournal` the reasoning notes, both in the loop's closure). Read-only: observes
+// host + cross-history signals DURING
 // rounds, returns work-quality briefHints (folded into the next brief) + runtime alerts (surfaced).
-function metaPrompt(ctx, intervalS, reported) {
+function metaPrompt(ctx, intervalS, reported, journal) {
   return [
     'You are the evo META agent — an independent controller running CONCURRENTLY with the optimize loop.',
-    'You do NOT edit experiment code, run experiments, or touch the benchmark/grader/verifier. But you DO shape the optimize WORKFLOW: stop doomed experiments, suggest next directions (briefHints), AND restructure the running workflow itself — its logic flow + prompts — via harnessEdits (your distinctive power, detailed below).',
+    'You do NOT edit experiment code, run experiments, or touch the benchmark/grader. But you DO shape the optimize WORKFLOW: stop doomed experiments, suggest next directions (briefHints), AND restructure the running workflow itself — its logic flow + prompts, including the two verifier-gate prompts (preverify, audit) — via harnessEdits (your distinctive power, detailed below).',
     `FIRST pace yourself with an INTERRUPTIBLE wait, so you stop promptly when the optimize loop ends. Run this single Bash command with a tool timeout of at least ${(intervalS + 30) * 1000} ms:`,
     `  \`if [ -f ${DONE_SENTINEL} ]; then echo OPTIMIZE_DONE; else for i in $(seq 1 ${Math.ceil(intervalS / META_HOP_S)}); do sleep ${META_HOP_S}; [ -f ${DONE_SENTINEL} ] && { echo OPTIMIZE_DONE; break; }; done; fi\``,
     `If that prints OPTIMIZE_DONE, the optimize loop has finished — return {"briefHints":[],"alerts":[],"stops":[],"harnessEdits":[]} immediately WITHOUT gathering any signals. Otherwise the full interval elapsed: now gather signals and report.`,
     `Current loop state: round=${ctx.round}, stall=${ctx.stall}/${LIMIT}, best=${ctx.bestScore}.`,
     `Already reported (do NOT repeat — only emit findings NEW since these): ${JSON.stringify(reported || [])}.`,
+    `META-LOG (notes your past ticks left for you — each tick is a fresh agent, this is your only reasoning memory): ${JSON.stringify(journal || [])}.`,
+    'Optionally return `journal`: one concise working note to your future ticks — observations not yet actionable, pending hypotheses with the evidence so far, watch-items to re-check. Omit it when there is nothing worth carrying forward.',
     'Walk these checks (skip any whose inputs are unavailable; cite evidence; nothing speculative):',
     '- Zombie GPU: `nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader` + `ps` — a PID holding >=4GB not tied to an active `evo run`. ALERT with a verify clause (do NOT kill).',
     '- Buried stderr warning: tail recent experiment stderr under `.evo/run_*/experiments/*/attempts/*/` for tokenizer / EOS / chat_template / parity-mismatch lines not already annotated. ALERT.',
@@ -546,8 +555,8 @@ function metaPrompt(ctx, intervalS, reported) {
     'For STOPs you stay READ-ONLY: do NOT run `evo abort` / `evo discard` yourself. A gated enforcer acts on each stop — it aborts the run + its subprocess tree, annotates your diagnosis (so it outlives the worktree and feeds the next round), and discards with the failureClass so the partial artifact is preserved. A STOP is a diagnosed, recoverable stop, never a silent kill.',
     '',
     'HARNESS CONTROL (your distinctive power): you may restructure the optimize workflow itself, live, when you judge it will help — edits apply directly (free will) and take effect next round. Current harness state: ' + JSON.stringify(harnessSummary()) + '.',
-    'harnessEdits ops: (1) set-knob {knob: width|budget|stall|ideateEvery|ideateStall, value} — retune the loop (widen the round, deepen branches, change the stall limit or ideation cadence). (2) toggle-phase {phaseName: scan|ideate, enabled} — turn a phase off/on (e.g. skip scan when traces are uninformative; force ideation early). (3) set-prompt {target: state|scan|aggregate|brief|implement|run|ideator|collect, mode: append|replace, text} — edit the prompt that step uses (append a directive, or replace it wholesale). (4) inject-step {at: before-scan|after-scan|before-brief|after-collect, text, label} — add an extra agent step at that seam each round. Every edit needs a rationale citing the evidence.',
-    'HARD CONSTRAINT: edit ONLY the search harness above. NEVER propose edits to the benchmark, grader, scorer, held-out test, or any gate — those define how results are judged; if you change them the score stops meaning anything. Emit harnessEdits ONLY with concrete evidence the current workflow SHAPE is the bottleneck; most ticks should emit none.',
+    'harnessEdits ops: (1) set-knob {knob: width|budget|stall|ideateEvery|ideateStall, value} — retune the loop (widen the round, deepen branches, change the stall limit or ideation cadence). (2) toggle-phase {phaseName: scan|ideate, enabled} — turn a phase off/on (e.g. skip scan when traces are uninformative; force ideation early). (3) set-prompt {target: state|scan|aggregate|brief|implement|run|ideator|collect|preverify|audit, mode: append|replace, text} — edit the prompt that step uses. Appends ACCUMULATE as standing directives (the current ones are visible in the harness state above — do not re-add them); replace swaps the base wholesale. Use preverify/audit to harden the verifier when you spot a cheat pattern the audit missed. (4) inject-step {at: before-scan|after-scan|before-brief|after-collect, text, label} — add an extra agent step at that seam each round. Every edit needs a rationale citing the evidence.',
+    'HARD CONSTRAINT: edit ONLY the search harness above. NEVER propose edits to the benchmark, grader, scorer, held-out test, or any gate — those define how results are judged; if you change them the score stops meaning anything. Verifier prompt edits are the one sanctioned contact with judging. Emit harnessEdits ONLY with concrete evidence the current workflow SHAPE is the bottleneck; most ticks should emit none.',
     'Return {briefHints:[...], alerts:[...], stops:[...], harnessEdits:[...]}. briefHints feed the NEXT round\'s briefs; alerts surface to the user; each stop triggers the gated enforcer; each harnessEdit is applied directly to the running workflow. All-empty is fine — most ticks should be quiet.',
   ].join('\n')
 }
@@ -571,20 +580,20 @@ async function runBrief(brief, state) {
   let best = null
   for (let depth = 0; depth < harness.budget; depth++) {
     const impl = await agent(withHarnessPrompt('implement', implementPrompt(brief, parent, state)), {
-      schema: IMPL_RESULT, model: brief.hard ? 'opus' : 'sonnet', phase: 'Optimize', label: `impl:${parent}#${depth}`,
+      schema: IMPL_RESULT, ...(brief.hard ? {} : { model: 'sonnet' }), phase: 'Optimize', label: `impl:${parent}#${depth}`,
     })
     if (!impl || !impl.expId) break
 
     // pre-verify <-> revise feedback loop (design-time cheating gate)
     let pv = null
     for (let v = 0; v < PREVERIFY_MAX; v++) {
-      pv = await agent(preVerifyPrompt(impl.expId, impl.worktree), {
+      pv = await agent(withHarnessPrompt('preverify', preVerifyPrompt(impl.expId, impl.worktree)), {
         schema: PREVERDICT, agentType: 'evo:verifier', phase: 'Verify', label: `preverify:${impl.expId}#${v}`,
       })
       if (pv && pv.pass) break
       if (v < PREVERIFY_MAX - 1) {
         await agent(revisePrompt(impl.expId, impl.worktree, pv && pv.findings), {
-          model: brief.hard ? 'opus' : 'sonnet', phase: 'Optimize', label: `revise:${impl.expId}#${v}`,
+          ...(brief.hard ? {} : { model: 'sonnet' }), phase: 'Optimize', label: `revise:${impl.expId}#${v}`,
         })
       }
     }
@@ -603,7 +612,7 @@ async function runBrief(brief, state) {
       if (!r.bestExpId || typeof r.bestScore !== 'number') {
         valid = false
       } else {
-        const audit = await agent(auditPrompt(r.bestExpId), { schema: VERDICT, agentType: 'evo:verifier', phase: 'Verify', label: `audit:${r.bestExpId}` })
+        const audit = await agent(withHarnessPrompt('audit', auditPrompt(r.bestExpId)), { schema: VERDICT, agentType: 'evo:verifier', phase: 'Verify', label: `audit:${r.bestExpId}` })
         valid = !!(audit && audit.valid)
         if (valid && (Number(state.verifyRepeats) || 1) > 1) {
           log(`note: ${r.bestExpId} on a noisy benchmark (repeats=${state.verifyRepeats}); confirm-loop pending the evo rescore affordance — relying on the held-out gate`)
@@ -632,6 +641,7 @@ let ideatedThisStall = false   // fire ideators once per stall episode, not ever
 let lastBestScore = null       // latest best score, surfaced to the concurrent meta thread
 let done = false               // set when the optimize loop ends -> stops the meta thread
 const metaSignals = []      // briefHints the meta pushes; drained into the next round's brief
+const metaJournal = []      // meta-log: { tick, round, note } working notes the meta writes to its future ticks
 
 // ---------------------------------------------------------------------------
 // Mutable HARNESS (the round-plan + prompts the meta agent edits live, free-will).
@@ -649,18 +659,19 @@ const harness = {
   ideateEvery: IDEATE_EVERY_COMMITS,
   ideateStall: IDEATE_STALL,
   phases: { scan: true, ideate: true },
-  prompts: {},          // target -> { mode: 'append'|'replace', text }
+  prompts: {},          // target -> { replace: string|null, appends: [string] } — appends accumulate
   injectedSteps: [],    // { at, prompt, label }
   editLog: [],          // audit trail: { round, op, ...spec, rationale }
 }
 
-// Apply a meta prompt override (append a directive, or replace wholesale) to a base prompt.
+// Apply meta prompt overrides to a base prompt: a replace (if any) swaps the base wholesale,
+// then every accumulated append rides on top as a standing directive.
 function withHarnessPrompt(target, baseText) {
   const o = harness.prompts[target]
-  if (!o || !o.text) return baseText
-  return o.mode === 'replace'
-    ? o.text
-    : baseText + '\n\n[META-ADDED DIRECTIVE — injected live by the meta agent]: ' + o.text
+  if (!o) return baseText
+  let text = o.replace != null ? o.replace : baseText
+  for (const a of o.appends) text += '\n\n[META-ADDED DIRECTIVE — injected live by the meta agent]: ' + a
+  return text
 }
 
 // Run any meta-injected extra steps registered at a given seam (insert-step op).
@@ -683,8 +694,11 @@ function applyHarnessEdit(e, atRound) {
   } else if (e.op === 'toggle-phase' && e.phaseName) {
     harness.phases[e.phaseName] = e.enabled !== false; rec.phaseName = e.phaseName; rec.enabled = harness.phases[e.phaseName]
   } else if (e.op === 'set-prompt' && e.target && e.text) {
-    harness.prompts[e.target] = { mode: e.mode === 'replace' ? 'replace' : 'append', text: e.text }
-    rec.target = e.target; rec.mode = harness.prompts[e.target].mode
+    const mode = e.mode === 'replace' ? 'replace' : 'append'
+    const o = harness.prompts[e.target] || (harness.prompts[e.target] = { replace: null, appends: [] })
+    if (mode === 'replace') o.replace = e.text
+    else o.appends.push(e.text)
+    rec.target = e.target; rec.mode = mode
   } else if (e.op === 'inject-step' && e.at && e.text) {
     harness.injectedSteps.push({ at: e.at, prompt: e.text, label: e.label || `meta:${e.at}` }); rec.at = e.at; rec.label = e.label || `meta:${e.at}`
   } else {
@@ -699,7 +713,9 @@ function harnessSummary() {
     width: harness.width, budget: harness.budget, stall: harness.stall,
     ideateEvery: harness.ideateEvery, ideateStall: harness.ideateStall,
     phases: harness.phases,
-    promptsOverridden: Object.entries(harness.prompts).map(([k, v]) => `${k}:${v.mode}`),
+    // Full directive texts included so fresh meta ticks see standing overrides and don't duplicate them.
+    promptsOverridden: Object.entries(harness.prompts).map(([k, v]) =>
+      ({ target: k, replaced: v.replace != null, appends: v.appends })),
     injectedSteps: harness.injectedSteps.map((s) => `${s.at}:${s.label}`),
     edits: harness.editLog.length,
   }
@@ -830,14 +846,15 @@ async function metaLoop() {
     // abort the optimizer. Swallow any tick error, log it, and continue (or exit if `done` flipped).
     let tick = null
     try {
-      tick = await agent(metaPrompt({ round, stall, bestScore: lastBestScore }, META_INTERVAL_S, reported.slice(-30)), {
-        agentType: 'Explore', model: META_MODEL, schema: META_FINDINGS, phase: 'Meta', label: `meta#${t}`,
+      tick = await agent(metaPrompt({ round, stall, bestScore: lastBestScore }, META_INTERVAL_S, reported.slice(-30), metaJournal.slice(-20)), {
+        agentType: 'Explore', schema: META_FINDINGS, phase: 'Meta', label: `meta#${t}`,
       })
     } catch (e) {
       log(`META tick #${t} errored (ignored, optimize unaffected): ${(e && e.message) || e}`)
     }
     if (tick) {
       fails = 0   // a real tick resets the failure streak
+      if (tick.journal) metaJournal.push({ tick: t, round, note: tick.journal })
       for (const h of (tick.briefHints || [])) { metaSignals.push(h); reported.push(h) }
       for (const a of (tick.alerts || [])) { log(`META ALERT: ${a}`); reported.push(a) }
       // HARNESS EDITS (new ability): the meta restructures the workflow itself live — applied
@@ -882,4 +899,4 @@ const [optimizeResult] = await Promise.all([
 // Surface the harness audit alongside the optimize result: final round-plan + every live edit the
 // meta agent applied (knobs, phase toggles, prompt overrides, injected steps), so the run is fully
 // reconstructable from the return value + the run log.
-return { ...optimizeResult, harness: harnessSummary(), harnessEditLog: harness.editLog }
+return { ...optimizeResult, harness: harnessSummary(), harnessEditLog: harness.editLog, metaJournal }
