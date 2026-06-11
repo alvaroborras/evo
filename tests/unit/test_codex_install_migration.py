@@ -299,8 +299,9 @@ class TestDoctorHookBinary(_Base):
         (self.codex_home / ".tmp" / "marketplaces" / "evo-hq").mkdir(parents=True)
 
     def _stage_binary(self, version: str) -> None:
+        name = "evo-hook-drain.exe" if sys.platform == "win32" else "evo-hook-drain"
         b = (self.codex_home / "plugins" / "cache" / "evo-hq" / "evo"
-             / version / "bin" / "evo-hook-drain")
+             / version / "bin" / name)
         b.parent.mkdir(parents=True, exist_ok=True)
         # Non-script bytes: doctor treats a "#!" file as the committed
         # fallback wrapper and then also requires the stable copy.

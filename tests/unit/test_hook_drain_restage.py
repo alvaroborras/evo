@@ -189,6 +189,7 @@ class TestWrapperFallback(_SandboxBase):
         self.assertIn(b"binary not staged", r.stderr)
 
 
+@unittest.skipIf(sys.platform == "win32", "sh wrapper is posix-only")
 class TestWrapperPreservation(_CodexSandbox):
     """Snapshot refreshes restore the tracked wrapper; installs and
     doctor must treat it as a working entry point."""
@@ -318,6 +319,26 @@ class TestCodexTrustHooks(_CodexSandbox):
 class TestInstallRunsDoctor(_CodexSandbox):
     """`evo install <host>` finishes with the host's doctor so a broken
     install is visible immediately instead of at hook-fire time."""
+
+    def setUp(self):
+        super().setUp()
+        # codex.install gates on `codex` being on PATH but never invokes
+        # it for --from-path installs (marketplace add is skipped). CI
+        # runners have no codex CLI; satisfy the gate with a stub.
+        fake_bin = self.root / "fake-path-bin"
+        fake_bin.mkdir()
+        if sys.platform == "win32":
+            (fake_bin / "codex.cmd").write_text("@echo off\r\nexit /b 0\r\n")
+        else:
+            stub = fake_bin / "codex"
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+        self._saved_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{fake_bin}{os.pathsep}{self._saved_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self._saved_path
+        super().tearDown()
 
     def test_install_runs_doctor_and_returns_its_rc(self):
         import argparse
