@@ -9,11 +9,11 @@ Covers:
   - SessionStart drift warning when cache version != marketplace clone version
   - SessionStart proactive warning when evo-drain not on PATH
 
-The Rust source lives at plugins/evo/bin/evo-hook-drain-rs/. Tests
-require the release binary built into the plugin bin/ via `cargo build
---release` + a copy step (CI does this in ci.yml `unit-tests` job;
-locally run `cargo build --release` inside the Rust crate then copy the
-binary to plugins/evo/bin/).
+The Rust source lives at plugins/evo/bin/evo-hook-drain-rs/. Tests exec
+the release binary straight from the cargo target dir (CI builds it in
+ci.yml's `unit-tests` job; locally run `cargo build --release` inside
+the Rust crate). plugins/evo/bin/evo-hook-drain is the committed
+shell-script fallback, not the binary.
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HOOK_NAME = "evo-hook-drain.exe" if sys.platform == "win32" else "evo-hook-drain"
-HOOK_PATH = REPO_ROOT / "plugins" / "evo" / "bin" / HOOK_NAME
+HOOK_PATH = (REPO_ROOT / "plugins" / "evo" / "bin" / "evo-hook-drain-rs"
+             / "target" / "release" / HOOK_NAME)
 PAYLOAD_PRETOOL = b'{"session_id":"test-sid","hook_event_name":"PreToolUse"}'
 PAYLOAD_SESSION_START = b'{"session_id":"test-sid","hook_event_name":"SessionStart"}'
 

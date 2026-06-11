@@ -97,7 +97,12 @@ def _stage_hook_drain(from_path: str | None, *, force: bool = False) -> None:
     plugin_dir = _hook_drain_staging_dir(from_path)
     if plugin_dir is None:
         return
-    ensure_hook_drain_binary(plugin_dir, force=force)
+    # For --from-path the destination is the user's source tree: leave
+    # the committed wrapper in place (it execs the stable copy) instead
+    # of dirtying their checkout with a binary.
+    ensure_hook_drain_binary(
+        plugin_dir, force=force, overwrite_wrapper=not from_path
+    )
     if not from_path:
         clone_dir = (
             _claude_config_dir() / "plugins" / "marketplaces"

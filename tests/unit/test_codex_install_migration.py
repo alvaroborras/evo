@@ -43,12 +43,18 @@ class _Base(unittest.TestCase):
         self.cfg_path = self.codex_home / "config.toml"
         self._prev_codex_home = os.environ.get("CODEX_HOME")
         os.environ["CODEX_HOME"] = str(self.codex_home)
+        self._prev_evo_home = os.environ.get("EVO_HOME")
+        os.environ["EVO_HOME"] = str(Path(self._tmp.name) / ".evo")
 
     def tearDown(self):
         if self._prev_codex_home is None:
             os.environ.pop("CODEX_HOME", None)
         else:
             os.environ["CODEX_HOME"] = self._prev_codex_home
+        if self._prev_evo_home is None:
+            os.environ.pop("EVO_HOME", None)
+        else:
+            os.environ["EVO_HOME"] = self._prev_evo_home
         self._tmp.cleanup()
 
     def _write_config(self, body: str) -> None:
@@ -296,7 +302,9 @@ class TestDoctorHookBinary(_Base):
         b = (self.codex_home / "plugins" / "cache" / "evo-hq" / "evo"
              / version / "bin" / "evo-hook-drain")
         b.parent.mkdir(parents=True, exist_ok=True)
-        b.write_text("#!/bin/sh\n")
+        # Non-script bytes: doctor treats a "#!" file as the committed
+        # fallback wrapper and then also requires the stable copy.
+        b.write_bytes(b"\x7fELF-fake\n")
         os.chmod(b, 0o755)
 
     def _run_doctor(self) -> int:

@@ -21,7 +21,6 @@ plugins/evo/bin/evo-hook-drain-rs/target/
 
 # Locally-built / fetched hook-drain binaries (shipped via GitHub release
 # assets, fetched at install time — never committed to source).
-plugins/evo/bin/evo-hook-drain
 plugins/evo/bin/evo-hook-drain.exe
 
 # Per-subproject lockfiles (the root uv.lock is authoritative)

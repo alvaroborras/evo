@@ -11,7 +11,9 @@ from pathlib import Path
 from ._hook_drain import (
     ensure_hook_drain_binary,
     hook_drain_binary_name,
+    is_wrapper_script,
     mirror_hook_drain_binary,
+    stable_binary_path,
 )
 
 
@@ -114,7 +116,7 @@ def install(args: argparse.Namespace) -> int:
         return 2
 
     from_path = getattr(args, "from_path", None)
-    trust_hooks = bool(getattr(args, "trust_hooks", False))
+    trust_hooks = bool(getattr(args, "trust_hooks", True))
     force = bool(getattr(args, "force", False))
 
     # Drive `codex plugin marketplace add` automatically. Skip if:
@@ -187,7 +189,7 @@ def _resolve_marketplace_json(from_path: str | None) -> Path | None:
     return mj if mj.exists() else None
 
 
-def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -> int:
+def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = True) -> int:
     """Mirror what codex's `plugin/install` RPC writes to disk:
       1. read marketplace name from `<root>/.claude-plugin/marketplace.json`
       2. read plugin version from `<plugin-root>/.codex-plugin/plugin.json`
@@ -275,12 +277,15 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
     # already at dest, which never happens since we just wiped.
     ensure_hook_drain_binary(cache_dst)
 
-    # Mirror the binary into the marketplace snapshot. Codex re-stages
-    # the plugin cache from the snapshot on its own (observed at session
-    # start after the snapshot changes); the snapshot is a git clone
-    # without the binary, so a re-stage that finds none there drops it
-    # from the cache and every hook fires exit 127.
-    mirror_hook_drain_binary(cache_dst, plugin_root)
+    # Mirror the binary into the marketplace snapshot so codex's next
+    # cache re-stage carries the native binary instead of the tracked
+    # wrapper. Best-effort: codex re-clones the snapshot from git at
+    # session start, which removes the mirrored copy and restores the
+    # wrapper (still a working entry point via the stable copy). Skipped
+    # for --from-path: the source is the user's checkout and the binary
+    # would dirty it.
+    if not from_path:
+        mirror_hook_drain_binary(cache_dst, plugin_root)
 
     # Update config.toml: ensure `[features] plugin_hooks = true`
     # (gates whether codex fires plugin hooks at all) AND
@@ -318,11 +323,11 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
         _trust_plugin_hooks(nested_hooks, plugin_id=f"evo@{mkt_name}", cfg=cfg)
     else:
         print(
-            "\nPlugin hooks installed but UNTRUSTED. To enable mid-run "
-            "directives (`evo direct`) on this codex install:\n"
+            "\nPlugin hooks installed UNTRUSTED (--no-trust-hooks). They "
+            "register but never fire, so mid-run directives (`evo direct`) "
+            "won't be delivered. To enable:\n"
             "  - Start `codex`, then `/hooks`, trust each evo hook, OR\n"
-            "  - Re-run: evo install codex --trust-hooks  "
-            "(skips the codex security review)"
+            "  - Re-run: evo install codex"
         )
 
     _cleanup_legacy_codex_registrations(target_mkt=mkt_name)
@@ -460,9 +465,10 @@ def _command_hook_hash(event_label: str, matcher: str | None,
     return "sha256:" + _hashlib.sha256(serialized).hexdigest()
 
 
-def _trust_plugin_hooks(hooks_json_path: Path, plugin_id: str, cfg: Path) -> None:
-    """Write `[hooks.state."<key>"] trusted_hash = "..."` entries to
-    config.toml — same effect as `codex` → `/hooks` → Trust each.
+def _expected_hook_state(hooks_json_path: Path, plugin_id: str) -> dict[str, str] | None:
+    """Compute the `{state_key: trusted_hash}` entries codex's TUI would
+    write on user approval of every command hook in hooks.json. Returns
+    None when hooks.json can't be parsed.
 
     The key shape codex uses (verified via `hooks/list` RPC):
         <plugin_id>:hooks/hooks.json:<event_label>:<group_idx>:<handler_idx>
@@ -473,11 +479,10 @@ def _trust_plugin_hooks(hooks_json_path: Path, plugin_id: str, cfg: Path) -> Non
         hooks_file = _json.loads(hooks_json_path.read_text())
     except (OSError, _json.JSONDecodeError) as exc:
         print(f"✗ could not parse {hooks_json_path}: {exc}", file=_sys.stderr)
-        return
+        return None
 
-    events = hooks_file.get("hooks", {})
-    lines: list[str] = []
-    for event_name, groups in events.items():
+    expected: dict[str, str] = {}
+    for event_name, groups in hooks_file.get("hooks", {}).items():
         event_label = _hook_event_label(event_name)
         if event_label is None:
             continue
@@ -492,21 +497,31 @@ def _trust_plugin_hooks(hooks_json_path: Path, plugin_id: str, cfg: Path) -> Non
                 timeout = handler.get("timeout")
                 if timeout is None:
                     timeout = 600  # codex's default after normalization
-                trusted_hash = _command_hook_hash(
+                key = (f'{plugin_id}:hooks/hooks.json:'
+                       f'{event_label}:{group_idx}:{handler_idx}')
+                expected[key] = _command_hook_hash(
                     event_label, matcher, cmd,
                     timeout_sec=timeout,
                     async_=bool(handler.get("async", False)),
                     status_msg=handler.get("statusMessage"),
                 )
-                key = (f'{plugin_id}:hooks/hooks.json:'
-                       f'{event_label}:{group_idx}:{handler_idx}')
-                lines.append(
-                    f'[hooks.state."{key}"]\ntrusted_hash = "{trusted_hash}"'
-                )
+    return expected
 
-    if not lines:
+
+def _trust_plugin_hooks(hooks_json_path: Path, plugin_id: str, cfg: Path) -> None:
+    """Write `[hooks.state."<key>"] trusted_hash = "..."` entries to
+    config.toml, same effect as `codex` → `/hooks` → Trust each.
+    """
+    expected = _expected_hook_state(hooks_json_path, plugin_id)
+    if expected is None:
+        return
+    if not expected:
         print("(no command hooks to trust)")
         return
+    lines = [
+        f'[hooks.state."{key}"]\ntrusted_hash = "{trusted_hash}"'
+        for key, trusted_hash in expected.items()
+    ]
 
     block = "\n\n".join(lines) + "\n"
     text = cfg.read_text() if cfg.exists() else ""
@@ -520,7 +535,11 @@ def _trust_plugin_hooks(hooks_json_path: Path, plugin_id: str, cfg: Path) -> Non
     )
     text = pat.sub("", text).rstrip() + "\n\n" + block
     cfg.write_text(text)
-    print(f"updated {cfg}: trusted {len(lines)} hooks for {plugin_id}")
+    events = sorted({key.split(":")[-3] for key in expected})
+    print(
+        f"updated {cfg}: trusted {len(lines)} hooks for {plugin_id} "
+        f"({', '.join(events)})"
+    )
 
 
 def _install_via_rpc(from_path: str | None) -> int:
@@ -646,7 +665,7 @@ def doctor(args: argparse.Namespace) -> int:
         print(f"✓ evo marketplace cached at {cache}")
         # Warning only (no rc bump): the active cache binary check below
         # covers the live install, and `evo update` skips hosts whose
-        # doctor fails — failing here would block the self-heal path.
+        # doctor fails; failing here would block the self-heal path.
         snapshot_binary = cache / "plugins" / "evo" / "bin" / hook_drain_binary_name()
         if not snapshot_binary.exists():
             print(
@@ -698,15 +717,69 @@ def doctor(args: argparse.Namespace) -> int:
             print("  Run: evo install codex --force")
             rc = 1
             continue
-        binary = versions[-1] / "bin" / "evo-hook-drain"
-        if binary.exists() and os.access(binary, os.X_OK):
-            print(f"✓ evo-hook-drain present + executable at {binary}")
-        elif binary.exists():
+        binary = versions[-1] / "bin" / hook_drain_binary_name()
+        stable = stable_binary_path()
+        if not binary.exists():
+            print(f"✗ evo-hook-drain missing at {binary} (hooks fire exit 127)")
+            print("  Run: evo install codex --force")
+            rc = 1
+        elif not os.access(binary, os.X_OK):
             print(f"✗ evo-hook-drain at {binary} is not executable")
             print("  Run: evo install codex --force")
             rc = 1
+        elif not is_wrapper_script(binary):
+            print(f"✓ evo-hook-drain present + executable at {binary}")
+        elif stable.exists() and os.access(stable, os.X_OK):
+            print(
+                f"✓ evo-hook-drain fallback wrapper at {binary} "
+                f"(execs stable binary at {stable})"
+            )
         else:
-            print(f"✗ evo-hook-drain missing at {binary} (hooks fire exit 127)")
+            print(
+                f"✗ evo-hook-drain at {binary} is the fallback wrapper and "
+                f"no stable binary exists at {stable} (hooks no-op)"
+            )
             print("  Run: evo install codex --force")
+            rc = 1
+
+        # Trust state. Untrusted hooks register but never fire, so `evo
+        # direct` silently does nothing. Three states:
+        #   - all expected entries present with matching hashes → ✓
+        #   - no entries at all → warning only (deliberate
+        #     --no-trust-hooks installs await the user's /hooks review)
+        #   - some entries missing or hash-mismatched → ✗ (hooks.json
+        #     changed since trust was written, silent breakage the
+        #     user didn't choose)
+        hooks_json = versions[-1] / "hooks" / "hooks.json"
+        if not hooks_json.exists():
+            continue
+        expected = _expected_hook_state(hooks_json, f"evo@{mkt_name}")
+        if not expected:
+            continue
+        actual = dict(_re.findall(
+            r'\[hooks\.state\."([^"]+)"\]\s*\ntrusted_hash = "([^"]+)"',
+            uncommented,
+        ))
+        stale = {
+            key for key, h in expected.items()
+            if key in actual and actual[key] != h
+        }
+        missing = {key for key in expected if key not in actual}
+        if not stale and not missing:
+            print(f"✓ {len(expected)} hooks trusted for evo@{mkt_name}")
+        elif len(missing) == len(expected) and not stale:
+            print(
+                f"! hooks installed but untrusted for evo@{mkt_name}: "
+                f"they never fire, so `evo direct` won't be delivered\n"
+                f"  Trust via `/hooks` inside codex, or run: evo install codex"
+            )
+        else:
+            print(
+                f"✗ hook trust is stale for evo@{mkt_name} "
+                f"({len(stale)} mismatched, {len(missing)} missing): "
+                f"hooks.json changed since trust was written; those hooks "
+                f"never fire\n"
+                f"  Run: evo install codex"
+            )
             rc = 1
     return rc

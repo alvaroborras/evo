@@ -80,7 +80,7 @@ For remote backends, install with the matching provider extra: `uv tool install 
 
 ### Codex hook trust
 
-Codex requires manual approval for plugin hooks. After install, run `/hooks` inside codex to trust evo's hooks — or pass `--trust-hooks` to `evo install codex` to skip the prompt.
+`evo install codex` trusts evo's hooks for you. To review them yourself first, pass `--no-trust-hooks`, then approve via `/hooks` inside codex.
 
 ## How it works
 
@@ -163,18 +163,13 @@ uv tool install --force evo-hq-cli && evo update --force
 
 ### Hooks failing with exit 127
 
-Exit 127 on `SessionStart` / `UserPromptSubmit` / `PostToolUse` hooks means the host cannot find the `evo-hook-drain` binary. Two known causes, both fixed:
-
-- The binary was staged under a marketplace name Codex does not load from (fixed in 0.4.5).
-- The host re-staged the plugin from its marketplace snapshot — Codex does this on its own when the snapshot changes; Claude Code on `claude plugin update` — and the snapshot did not contain the binary, so the re-stage dropped it (fixed in 0.5.1: installers mirror the binary into the snapshot).
-
-A plain `evo update` does not repair an already-broken install — it reports unhealthy and gets skipped — so reinstall the host explicitly:
+The host lost evo's hook binary. Fixed in 0.5.1; reinstall the host to repair:
 
 ```bash
 uv tool install --force evo-hq-cli && evo install codex --force   # or: evo install claude-code --force
 ```
 
-Verify with `evo doctor <host>`, which checks the binary in both the active cache and the marketplace snapshot.
+`evo doctor <host>` confirms the result.
 
 ### Testing a pre-release (alpha)
 

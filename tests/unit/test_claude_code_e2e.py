@@ -24,7 +24,8 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HOOK_PATH = REPO_ROOT / "plugins" / "evo" / "bin" / "evo-hook-drain"
+HOOK_PATH = (REPO_ROOT / "plugins" / "evo" / "bin" / "evo-hook-drain-rs"
+             / "target" / "release" / "evo-hook-drain")
 EVO_DRAIN = shutil.which("evo-drain")
 
 

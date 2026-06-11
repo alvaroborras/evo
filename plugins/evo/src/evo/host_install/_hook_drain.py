@@ -1,14 +1,26 @@
-"""Fetch the platform-native evo-hook-drain binary from the GitHub release.
+"""Stage the platform-native evo-hook-drain binary where hooks resolve it.
 
 The hook script is a small Rust binary (~330 KB) built natively for each
 platform in CI. Binaries ship as GitHub Release assets, NOT in the plugin
 git tree (keeps the repo small + lets users install from `main` without
 binaries present). Every host's `install(args)` calls
-`ensure_hook_drain_binary(plugin_root)` to populate the plugin's bin/
-directory before hooks.json's command path is exercised.
+`ensure_hook_drain_binary(plugin_root)`, which:
 
-Idempotent: re-fetch only when the on-disk binary is missing or doesn't
-match the installed evo-hq-cli version.
+  1. fetches the binary into the stable per-user location
+     `$EVO_HOME/bin/` (default `~/.evo/bin/`), outside any
+     host-managed directory, and
+  2. copies it to `<plugin_root>/bin/evo-hook-drain`, the path
+     hooks.json commands resolve.
+
+The plugin tree commits a shell-script fallback at `bin/evo-hook-drain`
+that execs the stable copy. Hosts re-stage their plugin cache from a
+fresh git snapshot whenever they decide to (codex re-clones its
+marketplace snapshot at session start), which drops anything evo staged
+into those directories; the tracked wrapper survives every re-stage and
+keeps hooks firing via the stable copy.
+
+Idempotent: re-fetch only when the stable copy is missing, was staged by
+a different evo-hq-cli version, or `force` is set.
 """
 from __future__ import annotations
 
@@ -83,20 +95,37 @@ def hook_drain_binary_name() -> str:
     return "evo-hook-drain.exe" if platform.system().lower() == "windows" else "evo-hook-drain"
 
 
+def stable_binary_path() -> Path:
+    """Host-independent home for the fetched binary:
+    `$EVO_HOME/bin/<name>` (default `~/.evo/bin/<name>`). The committed
+    `bin/evo-hook-drain` wrapper in the plugin tree execs this copy.
+    """
+    override = os.environ.get("EVO_HOME")
+    base = Path(override) if override else Path.home() / ".evo"
+    return base / "bin" / hook_drain_binary_name()
+
+
+def is_wrapper_script(path: Path) -> bool:
+    """True when `path` holds the committed shell-script fallback rather
+    than a platform-native binary."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"#!"
+    except OSError:
+        return False
+
+
 def mirror_hook_drain_binary(src_plugin_root: Path, dst_plugin_root: Path) -> bool:
-    """Copy `bin/evo-hook-drain` from one plugin root to another.
+    """Copy `bin/evo-hook-drain` from one plugin root to another, so a
+    host re-stage from the destination (codex: marketplace snapshot;
+    claude-code: marketplace clone) carries the native binary instead of
+    falling back to the wrapper script.
 
-    Hosts re-stage the plugin cache by copying the marketplace snapshot
-    (codex does this whenever the snapshot changes; claude-code on
-    `claude plugin update`). The snapshot is a git clone, which never
-    contains the binary — release assets aren't in the tree — so a
-    re-stage silently drops the binary the hooks resolve and every hook
-    fires exit 127. Mirroring the fetched binary into the snapshot makes
-    re-stages carry it.
-
-    No-op when src and dst resolve to the same directory (--from-path
-    installs stage directly into the source tree). Returns True when the
-    binary is present at the destination afterwards.
+    Best-effort: the host may wipe the destination on its next snapshot
+    refresh, at which point the tracked wrapper takes over. No-op when
+    src and dst resolve to the same directory (--from-path installs
+    stage directly into the source tree). Returns True when the file is
+    present at the destination afterwards.
     """
     import shutil
 
@@ -117,59 +146,38 @@ def mirror_hook_drain_binary(src_plugin_root: Path, dst_plugin_root: Path) -> bo
             os.chmod(dst, 0o755)
     except OSError as e:
         print(
-            f"WARN: failed to mirror evo-hook-drain into {dst.parent}: {e}\n"
-            f"      A host plugin re-stage from that directory would drop "
-            f"the hook binary (hooks exit 127).",
+            f"WARN: failed to mirror evo-hook-drain into {dst.parent}: {e}",
             file=sys.stderr,
         )
         return False
     return True
 
 
-def ensure_hook_drain_binary(plugin_root: Path, *, force: bool = False) -> bool:
-    """Stage the evo-hook-drain binary into `<plugin_root>/bin/` if it's
-    not already there. Returns True on success (file is now present and
-    executable), False otherwise.
+def _stage_stable_copy(asset: str, *, force: bool) -> bool:
+    """Ensure the stable copy at `stable_binary_path()` exists and was
+    staged by this CLI version. Returns True when a usable stable copy
+    is present afterwards (even a version-stale one, if re-fetch fails:
+    the binary's wire protocol is stable across minor versions).
 
     Sources, in order of precedence:
-      1. `EVO_HOOK_DRAIN_BINARY` env var — points to a local file. Used
+      1. `EVO_HOOK_DRAIN_BINARY` env var: points to a local file. Used
          by tests / local-source smoke runs to bypass the GitHub
          release URL when there's no published release to fetch from.
          The file gets copied (not symlinked) so it stays valid after
          the source disappears.
-      2. GitHub release asset for this evo-hq-cli version. Fetched via
-         urllib (stdlib only).
-
-    Non-fatal: a failed fetch prints a warning to stderr but doesn't
-    raise. Hooks will fail at fire-time with a clearer error pointing
-    the user at `evo install <host> --force` to retry.
+      2. GitHub release asset for this evo-hq-cli version, falling back
+         to /releases/latest/. Fetched via urllib (stdlib only).
     """
-    target = _target_name()
-    if target is None:
-        print(
-            f"WARN: evo-hook-drain binary not available for "
-            f"{platform.system().lower()}-{platform.machine().lower()}. "
-            f"Mid-run inject via `evo direct` will not work on this platform.",
-            file=sys.stderr,
-        )
-        return False
-
+    stable = stable_binary_path()
+    sidecar = stable.parent / "evo-hook-drain.version"
     is_windows = platform.system().lower() == "windows"
-    ext = ".exe" if is_windows else ""
-    asset = f"evo-hook-drain-{target}{ext}"
-    dest = plugin_root / "bin" / f"evo-hook-drain{ext}"
 
-    if dest.exists() and not force:
-        # Already present. Trust it — re-fetching every install would be
-        # wasteful and might fail if the user is offline.
+    staged_by = sidecar.read_text().strip() if sidecar.exists() else None
+    if stable.exists() and not force and staged_by == EVO_VERSION:
         return True
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    stable.parent.mkdir(parents=True, exist_ok=True)
 
-    # Env-var bypass for local-source / test contexts where no published
-    # release exists yet. The test harness builds the binary, sets
-    # EVO_HOOK_DRAIN_BINARY=<path>, then runs `evo install <host>` and
-    # gets the local file copied in instead of a 404 from urllib.
     local_override = os.environ.get("EVO_HOOK_DRAIN_BINARY")
     if local_override:
         import shutil
@@ -182,14 +190,15 @@ def ensure_hook_drain_binary(plugin_root: Path, *, force: bool = False) -> bool:
             )
         else:
             try:
-                shutil.copyfile(src, dest)
+                shutil.copyfile(src, stable)
                 if not is_windows:
-                    os.chmod(dest, 0o755)
-                print(f"installed evo-hook-drain binary from EVO_HOOK_DRAIN_BINARY: {dest}")
+                    os.chmod(stable, 0o755)
+                sidecar.write_text(EVO_VERSION + "\n")
+                print(f"installed evo-hook-drain binary from EVO_HOOK_DRAIN_BINARY: {stable}")
                 return True
             except OSError as e:
                 print(
-                    f"WARN: failed to copy EVO_HOOK_DRAIN_BINARY={src} to {dest}: {e}. "
+                    f"WARN: failed to copy EVO_HOOK_DRAIN_BINARY={src} to {stable}: {e}. "
                     f"Falling back to GitHub release fetch.",
                     file=sys.stderr,
                 )
@@ -202,13 +211,12 @@ def ensure_hook_drain_binary(plugin_root: Path, *, force: bool = False) -> bool:
     # don't have a corresponding GitHub Release tagged yet (release builds
     # are only cut at stable bumps), so a 404 here is expected during alpha
     # cycles. Fall back to /releases/latest/, which GitHub redirects to the
-    # most recent stable release. The binary's wire protocol is stable
-    # across minor versions, so a slightly older binary still works.
+    # most recent stable release.
     last_err: Exception | None = None
     for url in (versioned_url, latest_url):
         try:
             print(f"$ fetching {asset} from {url}")
-            urllib.request.urlretrieve(url, str(dest))
+            urllib.request.urlretrieve(url, str(stable))
             if url == latest_url and url != versioned_url:
                 print(
                     f"NOTE: used /releases/latest/ fallback because the "
@@ -223,11 +231,20 @@ def ensure_hook_drain_binary(plugin_root: Path, *, force: bool = False) -> bool:
             # Continue to the next URL in the fallback chain.
             continue
     else:
+        if stable.exists():
+            print(
+                f"WARN: could not refresh evo-hook-drain "
+                f"(tried {versioned_url} and {latest_url}): {last_err}\n"
+                f"      Keeping the existing copy at {stable} "
+                f"(wire-compatible across minor versions).",
+                file=sys.stderr,
+            )
+            return True
         print(
             f"WARN: failed to fetch evo-hook-drain binary "
             f"(tried {versioned_url} and {latest_url}): {last_err}\n"
             f"      Mid-run inject (`evo direct`) will not work until the "
-            f"binary is staged at {dest}. Re-run `evo install <host> --force` "
+            f"binary is staged at {stable}. Re-run `evo install <host> --force` "
             f"with network access to retry.",
             file=sys.stderr,
         )
@@ -235,9 +252,76 @@ def ensure_hook_drain_binary(plugin_root: Path, *, force: bool = False) -> bool:
 
     if not is_windows:
         try:
-            os.chmod(dest, 0o755)
+            os.chmod(stable, 0o755)
         except OSError:
             pass
+    sidecar.write_text(EVO_VERSION + "\n")
+    print(f"installed evo-hook-drain binary: {stable}")
+    return True
 
-    print(f"installed evo-hook-drain binary: {dest}")
+
+def ensure_hook_drain_binary(plugin_root: Path, *, force: bool = False,
+                             overwrite_wrapper: bool = True) -> bool:
+    """Stage the binary at the stable location and make
+    `<plugin_root>/bin/evo-hook-drain` a working hook entry point.
+    Returns True when hooks at `plugin_root` will fire.
+
+    `overwrite_wrapper=False` leaves a committed wrapper script in place
+    at the destination (used for --from-path installs, where the
+    destination is the user's source tree and replacing the tracked
+    wrapper with a binary would dirty their checkout); the wrapper execs
+    the stable copy, so hooks still work.
+
+    Non-fatal: a failed fetch prints a warning to stderr but doesn't
+    raise.
+    """
+    target = _target_name()
+    if target is None:
+        print(
+            f"WARN: evo-hook-drain binary not available for "
+            f"{platform.system().lower()}-{platform.machine().lower()}. "
+            f"Mid-run inject via `evo direct` will not work on this platform.",
+            file=sys.stderr,
+        )
+        return False
+
+    is_windows = platform.system().lower() == "windows"
+    ext = ".exe" if is_windows else ""
+    asset = f"evo-hook-drain-{target}{ext}"
+
+    stable_ok = _stage_stable_copy(asset, force=force)
+    stable = stable_binary_path()
+    dest = plugin_root / "bin" / hook_drain_binary_name()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    dest_exists = dest.exists()
+    dest_is_wrapper = dest_exists and is_wrapper_script(dest)
+    should_copy = stable_ok and (
+        not dest_exists
+        or (dest_is_wrapper and overwrite_wrapper)
+        or (not dest_is_wrapper and force)
+    )
+    if should_copy:
+        import shutil
+        try:
+            shutil.copyfile(stable, dest)
+            if not is_windows:
+                os.chmod(dest, 0o755)
+            print(f"staged evo-hook-drain binary: {dest}")
+        except OSError as e:
+            print(
+                f"WARN: failed to stage evo-hook-drain at {dest}: {e}",
+                file=sys.stderr,
+            )
+
+    if not dest.exists():
+        return False
+    if is_wrapper_script(dest) and not stable_ok:
+        print(
+            f"WARN: {dest} is the fallback wrapper and no binary is staged "
+            f"at {stable}, so hooks will no-op. Re-run "
+            f"`evo install <host> --force` with network access.",
+            file=sys.stderr,
+        )
+        return False
     return True

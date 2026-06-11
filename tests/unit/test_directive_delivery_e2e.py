@@ -29,7 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "evo" / "src"))
 
 HOOK_NAME = "evo-hook-drain.exe" if sys.platform == "win32" else "evo-hook-drain"
-HOOK_PATH = REPO_ROOT / "plugins" / "evo" / "bin" / HOOK_NAME
+HOOK_PATH = (REPO_ROOT / "plugins" / "evo" / "bin" / "evo-hook-drain-rs"
+             / "target" / "release" / HOOK_NAME)
 
 
 def _init_workspace(root: Path) -> str:

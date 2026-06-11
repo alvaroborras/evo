@@ -6589,13 +6589,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_p.add_argument(
         "--trust-hooks",
-        action="store_true",
-        help="Trust the plugin's hooks non-interactively (codex only). "
-             "By default codex installs hooks in untrusted state — they "
-             "register but never fire until reviewed via `codex /hooks`. "
-             "This flag writes the trusted_hash entries that the TUI would "
-             "write on user approval, enabling mid-run directives. Use only "
-             "if you've reviewed plugins/evo/hooks/hooks.json and accept it.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Trust the plugin's hooks non-interactively (codex only; "
+             "default: on). Writes the trusted_hash entries codex's "
+             "`/hooks` review would write on approval; without them the "
+             "hooks register but never fire and `evo direct` is not "
+             "delivered. Pass --no-trust-hooks to review and trust the "
+             "hooks inside codex via `/hooks` instead.",
     )
     install_p.add_argument(
         "--version",
@@ -6675,8 +6676,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     update_p.add_argument(
         "--trust-hooks",
-        action="store_true",
-        help="Trust the plugin's hooks non-interactively (codex only).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Trust the plugin's hooks non-interactively (codex only; "
+             "default: on). Pass --no-trust-hooks to review via `/hooks` "
+             "inside codex instead.",
     )
     update_p.set_defaults(func=cmd_update)
 

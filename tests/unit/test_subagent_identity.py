@@ -166,12 +166,13 @@ class CodexHotPathSubagentIdentityTests(unittest.TestCase):
         from evo.core import workspace_path
         self.run_dir = workspace_path(self.root)
         bin_name = "evo-hook-drain.exe" if sys.platform == "win32" else "evo-hook-drain"
-        self.script = REPO_ROOT / "plugins" / "evo" / "bin" / bin_name
+        self.script = (REPO_ROOT / "plugins" / "evo" / "bin"
+                       / "evo-hook-drain-rs" / "target" / "release" / bin_name)
         # The conftest-level fixture in test_hook_drain ensures the binary
         # is built; this assertion catches the case where test_subagent_identity
         # runs in isolation without that fixture firing.
         assert self.script.exists(), (
-            f"hook binary not staged: {self.script}. "
+            f"hook binary not built: {self.script}. "
             f"Run `cargo build --release` in plugins/evo/bin/evo-hook-drain-rs/."
         )
 

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Fallback entry point for the hooks.json command `bin/evo-hook-drain`.
+#
+# `evo install <host>` stages the platform-native binary at
+# $EVO_HOME/bin/evo-hook-drain (default ~/.evo/bin) and replaces this
+# file with it in the host's plugin cache. Hosts periodically re-copy
+# the plugin from a fresh git snapshot (codex re-clones its marketplace
+# snapshot at session start; claude-code on `claude plugin update`),
+# which restores this script in place of the binary. Exec the stable
+# copy so hooks keep firing across those re-stages.
+stable="${EVO_HOME:-$HOME/.evo}/bin/evo-hook-drain"
+if [ -x "$stable" ]; then
+    exec "$stable" "$@"
+fi
+# No staged binary anywhere: degrade to a no-op so the host's hooks
+# don't fail on every tool call. Mid-run inject (`evo direct`) is
+# disabled until the user reinstalls.
+echo "evo-hook-drain: binary not staged at $stable; run \`evo install <host> --force\` to enable mid-run inject" >&2
+echo '{}'
+exit 0
