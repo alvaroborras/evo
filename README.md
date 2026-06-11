@@ -163,15 +163,20 @@ uv tool install --force evo-hq-cli && evo update --force
 
 `--force` wipes the host plugin cache and reinstalls, working around [anthropics/claude-code#14061](https://github.com/anthropics/claude-code/issues/14061): `/plugin update` returns success but does not replace cached plugin files.
 
-### Codex hooks failing with exit 127
+### Hooks failing with exit 127
 
-Fixed in 0.4.5. If Codex reports `SessionStart` / `UserPromptSubmit` / `PostToolUse` hooks failing with exit 127, the hook binary was staged under a marketplace name Codex does not load from. A plain `evo update` does not repair it — the broken install reports unhealthy and gets skipped — so reinstall the Codex host explicitly:
+Exit 127 on `SessionStart` / `UserPromptSubmit` / `PostToolUse` hooks means the host cannot find the `evo-hook-drain` binary. Two known causes, both fixed:
+
+- The binary was staged under a marketplace name Codex does not load from (fixed in 0.4.5).
+- The host re-staged the plugin from its marketplace snapshot — Codex does this on its own when the snapshot changes; Claude Code on `claude plugin update` — and the snapshot did not contain the binary, so the re-stage dropped it (fixed in 0.5.1: installers mirror the binary into the snapshot).
+
+A plain `evo update` does not repair an already-broken install — it reports unhealthy and gets skipped — so reinstall the host explicitly:
 
 ```bash
-uv tool install --force evo-hq-cli && evo install codex --force
+uv tool install --force evo-hq-cli && evo install codex --force   # or: evo install claude-code --force
 ```
 
-This stages `evo-hook-drain` into the cache directory Codex resolves and clears the stale registration. Verify with `evo doctor codex`, which now checks the binary directly.
+Verify with `evo doctor <host>`, which checks the binary in both the active cache and the marketplace snapshot.
 
 ### Testing a pre-release (alpha)
 

@@ -78,6 +78,54 @@ def _release_version_tag(version: str) -> str:
     return version
 
 
+def hook_drain_binary_name() -> str:
+    """Filename of the staged binary for the current platform."""
+    return "evo-hook-drain.exe" if platform.system().lower() == "windows" else "evo-hook-drain"
+
+
+def mirror_hook_drain_binary(src_plugin_root: Path, dst_plugin_root: Path) -> bool:
+    """Copy `bin/evo-hook-drain` from one plugin root to another.
+
+    Hosts re-stage the plugin cache by copying the marketplace snapshot
+    (codex does this whenever the snapshot changes; claude-code on
+    `claude plugin update`). The snapshot is a git clone, which never
+    contains the binary — release assets aren't in the tree — so a
+    re-stage silently drops the binary the hooks resolve and every hook
+    fires exit 127. Mirroring the fetched binary into the snapshot makes
+    re-stages carry it.
+
+    No-op when src and dst resolve to the same directory (--from-path
+    installs stage directly into the source tree). Returns True when the
+    binary is present at the destination afterwards.
+    """
+    import shutil
+
+    name = hook_drain_binary_name()
+    src = src_plugin_root / "bin" / name
+    dst = dst_plugin_root / "bin" / name
+    if not src.is_file():
+        return False
+    try:
+        if src.resolve() == dst.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        if platform.system().lower() != "windows":
+            os.chmod(dst, 0o755)
+    except OSError as e:
+        print(
+            f"WARN: failed to mirror evo-hook-drain into {dst.parent}: {e}\n"
+            f"      A host plugin re-stage from that directory would drop "
+            f"the hook binary (hooks exit 127).",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def ensure_hook_drain_binary(plugin_root: Path, *, force: bool = False) -> bool:
     """Stage the evo-hook-drain binary into `<plugin_root>/bin/` if it's
     not already there. Returns True on success (file is now present and

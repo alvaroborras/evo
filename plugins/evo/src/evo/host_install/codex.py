@@ -8,7 +8,11 @@ import argparse
 import os
 from pathlib import Path
 
-from ._hook_drain import ensure_hook_drain_binary
+from ._hook_drain import (
+    ensure_hook_drain_binary,
+    hook_drain_binary_name,
+    mirror_hook_drain_binary,
+)
 
 
 _PLUGIN_KEY = '[plugins."evo@evo-hq"]'
@@ -270,6 +274,13 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = False) -
     # `force=False` (default) avoids re-fetch only when the file is
     # already at dest, which never happens since we just wiped.
     ensure_hook_drain_binary(cache_dst)
+
+    # Mirror the binary into the marketplace snapshot. Codex re-stages
+    # the plugin cache from the snapshot on its own (observed at session
+    # start after the snapshot changes); the snapshot is a git clone
+    # without the binary, so a re-stage that finds none there drops it
+    # from the cache and every hook fires exit 127.
+    mirror_hook_drain_binary(cache_dst, plugin_root)
 
     # Update config.toml: ensure `[features] plugin_hooks = true`
     # (gates whether codex fires plugin hooks at all) AND
@@ -633,6 +644,17 @@ def doctor(args: argparse.Namespace) -> int:
 
     if cache.exists():
         print(f"✓ evo marketplace cached at {cache}")
+        # Warning only (no rc bump): the active cache binary check below
+        # covers the live install, and `evo update` skips hosts whose
+        # doctor fails — failing here would block the self-heal path.
+        snapshot_binary = cache / "plugins" / "evo" / "bin" / hook_drain_binary_name()
+        if not snapshot_binary.exists():
+            print(
+                f"! evo-hook-drain not mirrored in the marketplace snapshot "
+                f"({snapshot_binary})\n"
+                f"  A codex plugin re-stage would drop the hook binary "
+                f"(hooks exit 127). Run: evo install codex"
+            )
     else:
         print(f"✗ no marketplace cache at {cache}")
         print("  Run: codex plugin marketplace add evo-hq/evo")

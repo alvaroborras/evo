@@ -24,7 +24,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ._hook_drain import ensure_hook_drain_binary
+from ._hook_drain import (
+    ensure_hook_drain_binary,
+    hook_drain_binary_name,
+    mirror_hook_drain_binary,
+)
 
 
 _MARKETPLACE = "evo-hq/evo"
@@ -80,6 +84,27 @@ def _hook_drain_staging_dir(from_path: str | None) -> Path | None:
             return src
         return candidate  # let ensure_* create bin/ under the expected path
     return _latest_cache_dir()
+
+
+def _stage_hook_drain(from_path: str | None, *, force: bool = False) -> None:
+    """Fetch the binary into the plugin dir the hooks resolve, then mirror
+    it into the marketplace clone for cache-backed installs.
+
+    `claude plugin update` re-copies the marketplace clone over the version
+    cache; the clone is a git tree without the binary, so an update run
+    outside `evo update` would otherwise drop it and hooks exit 127.
+    """
+    plugin_dir = _hook_drain_staging_dir(from_path)
+    if plugin_dir is None:
+        return
+    ensure_hook_drain_binary(plugin_dir, force=force)
+    if not from_path:
+        clone_dir = (
+            _claude_config_dir() / "plugins" / "marketplaces"
+            / _MARKETPLACE_NAME / "plugins" / "evo"
+        )
+        if clone_dir.is_dir():
+            mirror_hook_drain_binary(plugin_dir, clone_dir)
 
 # Strict release-tag shape: 'X.Y.Z' optionally followed by a pre-release
 # suffix ('0.4.0-alpha.5', '0.4.0a5', '0.4.0rc1'). Only this shape gets
@@ -155,9 +180,10 @@ def install(args: argparse.Namespace) -> int:
     # Stage the platform-native evo-hook-drain binary where the runtime hook
     # resolves it. hooks.json points at ${CLAUDE_PLUGIN_ROOT}/bin/evo-hook-drain;
     # for a --from-path install that's the source tree, not the version cache.
-    plugin_dir = _hook_drain_staging_dir(getattr(args, "from_path", None))
-    if plugin_dir is not None:
-        ensure_hook_drain_binary(plugin_dir, force=bool(getattr(args, "force", False)))
+    _stage_hook_drain(
+        getattr(args, "from_path", None),
+        force=bool(getattr(args, "force", False)),
+    )
     print(
         f"\n✓ evo installed for claude-code at scope={scope}.\n"
         "  If you're inside an active claude session, run `/reload-plugins` "
@@ -213,9 +239,7 @@ def update(args: argparse.Namespace) -> int:
     # Re-stage the hook-drain binary where the runtime hook resolves it
     # (source tree for --from-path, version cache otherwise).
     # --force will re-download even if a binary's already there.
-    plugin_dir = _hook_drain_staging_dir(from_path)
-    if plugin_dir is not None:
-        ensure_hook_drain_binary(plugin_dir, force=force)
+    _stage_hook_drain(from_path, force=force)
     print(
         "\n✓ evo updated for claude-code.\n"
         "  If you're inside an active claude session, run `/reload-plugins` "
@@ -261,6 +285,18 @@ def doctor(args: argparse.Namespace) -> int:
         cache = home / "plugins" / "marketplaces" / _MARKETPLACE_NAME
         if cache.exists():
             print(f"✓ marketplace cached at {cache}")
+            # Warning only (no rc bump): `evo update` skips hosts whose
+            # doctor fails, and update is exactly what re-mirrors this.
+            clone_binary = (
+                cache / "plugins" / "evo" / "bin" / hook_drain_binary_name()
+            )
+            if not clone_binary.exists():
+                print(
+                    f"! evo-hook-drain not mirrored in the marketplace clone "
+                    f"({clone_binary})\n"
+                    f"  `claude plugin update` would drop the hook binary "
+                    f"(hooks exit 127). Run: evo update claude-code"
+                )
         else:
             print(f"✗ source=github but no cache at {cache} — try restarting claude")
             rc = 1
