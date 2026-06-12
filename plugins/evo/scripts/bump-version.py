@@ -12,6 +12,7 @@ doesn't leave one of them stale. Locations covered:
   skills/*/SKILL.md          evo_version frontmatter
   skills/discover/SKILL.md   step-0 user-facing literals
                              (evo-hq-cli X.Y.Z, install commands)
+  CITATION.cff               version + date-released (repo root)
 
 After updating sources, syncs the npm copy of skills (so
 npm/skills/*/SKILL.md tracks the source) by running
@@ -24,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import re
 import subprocess
@@ -143,6 +145,34 @@ def _bump_body_literals(path: Path, old: str, new: str) -> None:
     path.write_text(new_text)
 
 
+def _bump_citation_cff(path: Path, new: str) -> None:
+    """Update version + date-released so the citation Zenodo and GitHub
+    surface from CITATION.cff always matches the released package."""
+    if not path.exists():
+        return
+    text = path.read_text()
+    new_text, n = re.subn(
+        r'^version:\s*\S+',
+        f'version: {new}',
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n == 0:
+        raise SystemExit(f"no 'version:' field in {path}")
+    today = datetime.date.today().isoformat()
+    new_text, n = re.subn(
+        r'^date-released:\s*\S+',
+        f'date-released: {today}',
+        new_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n == 0:
+        raise SystemExit(f"no 'date-released:' field in {path}")
+    path.write_text(new_text)
+
+
 def _run_npm_sync() -> None:
     script = PLUGIN_ROOT / "npm" / "scripts" / "sync-from-source.sh"
     subprocess.run(["bash", str(script)], check=True, cwd=REPO_ROOT)
@@ -166,6 +196,7 @@ def _verify_no_leftover(old: str, new: str) -> list[Path]:
         SDK_PYTHON_ROOT / "pyproject.toml",
         SDK_PYTHON_ROOT / "src" / "evo_agent" / "__init__.py",
         SDK_NODE_ROOT / "package.json",
+        REPO_ROOT / "CITATION.cff",
     ]
     for name in SKILLS:
         candidates.append(PLUGIN_ROOT / "skills" / name / "SKILL.md")
@@ -220,6 +251,9 @@ def main() -> int:
     print(f"  ✓ sdk/python/src/evo_agent/__init__.py (__version__)")
     _bump_json_version(SDK_NODE_ROOT / "package.json", new)
     print(f"  ✓ sdk/node/package.json (@evo-hq/evo-agent)")
+
+    _bump_citation_cff(REPO_ROOT / "CITATION.cff", new)
+    print(f"  ✓ CITATION.cff (version + date-released)")
 
     for name in SKILLS:
         skill_path = PLUGIN_ROOT / "skills" / name / "SKILL.md"

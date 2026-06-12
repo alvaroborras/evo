@@ -28,6 +28,7 @@ SOURCES = [
     ("sdk/python/src/evo_agent/__init__.py", "evo_agent/__init__.__version__"),
     ("sdk/node/package.json", "package.json (@evo-hq/evo-agent)"),
     ("plugins/evo/npm/package.json", "package.json (@evo-hq/pi-evo)"),
+    ("CITATION.cff", "CITATION.cff (citation metadata, read by Zenodo/GitHub)"),
 ]
 
 
@@ -52,6 +53,14 @@ def read_json_version(path: Path) -> str:
     return data["version"]
 
 
+def read_cff_version(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r'^version:\s*"?([^"\s]+)"?', text, flags=re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"no version field in {path}")
+    return match.group(1)
+
+
 def read_python_version(path: Path) -> str:
     text = path.read_text(encoding="utf-8")
     match = re.search(r'^__version__\s*=\s*"([^"]+)"', text, flags=re.MULTILINE)
@@ -73,6 +82,8 @@ def main() -> int:
             version = read_json_version(path)
         elif path.suffix == ".py":
             version = read_python_version(path)
+        elif path.suffix == ".cff":
+            version = read_cff_version(path)
         else:
             raise RuntimeError(f"unknown file type for {path}")
         versions.append((relpath, label, version))
