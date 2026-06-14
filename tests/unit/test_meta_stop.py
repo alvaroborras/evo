@@ -20,16 +20,17 @@ SKILL_TEXT = (WORKFLOW.parent.parent / "SKILL.md").read_text()  # skills/optimiz
 
 
 # --------------------------------------------------------------------------- #
-# Driver policy: on Claude Code the workflow is the DEFAULT (not opt-in)
+# Driver policy: the prose loop is the DEFAULT everywhere; the workflow is opt-in
 # --------------------------------------------------------------------------- #
-def test_workflow_is_default_driver_on_claude_code():
-    # Policy: claude-code + Workflow tool available -> use the workflow by default; prose is the
-    # explicit opt-out; the resolved choice is persisted to config so the stop-nudge suppression
-    # and `evo config get` agree.
-    assert "workflow is the DEFAULT" in SKILL_TEXT
+def test_prose_is_default_driver():
+    # Policy: prose drives the loop on every host by default; the workflow is an
+    # explicit opt-in on claude-code (default-orchestrator=workflow + Workflow tool
+    # present). The resolved choice is persisted to config so the stop-nudge
+    # suppression and `evo config get` agree.
+    assert "prose loop is the default" in SKILL_TEXT
+    # the workflow must remain reachable as an explicit opt-in
     assert "evo config set default-orchestrator workflow" in SKILL_TEXT
-    # prose must remain reachable as an explicit opt-out
-    assert "opt-out" in SKILL_TEXT and "prose" in SKILL_TEXT
+    assert "opt-in" in SKILL_TEXT and "prose" in SKILL_TEXT
 
 
 # --------------------------------------------------------------------------- #
