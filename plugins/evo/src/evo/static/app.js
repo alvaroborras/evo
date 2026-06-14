@@ -1276,6 +1276,7 @@ function renderTimeline(opts) {
     const barCls = ['exp-bar'];
     if (r.node.id === 'root') barCls.push('root-bar');
     else barCls.push(r.node.status || '');
+    if (r.node.gate_result === false) barCls.push('gate-failed');
     if (isSelected) barCls.push('selected');
     if (inLineage) barCls.push('lineage');
     if (muted) barCls.push('muted');
@@ -1302,7 +1303,8 @@ function renderTimeline(opts) {
         <span class="exp-id">${esc(shortId(r.node.id))}</span>
         <span class="exp-hyp">${esc(hyp)}</span>
         <span class="exp-score">${scoreText}</span>
-        ${delta ? `<span class="exp-delta" style="color:${deltaColor}">${delta}</span>` : ''}`;
+        ${delta ? `<span class="exp-delta" style="color:${deltaColor}">${delta}</span>` : ''}
+        ${r.node.gate_result === false ? `<span class="exp-gate-fail" title="accuracy gate failed">gate ✗</span>` : ''}`;
     }
     // Compact (off-spine) bars get a hover tooltip carrying the full
     // hypothesis + delta so the user can peek without opening the drawer.
@@ -1637,7 +1639,7 @@ function bindTimelineDragPan(rowsHost) {
 const SCATTER_STRIP_MIN_H = 100;
 const SCATTER_STRIP_MAX_H = 600;
 const SCATTER_STORAGE_KEY = 'evo:scatter-strip:height';
-const SCATTER_COLLAPSED_KEY = 'evo:scatter-strip:collapsed';
+const SCATTER_STATE_KEY = 'evo:scatter-strip:state';   // collapsed | normal | maximized
 
 function loadScatterHeight() {
   try {
@@ -1650,11 +1652,25 @@ function loadScatterHeight() {
 function saveScatterHeight(h) {
   try { localStorage.setItem(SCATTER_STORAGE_KEY, String(h)); } catch {}
 }
-function loadScatterCollapsed() {
-  try { return localStorage.getItem(SCATTER_COLLAPSED_KEY) === '1'; } catch { return false; }
+// The strip has three sizes: 'collapsed' (a bar at the bottom), 'normal' (the
+// docked, resizable chart), and 'maximized' (fills the center column).
+function loadScatterState() {
+  try {
+    const v = localStorage.getItem(SCATTER_STATE_KEY);
+    return (v === 'collapsed' || v === 'maximized') ? v : 'normal';
+  } catch { return 'normal'; }
 }
-function saveScatterCollapsed(v) {
-  try { localStorage.setItem(SCATTER_COLLAPSED_KEY, v ? '1' : '0'); } catch {}
+function saveScatterState(v) {
+  try { localStorage.setItem(SCATTER_STATE_KEY, v); } catch {}
+}
+function applyScatterState(strip, st) {
+  strip.classList.toggle('collapsed', st === 'collapsed');
+  strip.classList.toggle('maximized', st === 'maximized');
+  const cb = document.getElementById('scatter-collapse-btn');
+  const eb = document.getElementById('scatter-expand-btn');
+  // collapse is a no-op once it's already a bar; expand is a no-op once maximized
+  if (cb) cb.classList.toggle('is-disabled', st === 'collapsed');
+  if (eb) eb.classList.toggle('is-disabled', st === 'maximized');
 }
 function applyScatterRect(strip) {
   const saved = loadScatterHeight();
@@ -1662,27 +1678,36 @@ function applyScatterRect(strip) {
     const h = Math.max(SCATTER_STRIP_MIN_H, Math.min(SCATTER_STRIP_MAX_H, saved));
     strip.style.height = `${h}px`;
   }
-  if (loadScatterCollapsed()) strip.classList.add('collapsed');
+  applyScatterState(strip, loadScatterState());
 }
 
 function bindScatterResize() {
   if (state._scatterResizeBound) return;
   const handle = document.getElementById('scatter-resize-top');
   const strip = document.getElementById('scatter-strip');
-  const toggle = document.getElementById('scatter-toggle');
   if (!handle || !strip) return;
   state._scatterResizeBound = true;
   applyScatterRect(strip);
 
-  // Header click toggles collapsed state. The resize handle is a
-  // separate element so dragging the top edge doesn't bubble up to the
-  // header.
-  if (toggle) {
-    toggle.addEventListener('click', () => {
-      const next = !strip.classList.contains('collapsed');
-      strip.classList.toggle('collapsed', next);
-      saveScatterCollapsed(next);
-      if (!next) renderScatter();
+  // Collapse goes straight to the bottom bar. Expand steps up: a collapsed
+  // strip opens to its normal docked size; a normal strip maximizes to fill
+  // the column. These two buttons are the only size controls.
+  const collapseBtn = document.getElementById('scatter-collapse-btn');
+  const expandBtn = document.getElementById('scatter-expand-btn');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveScatterState('collapsed');
+      applyScatterState(strip, 'collapsed');
+    });
+  }
+  if (expandBtn) {
+    expandBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const next = loadScatterState() === 'collapsed' ? 'normal' : 'maximized';
+      saveScatterState(next);
+      applyScatterState(strip, next);
+      renderScatter();
     });
   }
 
@@ -2121,7 +2146,10 @@ async function openDrawer(expId, opts) {
       ? `<div class="drawer-score-meta">from <a class="drawer-parent-link" onclick="openDrawer('${esc(node.parent)}')">${esc(node.parent)}</a></div>`
       : (node.parent === 'root' ? `<div class="drawer-score-meta">from baseline</div>` : '');
     let detail = '';
-    if (node.status === 'failed' && node.error) {
+    if (node.gate_result === false) {
+      const gf = (node.gate_failures || []).join(', ');
+      detail = `<div class="drawer-summary-detail gate-failed">Accuracy gate FAILED${gf ? ' (' + esc(gf) + ')' : ''}${node.discard_reason ? ': ' + esc(node.discard_reason) : ''}</div>`;
+    } else if (node.status === 'failed' && node.error) {
       detail = `<div class="drawer-summary-detail error">${esc(node.error)}</div>`;
     } else if (node.status === 'pruned' && node.pruned_reason) {
       detail = `<div class="drawer-summary-detail">${esc(node.pruned_reason)}</div>`;

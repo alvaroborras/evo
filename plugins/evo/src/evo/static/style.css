@@ -598,7 +598,7 @@ body {
   gap: 8px;
   padding: 8px 18px 4px;
   flex-shrink: 0;
-  cursor: pointer;
+  cursor: default;
   user-select: none;
 }
 .scatter-strip-head:hover .scatter-strip-title { color: var(--text-2); }
@@ -617,6 +617,14 @@ body {
 }
 .scatter-strip.collapsed .scatter-plot,
 .scatter-strip.collapsed .scatter-resize-top { display: none; }
+/* Maximized: the strip grows to fill the center column; the timeline above hides. */
+.scatter-strip.maximized {
+  flex: 1 1 auto;
+  height: auto !important;
+  max-height: none;
+}
+.scatter-strip.maximized .scatter-resize-top { display: none; }
+#center-col:has(.scatter-strip.maximized) #timeline-section { display: none; }
 /* Push best-score chip to the right edge of the header. */
 .scatter-strip-head .scatter-best-label { margin-left: auto; }
 .scatter-strip-title {
@@ -634,6 +642,22 @@ body {
   color: var(--amber);
 }
 .scatter-best-label:empty { display: none; }
+/* explicit collapse / expand buttons at the top-right of the scatter header */
+.scatter-strip-actions { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.scatter-action-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-4);
+  font-size: 10px; line-height: 1;
+  width: 22px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s, background 0.1s, opacity 0.1s;
+}
+.scatter-action-btn:hover { color: var(--text-1); border-color: rgba(255,106,42,0.65); background: rgba(255,106,42,0.08); }
+/* dim whichever action is a no-op at the current size */
+.scatter-action-btn.is-disabled { opacity: 0.3; pointer-events: none; }
 .scatter-plot {
   flex: 1;
   position: relative;
@@ -946,6 +970,16 @@ body {
 .exp-bar .exp-status.pending,
 .exp-bar .exp-status.discarded,
 .exp-bar .exp-status.pruned    { background: var(--text-5); }
+/* gate-failed: a faster-but-numerically-divergent node the accuracy gate rejected.
+   Amber sets it apart from an ordinary regression discard (grey). */
+.exp-bar.gate-failed .exp-status { background: var(--amber); box-shadow: 0 0 0 2px rgba(245,158,11,0.25); }
+.exp-gate-fail {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.3px;
+  color: var(--amber); background: rgba(245,158,11,0.12);
+  border: 1px solid rgba(245,158,11,0.40);
+  padding: 0 4px; border-radius: 3px; margin-left: 4px; flex-shrink: 0;
+}
+.drawer-summary-detail.gate-failed { color: var(--amber); border-left: 2px solid var(--amber); padding-left: 8px; }
 
 .exp-bar .exp-id {
   font-family: 'JetBrains Mono', monospace;
