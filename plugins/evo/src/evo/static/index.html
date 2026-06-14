@@ -76,15 +76,19 @@
         <div id="timeline-empty" class="timeline-empty hidden">No experiments yet — waiting for the agent to start a run.</div>
       </section>
 
-      <!-- Score-over-time chart, docked below the canvas. Header click
-           collapses the strip; top edge is the vertical resize handle.
-           Collapsed state persists to localStorage. -->
+      <!-- Score-over-time chart, docked below the canvas. The two buttons at
+           the top-right size it: collapse goes to a bar at the bottom; expand
+           opens a collapsed strip, then maximizes it to fill the column. The
+           top edge is the vertical resize handle. State persists to localStorage. -->
       <section id="scatter-strip" class="scatter-strip">
         <span id="scatter-resize-top" class="scatter-resize-top" title="Drag to resize"></span>
-        <div class="scatter-strip-head" id="scatter-toggle" title="Click to collapse / expand">
-          <span class="scatter-toggle-caret">▾</span>
+        <div class="scatter-strip-head">
           <span class="scatter-strip-title">score over time</span>
           <span id="scatter-best" class="scatter-best-label"></span>
+          <div class="scatter-strip-actions">
+            <button id="scatter-collapse-btn" class="scatter-action-btn" type="button" title="Collapse to a bar">▾</button>
+            <button id="scatter-expand-btn" class="scatter-action-btn" type="button" title="Expand: open, then maximize">▴</button>
+          </div>
         </div>
         <div id="scatter-plot" class="scatter-plot"></div>
       </section>
