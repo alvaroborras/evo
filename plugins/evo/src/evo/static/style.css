@@ -742,6 +742,14 @@ body {
 }
 .scatter-dot.best.committed { fill: #4ade80; }   /* lifted green */
 .scatter-dot.best.active    { fill: #c084fc; }   /* lifted purple */
+.scatter-dot.pruned-kept {
+  stroke: rgba(250,250,250,0.5);
+  stroke-width: 0.8;
+}
+.scatter-dot.selected.pruned-kept,
+.scatter-dot.best.pruned-kept {
+  stroke: var(--text-1);
+}
 .scatter-spine {
   fill: none;
   stroke: var(--amber);
@@ -980,6 +988,20 @@ body {
   margin-left: 4px; flex-shrink: 0;
 }
 .drawer-summary-detail.gate-failed { color: var(--text-2); border-left: 2px solid rgba(239,68,68,0.55); padding-left: 8px; }
+.drawer-summary-detail.pruned-kept { color: var(--text-2); border-left: 2px solid rgba(34,197,94,0.6); padding-left: 8px; }
+.exp-pruned-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.025);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  margin-left: 5px;
+  flex-shrink: 0;
+}
 
 .exp-bar .exp-id {
   font-family: 'JetBrains Mono', monospace;
@@ -1057,10 +1079,15 @@ body {
 
 .exp-bar.pruned {
   border-style: dashed;
-  opacity: 0.75;
 }
 .exp-bar.pruned .exp-id,
 .exp-bar.pruned .exp-hyp { color: var(--text-5); }
+.exp-bar.pruned.pruned-kept {
+  border-style: solid;
+}
+.exp-bar.pruned.pruned-kept .exp-id { color: var(--text-5); }
+.exp-bar.pruned.pruned-kept .exp-hyp { color: var(--text-1); }
+.exp-bar.pruned.pruned-kept .exp-score { color: var(--text-1); }
 
 .exp-bar.pending {
   border-style: dashed;
@@ -1532,6 +1559,10 @@ body {
   border-color: var(--text-6);
   background: var(--bg-card);
 }
+.drawer-child.pruned-kept {
+  border-style: solid;
+  border-color: var(--border-subtle);
+}
 .drawer-child-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -1539,6 +1570,7 @@ body {
 }
 .drawer-child-dot.committed { background: var(--green); }
 .drawer-child-dot.failed    { background: var(--red); }
+.drawer-child-dot.pruned-kept { box-shadow: 0 0 0 1px rgba(250,250,250,0.35); }
 .drawer-child-dot.active,
 .drawer-child-dot.evaluated,
 .drawer-child-dot.pending,

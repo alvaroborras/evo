@@ -14,6 +14,8 @@ from typing import Any
 
 from . import DISTRIBUTION_NAME, __version__
 from .core import (
+    PRUNE_KIND_EXHAUSTED,
+    PRUNE_KIND_INVALID,
     SUPPORTED_HOSTS,
     _load_meta,
     add_gate,
@@ -26,12 +28,16 @@ from .core import (
     attempt_log_path,
     attempt_outcome_path,
     attempt_traces_dir,
+    best_committed_node,
+    best_committed_score,
+    best_spine_ids,
     collect_gates_from_path,
     compare_scores,
     config_path,
     current_branch,
     delete_discarded_experiment,
     evo_dir,
+    effective_status,
     experiment_log_path,
     experiment_result_path,
     experiments_dir_for,
@@ -41,6 +47,7 @@ from .core import (
     graph_path,
     init_workspace,
     list_all_notes,
+    lineage_invalidated_by,
     load_annotations,
     load_config,
     load_graph,
@@ -2363,6 +2370,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         with workspace_executor_for(backend, root, node) as executor:
             return _cmd_run_check(args, root, config, graph, node, executor)
 
+    invalid_blocker = lineage_invalidated_by(graph, args.exp_id)
+    if invalid_blocker is not None:
+        print(
+            f"ERROR: {args.exp_id} is under invalidated lineage "
+            f"{invalid_blocker.get('id')}; branch from the best valid node "
+            f"instead. Use `evo run --check {args.exp_id}` only for forensics.",
+            file=sys.stderr,
+        )
+        return 1
+
     if node.get("status") not in (None, "pending", "active", "evaluated", "failed"):
         print(f"ERROR: {args.exp_id} has status '{node['status']}' -- cannot run again", file=sys.stderr)
         return 1
@@ -3398,6 +3415,15 @@ def _record_done_result(root: Path, args: argparse.Namespace) -> int:
     if node.get("status") not in (None, "pending", "active", "evaluated", "failed"):
         print(f"ERROR: {args.exp_id} has status '{node['status']}' -- cannot record again", file=sys.stderr)
         return 1
+    invalid_blocker = lineage_invalidated_by(graph, args.exp_id)
+    if invalid_blocker is not None:
+        print(
+            f"ERROR: {args.exp_id} is under invalidated lineage "
+            f"{invalid_blocker.get('id')}; cannot record a promoted result. "
+            f"Create a fresh child from the best valid node instead.",
+            file=sys.stderr,
+        )
+        return 1
     # `evo done` is the manual recording path; it mirrors `evo run`'s
     # attempt-scoped artifact layout so that `evo traces` and the dashboard
     # surface manually-recorded traces the same way as locally-run ones.
@@ -3548,6 +3574,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
         def _unprune(current_node: dict, _graph: dict) -> None:
             current_node["status"] = "committed"
             current_node["pruned_reason"] = None
+            current_node["prune_kind"] = None
 
         update_node(root, args.exp_id, _unprune)
         print(f"RESTORED {args.exp_id}: pruned → committed")
@@ -3630,11 +3657,32 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
 def cmd_prune(args: argparse.Namespace) -> int:
     root = repo_root()
+    config, graph = _require_workspace(root)
+    prune_kind = (
+        PRUNE_KIND_INVALID
+        if bool(getattr(args, "invalid", False))
+        else PRUNE_KIND_EXHAUSTED
+    )
+    metric = str(config.get("metric", "max"))
+    spine = best_spine_ids(graph, metric)
+    if (
+        prune_kind == PRUNE_KIND_INVALID
+        and args.exp_id in spine
+        and not bool(getattr(args, "yes", False))
+    ):
+        best_node = best_committed_node(graph, metric)
+        best_id = best_node.get("id") or "current best"
+        raise RuntimeError(
+            f"{args.exp_id} is on the current best valid spine ending at {best_id}. "
+            f"Invalidating it can change the selected best result and exclude "
+            f"descendants. If this is intentional, rerun with "
+            f"`evo prune {args.exp_id} --invalid --yes --reason \"...\"`."
+        )
 
     def _mark(current_node: dict, _graph: dict) -> None:
         # Prune accepts committed AND evaluated nodes:
-        # - committed: "this lineage is exhausted; preserve the commit but
-        #   stop branching from here"
+        # - exhausted: preserve the result but stop branching from here
+        # - invalid: remove this result and descendants from best/ship
         # - evaluated: "this didn't promote, but the score is informative;
         #   don't branch from it either"
         # Active/failed/discarded/pruned all stay forbidden.
@@ -3645,17 +3693,19 @@ def cmd_prune(args: argparse.Namespace) -> int:
             )
         current_node["status"] = "pruned"
         current_node["pruned_reason"] = args.reason
+        current_node["prune_kind"] = prune_kind
 
     update_node(root, args.exp_id, _mark)
+    kind_suffix = f" [{prune_kind}]"
     if args.reason is None:
         print(
             f"WARNING: pruning {args.exp_id} without a reason "
             f"— pass `--reason \"...\"` to record one.",
             file=sys.stderr,
         )
-        print(f"PRUNED {args.exp_id}")
+        print(f"PRUNED {args.exp_id}{kind_suffix}")
     else:
-        print(f"PRUNED {args.exp_id}: {args.reason}")
+        print(f"PRUNED {args.exp_id}{kind_suffix}: {args.reason}")
     return 0
 
 
@@ -3888,14 +3938,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     config, graph = _require_workspace(root)
     metric = config["metric"]
     nodes = [node for node in graph["nodes"].values() if node["id"] != "root"]
-    committed = [node for node in nodes if node.get("status") == "committed"]
-    best = None
-    if committed:
-        scores = [float(node["score"]) for node in committed if node.get("score") is not None]
-        best = max(scores) if metric == "max" else min(scores)
+    best = best_committed_score(graph, metric)
     print(
         f"metric={metric} epoch={config.get('current_eval_epoch', 1)} "
-        f"experiments={len(nodes)} committed={sum(1 for n in nodes if n.get('status') == 'committed')} "
+        f"experiments={len(nodes)} committed={sum(1 for n in nodes if effective_status(graph, n) == 'committed')} "
         f"evaluated={sum(1 for n in nodes if n.get('status') == 'evaluated')} "
         f"discarded={sum(1 for n in nodes if n.get('status') == 'discarded')} "
         f"failed={sum(1 for n in nodes if n.get('status') == 'failed')} "
@@ -6274,6 +6320,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--reason", default=None,
         help="why this lineage is being pruned (optional; omit for routine "
              "round-N cleanups where the parent prune already explained the why)",
+    )
+    prune_kind_p = prune_p.add_mutually_exclusive_group()
+    prune_kind_p.add_argument(
+        "--exhausted",
+        action="store_true",
+        help="close this branch while keeping its score eligible for best "
+             "(default; backwards compatible)",
+    )
+    prune_kind_p.add_argument(
+        "--invalid",
+        action="store_true",
+        help="mark this result as invalid and exclude it and descendants "
+             "from best/frontier",
+    )
+    prune_p.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm invalidating a node on the current best valid spine",
     )
     prune_p.set_defaults(func=cmd_prune)
 

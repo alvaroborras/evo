@@ -22,6 +22,10 @@ PROJECT_FILE = "project.md"
 KEYFILE_NAME = "keyfile"
 RUNTIME_ENV_VALUES_FILE = "runtime_env_values.json"
 
+PRUNE_KIND_EXHAUSTED = "exhausted"
+PRUNE_KIND_INVALID = "invalid"
+PRUNE_KINDS = frozenset({PRUNE_KIND_EXHAUSTED, PRUNE_KIND_INVALID})
+
 SUPPORTED_HOSTS = frozenset({
     "claude-code",
     "codex",
@@ -253,6 +257,7 @@ def default_graph() -> dict[str, Any]:
                 "worktree": None,
                 "commit": None,
                 "pruned_reason": None,
+                "prune_kind": None,
                 "gates": [],
             }
         },
@@ -680,6 +685,14 @@ def allocate_experiment(
         if parent_id not in nodes:
             raise KeyError(f"Unknown parent experiment: {parent_id}")
         parent = nodes[parent_id]
+        invalid_blocker = lineage_invalidated_by(graph, parent_id)
+        if invalid_blocker is not None:
+            raise RuntimeError(
+                f"Cannot allocate child of {parent_id}: lineage was invalidated "
+                f"at {invalid_blocker.get('id')}. Branch from the current best "
+                f"valid node instead, or restore the invalidated node if the "
+                f"lineage is usable again."
+            )
         if parent.get("status") == "pruned":
             raise RuntimeError(
                 f"Cannot allocate child of pruned parent {parent_id}. "
@@ -759,6 +772,7 @@ def allocate_experiment(
             "worktree": str(result.worktree),
             "commit": result.commit,
             "pruned_reason": None,
+            "prune_kind": None,
             "benchmark_result": None,
             "gate_result": None,
             "gates": [],
@@ -1017,14 +1031,85 @@ def compare_scores(metric: str, candidate: float, parent: float | None) -> bool:
     raise ValueError(f"Unknown metric: {metric}")
 
 
+def _normalized_prune_kind(node: dict[str, Any]) -> str | None:
+    kind = node.get("prune_kind")
+    return kind if kind in PRUNE_KINDS else None
+
+
+def is_exhausted_prune(node: dict[str, Any]) -> bool:
+    return (
+        node.get("status") == "pruned"
+        and _normalized_prune_kind(node) == PRUNE_KIND_EXHAUSTED
+    )
+
+
+def is_invalid_prune(node: dict[str, Any]) -> bool:
+    return (
+        node.get("status") == "pruned"
+        and _normalized_prune_kind(node) == PRUNE_KIND_INVALID
+    )
+
+
+def lineage_invalidated_by(
+    graph: dict[str, Any],
+    node_id: str,
+    *,
+    include_self: bool = True,
+) -> dict[str, Any] | None:
+    """Return the first invalid-pruned node on this node's ancestry, if any."""
+    if node_id not in graph.get("nodes", {}):
+        return None
+    chain = path_to_node(graph, node_id)
+    if not include_self:
+        chain = chain[:-1]
+    for node in chain:
+        if node.get("id") == "root":
+            continue
+        if is_invalid_prune(node):
+            return node
+    return None
+
+
+def is_valid_result_node(
+    graph: dict[str, Any],
+    node: dict[str, Any],
+    *,
+    epoch: int | None = None,
+) -> bool:
+    """True when a node's score may compete for best/ship.
+
+    `pruned` with prune_kind=exhausted closes further branching but preserves
+    the result. `pruned` with prune_kind=invalid removes the node and its
+    descendants from result selection.
+    """
+    node_id = node.get("id")
+    if not node_id or node_id == "root" or node.get("score") is None:
+        return False
+    if epoch is not None and node.get("eval_epoch") != epoch:
+        return False
+    if lineage_invalidated_by(graph, node_id) is not None:
+        return False
+    if node.get("status") == "committed":
+        return True
+    return bool(is_exhausted_prune(node) and node.get("commit"))
+
+
+def effective_status(graph: dict[str, Any], node: dict[str, Any]) -> str:
+    """Derived status for consumers that need result validity semantics."""
+    node_id = node.get("id")
+    if node_id and node_id != "root":
+        blocker = lineage_invalidated_by(graph, node_id)
+        if blocker is not None:
+            return "invalidated" if blocker.get("id") == node_id else "lineage_blocked"
+    if is_exhausted_prune(node) and node.get("commit"):
+        return "committed"
+    return str(node.get("status") or "pending")
+
+
 def best_committed_score(graph: dict[str, Any], metric: str, epoch: int | None = None) -> float | None:
     scores: list[float] = []
     for node in graph["nodes"].values():
-        if node.get("status") != "committed":
-            continue
-        if node.get("score") is None:
-            continue
-        if epoch is not None and node.get("eval_epoch") != epoch:
+        if not is_valid_result_node(graph, node, epoch=epoch):
             continue
         scores.append(float(node["score"]))
     if not scores:
@@ -1035,7 +1120,7 @@ def best_committed_score(graph: dict[str, Any], metric: str, epoch: int | None =
 def best_committed_node(graph: dict[str, Any], metric: str) -> dict[str, Any] | None:
     best: dict[str, Any] | None = None
     for node in graph["nodes"].values():
-        if node.get("status") != "committed" or node.get("score") is None:
+        if not is_valid_result_node(graph, node):
             continue
         if best is None:
             best = node
@@ -1058,16 +1143,27 @@ def path_to_node(graph: dict[str, Any], node_id: str) -> list[dict[str, Any]]:
     return chain
 
 
+def best_spine_ids(graph: dict[str, Any], metric: str) -> set[str]:
+    best = best_committed_node(graph, metric)
+    if best is None:
+        return set()
+    return {node["id"] for node in path_to_node(graph, best["id"])}
+
+
 def frontier_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
     nodes = graph["nodes"]
     result = []
     for node in nodes.values():
         if node.get("status") != "committed":
             continue
-        if node.get("pruned_reason"):
+        if lineage_invalidated_by(graph, node["id"]) is not None:
             continue
         children = [nodes[cid] for cid in node.get("children", []) if cid in nodes]
-        if any(child.get("status") in {"committed", "active"} for child in children):
+        if any(
+            child.get("status") in {"committed", "active"}
+            and lineage_invalidated_by(graph, child["id"]) is None
+            for child in children
+        ):
             continue
         result.append(node)
     return sorted(result, key=lambda item: item["id"])

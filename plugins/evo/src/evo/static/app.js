@@ -150,6 +150,39 @@ function statusLabel(s) {
   return s || '?';
 }
 
+function isPrunedKept(node) {
+  return !!node && node.status === 'pruned' && node.prune_kind === 'exhausted' && !!node.commit;
+}
+
+function isInvalidLineage(node) {
+  return !!node && (node.effective_status === 'invalidated' || node.effective_status === 'lineage_blocked');
+}
+
+function resultStatus(node) {
+  if (isPrunedKept(node)) return 'committed';
+  if (isInvalidLineage(node)) return 'pruned';
+  return node?.status || 'pending';
+}
+
+function statusLabelForNode(node) {
+  if (isPrunedKept(node)) return 'Kept / Pruned';
+  if (node?.effective_status === 'invalidated') return 'Invalid';
+  if (node?.effective_status === 'lineage_blocked') return 'Blocked';
+  return statusLabel(node?.status);
+}
+
+function statusColorForNode(node) {
+  return STATUS_COLORS[resultStatus(node)] || STATUS_COLORS.pending || '#52525b';
+}
+
+function isValidResultForDashboard(node) {
+  return !!node
+    && node.id !== 'root'
+    && node.score != null
+    && node.gate_result !== false
+    && resultStatus(node) === 'committed';
+}
+
 function shortId(id) {
   return id.replace('exp_', '');
 }
@@ -643,7 +676,7 @@ function renderScatter() {
   let best = null;
   const stairPts = [];
   exps.forEach((n, i) => {
-    if (n.status !== 'committed' || n.score == null) return;
+    if (!isValidResultForDashboard(n)) return;
     if (best == null || (isMax ? n.score > best : n.score < best)) best = n.score;
     stairPts.push([xFor(i), yFor(best)]);
   });
@@ -671,7 +704,8 @@ function renderScatter() {
 
   // Dots — render committed last so they sit on top visually.
   const dotOrder = (n) => {
-    if (n.status === 'committed') return 4;
+    const status = resultStatus(n);
+    if (status === 'committed') return 4;
     if (n.status === 'active') return 3;
     if (n.status === 'failed') return 2;
     return 1;
@@ -684,7 +718,7 @@ function renderScatter() {
   //   <hypothesis>
   //   <delta from parent>
   function dotHoverText(n, scoreText) {
-    const head = `${shortId(n.id)} · ${n.status} · ${scoreText}`;
+    const head = `${shortId(n.id)} · ${statusLabelForNode(n)} · ${scoreText}`;
     const hyp = n.hypothesis || (n.status === 'failed' ? (n.error || 'failed') : '');
     const delta = scoreDelta(n);
     const parts = [head];
@@ -697,7 +731,8 @@ function renderScatter() {
     if (n.score == null) return '';  // nothing to plot for active/pending
     const cx = xFor(i);
     const cy = yFor(n.score);
-    const status = n.status || 'pending';
+    const status = resultStatus(n);
+    const statusCls = `${status}${isPrunedKept(n) ? ' pruned-kept' : ''}`;
     const sel = state.selectedNode === n.id ? 'selected' : '';
     const isBest = n.id === bestId;
     // Best dot reads brighter (white-ish outline + larger radius) so the
@@ -707,7 +742,7 @@ function renderScatter() {
     const lin = spine.has(n.id) ? `<circle class="scatter-spine" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r + 2.5}"/>` : '';
     const bestCls = isBest ? ' best' : '';
     const hover = esc(dotHoverText(n, n.score.toFixed(3)));
-    return `${lin}<circle class="scatter-dot ${status}${bestCls} ${sel}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r}" data-id="${esc(n.id)}" data-hover="${hover}"/>`;
+    return `${lin}<circle class="scatter-dot ${statusCls}${bestCls} ${sel}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r}" data-id="${esc(n.id)}" data-hover="${hover}"/>`;
   }).join('');
 
   // No-score dots (active / pending) — sit on a phantom baseline row at the
@@ -720,7 +755,8 @@ function renderScatter() {
       const cy = H - PAD_B + 6;  // just below the axis line
       const sel = state.selectedNode === n.id ? 'selected' : '';
       const hover = esc(dotHoverText(n, 'no score yet'));
-      return `<circle class="scatter-dot ${n.status || 'pending'} ${sel} no-score" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="2.5" data-id="${esc(n.id)}" data-hover="${hover}"/>`;
+      const statusCls = `${resultStatus(n)}${isPrunedKept(n) ? ' pruned-kept' : ''}`;
+      return `<circle class="scatter-dot ${statusCls} ${sel} no-score" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="2.5" data-id="${esc(n.id)}" data-hover="${hover}"/>`;
     })
     .join('');
 
@@ -790,8 +826,7 @@ function bestExperimentId() {
   const isMax = metric === 'max';
   let best = null;
   for (const n of Object.values(state.graph.nodes)) {
-    if (n.id === 'root') continue;
-    if (n.status !== 'committed' || n.score == null) continue;
+    if (!isValidResultForDashboard(n)) continue;
     if (!best || (isMax ? n.score > best.score : n.score < best.score)) best = n;
   }
   return best ? best.id : null;
@@ -1014,7 +1049,7 @@ function bestDescendantScore(id) {
   function walk(nid) {
     const node = getNode(nid);
     if (!node) return;
-    if (node.id !== 'root' && node.status === 'committed' && node.score != null) {
+    if (isValidResultForDashboard(node)) {
       if (best == null || (isMax ? node.score > best : node.score < best)) best = node.score;
     }
     for (const cid of childIds(nid)) walk(cid);
@@ -1276,6 +1311,7 @@ function renderTimeline(opts) {
     const barCls = ['exp-bar'];
     if (r.node.id === 'root') barCls.push('root-bar');
     else barCls.push(r.node.status || '');
+    if (isPrunedKept(r.node)) barCls.push('pruned-kept');
     if (r.node.gate_result === false) barCls.push('gate-failed');
     if (isSelected) barCls.push('selected');
     if (inLineage) barCls.push('lineage');
@@ -1298,12 +1334,13 @@ function renderTimeline(opts) {
       const deltaColor = deltaColorFor(delta);
       const hyp = r.node.hypothesis || (r.node.status === 'failed' ? (r.node.error || 'failed') : '(no hypothesis)');
       const scoreText = r.node.score != null ? r.node.score.toFixed(2) : (r.node.status === 'failed' ? 'err' : '—');
-      const dotCls = r.node.status || 'pending';
+      const dotCls = resultStatus(r.node);
       barInner = `<span class="exp-status ${dotCls}"></span>
         <span class="exp-id">${esc(shortId(r.node.id))}</span>
         <span class="exp-hyp">${esc(hyp)}</span>
         <span class="exp-score">${scoreText}</span>
         ${delta ? `<span class="exp-delta" style="color:${deltaColor}">${delta}</span>` : ''}
+        ${isPrunedKept(r.node) ? `<span class="exp-pruned-badge" title="Committed result preserved; removed from frontier branching.">pruned</span>` : ''}
         ${r.node.gate_result === false ? `<span class="exp-gate-fail" title="accuracy gate failed">gate ✗</span>` : ''}`;
     }
     // Compact (off-spine) bars get a hover tooltip carrying the full
@@ -1803,14 +1840,14 @@ function renderChildrenSection(node) {
     return isMax ? sb - sa : sa - sb;
   });
   const rows = sorted.map((c) => {
-    const dot = c.status || 'pending';
+    const dot = `${resultStatus(c)}${isPrunedKept(c) ? ' pruned-kept' : ''}`;
     const scoreText = c.score != null ? c.score.toFixed(2)
                     : c.status === 'failed' ? 'err'
                     : c.status === 'active' ? 'run' : '—';
     const delta = scoreDelta(c);
     const deltaColor = deltaColorFor(delta);
     const hyp = c.hypothesis || (c.status === 'failed' ? (c.error || 'failed') : '');
-    return `<div class="drawer-child" onclick="openDrawer('${esc(c.id)}')" title="${esc(c.hypothesis || c.id)}">
+    return `<div class="drawer-child ${isPrunedKept(c) ? 'pruned-kept' : ''}" onclick="openDrawer('${esc(c.id)}')" title="${esc(statusLabelForNode(c) + ': ' + (c.hypothesis || c.id))}">
       <span class="drawer-child-dot ${dot}"></span>
       <span class="drawer-child-id">${esc(shortId(c.id))}</span>
       <span class="drawer-child-score">${scoreText}</span>
@@ -2103,7 +2140,7 @@ async function openDrawer(expId, opts) {
 
   const delta = scoreDelta(node);
   const deltaColor = deltaColorFor(delta);
-  const statusColor = STATUS_COLORS[node.status] || '#52525b';
+  const statusColor = statusColorForNode(node);
   const hasChildren = (node.children || []).length > 0;
   const activeTab = ['summary', 'diff', 'tasks', 'logs'].includes(state.sidebarTab)
     ? state.sidebarTab
@@ -2123,7 +2160,7 @@ async function openDrawer(expId, opts) {
       <span class="drawer-id">${esc(node.id)}</span>
       <span class="pill" style="background:${statusColor}15; color:${statusColor}">
         <span class="dot" style="background:${statusColor}"></span>
-        ${esc(statusLabel(node.status))}
+        ${esc(statusLabelForNode(node))}
       </span>
       ${node.id !== 'root' ? `<button class="sidebar-spawn-btn" onclick="spawnFromNode('${esc(node.id)}')" title="Queue an evo direct directive asking the orchestrator to branch a new experiment from this node.">+ spawn</button>` : ''}
       ${isPrunable ? `<button class="sidebar-prune-btn" onclick="pruneNode('${esc(node.id)}')" title="Remove this leaf from the frontier so the planner stops branching from it. Preserves the commit.">prune</button>` : ''}
@@ -2151,8 +2188,16 @@ async function openDrawer(expId, opts) {
       detail = `<div class="drawer-summary-detail gate-failed">Accuracy gate FAILED${gf ? ' (' + esc(gf) + ')' : ''}${node.discard_reason ? ': ' + esc(node.discard_reason) : ''}</div>`;
     } else if (node.status === 'failed' && node.error) {
       detail = `<div class="drawer-summary-detail error">${esc(node.error)}</div>`;
+    } else if (node.effective_status === 'lineage_blocked') {
+      const blocker = node.lineage_blocked_by || 'an ancestor';
+      const reason = node.lineage_blocked_reason ? `: ${esc(node.lineage_blocked_reason)}` : '';
+      detail = `<div class="drawer-summary-detail error">Lineage blocked by ${esc(blocker)}${reason}</div>`;
     } else if (node.status === 'pruned' && node.pruned_reason) {
-      detail = `<div class="drawer-summary-detail">${esc(node.pruned_reason)}</div>`;
+      const prunedCls = isPrunedKept(node) ? ' pruned-kept' : '';
+      const prefix = isPrunedKept(node)
+        ? 'Kept result, pruned from frontier: '
+        : (node.prune_kind === 'invalid' ? 'Invalidated result: ' : '');
+      detail = `<div class="drawer-summary-detail${prunedCls}">${prefix}${esc(node.pruned_reason)}</div>`;
     } else if (node.status === 'discarded' && node.discard_reason) {
       detail = `<div class="drawer-summary-detail">${esc(node.discard_reason)}</div>`;
     } else if (isFrontierCandidate(node)) {
@@ -2716,9 +2761,12 @@ function pruneNode(expId) {
   const targetEl = document.getElementById('prune-target-id');
   const reasonEl = document.getElementById('prune-reason');
   const errEl = document.getElementById('prune-error');
+  const submitBtn = document.getElementById('prune-submit');
   if (!overlay || !targetEl || !reasonEl) return;
   targetEl.textContent = expId;
   reasonEl.value = '';
+  state._pruneConfirmYes = false;
+  if (submitBtn) submitBtn.textContent = 'Prune';
   if (errEl) { errEl.textContent = ''; errEl.classList.add('hidden'); }
   overlay.classList.remove('hidden');
   setTimeout(() => reasonEl.focus(), 0);
@@ -2730,6 +2778,7 @@ function closePruneModal(ev) {
   const overlay = document.getElementById('prune-overlay');
   if (overlay) overlay.classList.add('hidden');
   state._pruneTarget = null;
+  state._pruneConfirmYes = false;
 }
 
 async function submitPrune() {
@@ -2752,10 +2801,19 @@ async function submitPrune() {
     const res = await fetch(`/api/node/${encodeURIComponent(expId)}/prune`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({ reason, kind: 'exhausted', yes: !!state._pruneConfirmYes }),
     });
     if (!res.ok) {
       const payload = await res.json().catch(() => ({}));
+      if (payload.requires_yes) {
+        state._pruneConfirmYes = true;
+        if (submitBtn) submitBtn.textContent = 'Prune anyway';
+        if (errEl) {
+          errEl.textContent = `${expId} is on the best valid path. Click Prune anyway to confirm.`;
+          errEl.classList.remove('hidden');
+        }
+        return;
+      }
       if (errEl) {
         errEl.textContent = `Could not prune ${expId}: ${payload.error || res.statusText}`;
         errEl.classList.remove('hidden');
@@ -4241,6 +4299,8 @@ function viewSignature() {
         n.status || '',
         n.score == null ? '' : String(n.score),
         n.parent || '',
+        n.commit || '',
+        n.pruned_reason || '',
         n.eval_epoch == null ? '' : String(n.eval_epoch),
         n.current_attempt == null ? '' : String(n.current_attempt),
       );

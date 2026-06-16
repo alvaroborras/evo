@@ -10,12 +10,16 @@ from typing import Any
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from .core import (
+    PRUNE_KIND_EXHAUSTED,
+    PRUNE_KINDS,
     _load_meta,
     _save_meta,
     attempt_dir,
     attempt_outcome_path,
     attempt_traces_dir,
     best_committed_score,
+    best_spine_ids,
+    effective_status,
     evo_dir,
     experiments_dir_for,
     frontier_nodes,
@@ -26,6 +30,7 @@ from .core import (
     load_annotations,
     load_config,
     load_graph,
+    lineage_invalidated_by,
     repo_root,
     runtime_env_summary,
     runtime_env_values_path,
@@ -61,6 +66,7 @@ def _public_node(
     node: dict[str, Any],
     *,
     workspace_config: dict[str, Any],
+    graph: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from .backends import backend_spec_for_node, backend_state_key
 
@@ -86,6 +92,11 @@ def _public_node(
         resolved["provider"] = backend_config.get("provider")
     public["resolved_backend"] = resolved
     public["checks"] = _checks_summary(root, node.get("id", ""))
+    if graph is not None:
+        public["effective_status"] = effective_status(graph, node)
+        blocker = lineage_invalidated_by(graph, node.get("id", ""))
+        public["lineage_blocked_by"] = blocker.get("id") if blocker else None
+        public["lineage_blocked_reason"] = blocker.get("pruned_reason") if blocker else None
     return public
 
 
@@ -657,6 +668,10 @@ def create_app(root: Path | None = None) -> Flask:
         graph = load_graph(_root())
         nodes = [node for node in graph["nodes"].values() if node["id"] != "root"]
         metric = config.get("metric", "max")
+        effective_counts: dict[str, int] = {}
+        for node in nodes:
+            status = effective_status(graph, node)
+            effective_counts[status] = effective_counts.get(status, 0) + 1
         baseline = None
         for node in graph["nodes"].values():
             if node.get("parent") == "root" and node.get("score") is not None:
@@ -670,13 +685,15 @@ def create_app(root: Path | None = None) -> Flask:
                 "best_score": best_committed_score(graph, metric),
                 "baseline_score": baseline,
                 "total_experiments": len(nodes),
-                "committed": sum(1 for node in nodes if node.get("status") == "committed"),
+                "committed": effective_counts.get("committed", 0),
                 "evaluated": sum(1 for node in nodes if node.get("status") == "evaluated"),
                 "discarded": sum(1 for node in nodes if node.get("status") == "discarded"),
                 "active": sum(1 for node in nodes if node.get("status") == "active"),
                 "pending": sum(1 for node in nodes if node.get("status") == "pending"),
                 "failed": sum(1 for node in nodes if node.get("status") == "failed"),
                 "pruned": sum(1 for node in nodes if node.get("status") == "pruned"),
+                "invalidated": effective_counts.get("invalidated", 0),
+                "lineage_blocked": effective_counts.get("lineage_blocked", 0),
                 "frontier": len(frontier_nodes(graph)),
                 "eval_epoch": config.get("current_eval_epoch", 1),
             }
@@ -689,7 +706,7 @@ def create_app(root: Path | None = None) -> Flask:
         graph = load_graph(root)
         public_graph = dict(graph)
         public_graph["nodes"] = {
-            node_id: _public_node(root, node, workspace_config=config)
+            node_id: _public_node(root, node, workspace_config=config, graph=graph)
             for node_id, node in graph["nodes"].items()
         }
         return jsonify(public_graph)
@@ -720,25 +737,51 @@ def create_app(root: Path | None = None) -> Flask:
     def node(exp_id: str):
         root = _root()
         config = load_config(root)
-        return jsonify(_public_node(root, load_graph(root)["nodes"][exp_id], workspace_config=config))
+        graph = load_graph(root)
+        return jsonify(_public_node(root, graph["nodes"][exp_id], workspace_config=config, graph=graph))
 
     @app.post("/api/node/<exp_id>/prune")
     def prune_node(exp_id: str):
         """Mark a node as pruned with a reason. Mirrors `evo prune <exp_id>`.
 
-        Pruning removes a committed/evaluated leaf from the frontier without
-        deleting the commit. Active/failed/discarded/already-pruned nodes
-        cannot be pruned.
+        Exhausted pruning removes a committed/evaluated leaf from the frontier
+        without deleting the commit or disqualifying its score. Invalid pruning
+        excludes the node and descendants from best/frontier/ship selection.
         """
         body = request.get_json(silent=True) or {}
         reason = (body.get("reason") or "").strip()
         if not reason:
             return jsonify({"error": "reason is required"}), 400
+        prune_kind = (body.get("kind") or PRUNE_KIND_EXHAUSTED).strip()
+        if prune_kind not in PRUNE_KINDS:
+            return (
+                jsonify({"error": "kind must be one of: exhausted, invalid"}),
+                400,
+            )
 
         root = _root()
+        config = load_config(root)
         graph = load_graph(root)
         if exp_id not in graph["nodes"]:
             return jsonify({"error": f"unknown experiment {exp_id!r}"}), 404
+        metric = str(config.get("metric", "max"))
+        if (
+            prune_kind == PRUNE_KIND_INVALID
+            and exp_id in best_spine_ids(graph, metric)
+            and not bool(body.get("yes"))
+        ):
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            f"{exp_id} is on the current best valid spine. "
+                            f"Confirm before invalidating it."
+                        ),
+                        "requires_yes": True,
+                    }
+                ),
+                409,
+            )
         current_status = graph["nodes"][exp_id].get("status")
         if current_status not in ("committed", "evaluated"):
             return (
@@ -756,13 +799,14 @@ def create_app(root: Path | None = None) -> Flask:
         def _mark(current_node: dict, _graph: dict) -> None:
             current_node["status"] = "pruned"
             current_node["pruned_reason"] = reason
+            current_node["prune_kind"] = prune_kind
 
         try:
             updated = update_node(root, exp_id, _mark)
         except (KeyError, RuntimeError) as exc:
             return jsonify({"error": str(exc)}), 400
-        config = load_config(root)
-        return jsonify(_public_node(root, updated, workspace_config=config))
+        graph = load_graph(root)
+        return jsonify(_public_node(root, updated, workspace_config=config, graph=graph))
 
     @app.get("/api/workspace")
     def workspace():

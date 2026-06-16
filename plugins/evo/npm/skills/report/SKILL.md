@@ -13,10 +13,10 @@ Render the dashboard's scatter plot as a colored terminal block, one chart per r
 Mirrors the web dashboard's score scatter (left rail of `evo dashboard`):
 
 - X = experiment creation order, Y = score
-- Dot color by status: green = committed, red = failed, purple = active, grey = pending / evaluated / discarded / pruned
-- ★ marks the current best committed experiment
+- Dot color by status: green = committed valid result, red = failed, purple = active, grey = pending / evaluated / discarded / pruned
+- ★ marks the current best valid committed-result experiment. `pruned` with `prune_kind=exhausted` can still be best; `prune_kind=invalid` and its descendants cannot.
 - Yellow ring on dots that sit on the best-path spine (root → best)
-- Yellow stair line traces cumulative-best across committed experiments
+- Yellow stair line traces cumulative-best across valid committed-result experiments
 - ○ at the baseline for experiments that have no score yet (active / pending)
 
 Every run in the workspace is rendered, stacked top-to-bottom, with a header line showing `run_id · target · metric`.

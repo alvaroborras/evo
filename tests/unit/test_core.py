@@ -14,7 +14,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "evo" / "src"))
 
-from evo.core import collect_gates_from_path, path_to_node  # noqa: E402
+from evo.core import (  # noqa: E402
+    PRUNE_KIND_EXHAUSTED,
+    PRUNE_KIND_INVALID,
+    best_committed_node,
+    best_committed_score,
+    collect_gates_from_path,
+    effective_status,
+    frontier_nodes,
+    is_valid_result_node,
+    lineage_invalidated_by,
+    path_to_node,
+)
 
 
 def _graph(*nodes: dict) -> dict:
@@ -22,7 +33,27 @@ def _graph(*nodes: dict) -> dict:
 
 
 def _node(id_: str, parent: str | None, gates: list[dict] | None = None, **extra) -> dict:
-    return {"id": id_, "parent": parent, "gates": gates or [], **extra}
+    return {
+        "id": id_,
+        "parent": parent,
+        "children": [],
+        "status": "committed" if id_ != "root" else "root",
+        "score": None,
+        "commit": None,
+        "pruned_reason": None,
+        "prune_kind": None,
+        "gates": gates or [],
+        **extra,
+    }
+
+
+def _linked_graph(*nodes: dict) -> dict:
+    graph = _graph(*nodes)
+    for node in graph["nodes"].values():
+        parent = node.get("parent")
+        if parent and parent in graph["nodes"]:
+            graph["nodes"][parent].setdefault("children", []).append(node["id"])
+    return graph
 
 
 def _gate(name: str, command: str = "cmd") -> dict:
@@ -90,6 +121,72 @@ def test_collect_gates_on_root_returns_own_only() -> None:
     graph = _graph(_node("root", None, gates=[_gate("core_tests")]))
     gates = collect_gates_from_path(graph, "root")
     assert [g["name"] for g in gates] == ["core_tests"]
+
+
+def test_exhausted_prune_keeps_result_eligible_but_not_frontier() -> None:
+    graph = _linked_graph(
+        _node("root", None),
+        _node(
+            "exp_0000",
+            "root",
+            status="pruned",
+            score=0.9,
+            commit="abc",
+            pruned_reason="no more useful children",
+            prune_kind=PRUNE_KIND_EXHAUSTED,
+        ),
+        _node("exp_0001", "root", status="committed", score=0.7, commit="def"),
+    )
+
+    assert is_valid_result_node(graph, graph["nodes"]["exp_0000"])
+    assert effective_status(graph, graph["nodes"]["exp_0000"]) == "committed"
+    assert best_committed_score(graph, "max") == 0.9
+    assert best_committed_node(graph, "max")["id"] == "exp_0000"
+    assert [n["id"] for n in frontier_nodes(graph)] == ["exp_0001"]
+
+
+def test_invalid_prune_blocks_node_and_descendants_from_best_and_frontier() -> None:
+    graph = _linked_graph(
+        _node("root", None),
+        _node(
+            "exp_0000",
+            "root",
+            status="pruned",
+            score=0.9,
+            commit="abc",
+            pruned_reason="score computed against wrong benchmark",
+            prune_kind=PRUNE_KIND_INVALID,
+        ),
+        _node("exp_0001", "exp_0000", status="committed", score=1.2, commit="def"),
+        _node("exp_0002", "root", status="committed", score=0.8, commit="ghi"),
+    )
+
+    assert lineage_invalidated_by(graph, "exp_0001")["id"] == "exp_0000"
+    assert not is_valid_result_node(graph, graph["nodes"]["exp_0000"])
+    assert not is_valid_result_node(graph, graph["nodes"]["exp_0001"])
+    assert effective_status(graph, graph["nodes"]["exp_0000"]) == "invalidated"
+    assert effective_status(graph, graph["nodes"]["exp_0001"]) == "lineage_blocked"
+    assert best_committed_node(graph, "max")["id"] == "exp_0002"
+    assert [n["id"] for n in frontier_nodes(graph)] == ["exp_0002"]
+
+
+def test_legacy_pruned_node_remains_excluded_for_backwards_compatibility() -> None:
+    graph = _linked_graph(
+        _node("root", None),
+        _node(
+            "exp_0000",
+            "root",
+            status="pruned",
+            score=1.0,
+            commit="abc",
+            pruned_reason="legacy graph before prune_kind",
+        ),
+        _node("exp_0001", "root", status="committed", score=0.5, commit="def"),
+    )
+
+    assert not is_valid_result_node(graph, graph["nodes"]["exp_0000"])
+    assert effective_status(graph, graph["nodes"]["exp_0000"]) == "pruned"
+    assert best_committed_node(graph, "max")["id"] == "exp_0001"
 
 
 TESTS = [fn for name, fn in globals().items() if name.startswith("test_") and callable(fn)]

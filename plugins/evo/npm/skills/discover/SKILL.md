@@ -25,6 +25,9 @@ evo plugin
 │   │   ├── evo:optimize       after discover commits the baseline -- drives the loop.
 │   │   │                      Args: subagents=N (read sizing-the-round FIRST),
 │   │   │                            autonomous, subagents-only, budget=N, stall=N
+│   │   ├── evo:ship           after the loop stops -- distills the best valid
+│   │   │                      experiment into a mergeable change (PR if remote,
+│   │   │                      else merge) + a mergeability report
 │   │   ├── evo:finetuning     task is finetuning / post-training / training a model
 │   │   └── evo:infra-setup    need a remote backend, pooled workspaces, lease/slot
 │   │                          management, or specific provider auth/setup

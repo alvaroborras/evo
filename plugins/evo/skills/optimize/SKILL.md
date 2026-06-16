@@ -331,16 +331,18 @@ After all subagents complete:
 
 **Cross-cut the round's evaluated nodes.** Before moving on, read `experiments/<id>/attempts/NNN/outcome.json` for each evaluated node from this round. The structured `gates[]` entries and `benchmark.result` let you spot shared failure modes the subagent summaries may have glossed over (e.g., three different subagents produced evaluated nodes whose gate_failures all included `refund_flow` -- that's a structural constraint the next round must confront, not three independent bad hypotheses).
 
-Prune dead branches where 3+ children all regressed:
+Prune branches you have decided are exhausted:
   ```bash
-  evo prune <exp_id> --reason "exhausted: N children all regressed"
+  evo prune <exp_id> --exhausted --reason "exhausted: <why>"
   ```
 
-`evo prune` accepts `committed` or `evaluated` nodes. Use it when you want
-to mark a lineage exhausted while preserving the result for later review or
-reference. Prune keeps the git commit alive (anchored at `refs/evo-anchor/<run>/<exp>`)
-so the node can be restored if needed. **Never `evo discard` a committed
-node** — it would orphan the branch ref and risk losing the commit.
+`evo prune` accepts `committed` or `evaluated` nodes:
+- `--exhausted` (default/legacy): stop branching here; the result still counts.
+- `--invalid`: this result is wrong; exclude it and descendants from best/frontier.
+- `--yes`: required only with `--invalid` on the current best valid spine.
+
+Use `--invalid --yes` when you have proven a best-spine result or ancestor is
+wrong. **Never `evo discard` a committed node** -- prune preserves its commit.
 
 If a previously-pruned (or discarded-then-restored) node is worth revisiting:
   ```bash

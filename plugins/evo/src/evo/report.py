@@ -7,7 +7,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .core import CONFIG_FILE, GRAPH_FILE, evo_dir, list_runs
+from .core import (
+    CONFIG_FILE,
+    GRAPH_FILE,
+    best_committed_node,
+    best_committed_score,
+    evo_dir,
+    frontier_nodes,
+    is_valid_result_node,
+    list_runs,
+)
 
 
 def _detect_terminal_size(default: tuple[int, int] = (80, 24)) -> tuple[int, int]:
@@ -99,7 +108,7 @@ def _style(text: str, color: str | None, *, bold: bool = False, use_color: bool 
 def _running_best(graph: dict, metric: str) -> tuple[set[str], str | None]:
     """Nodes that were the cumulative best at the time they were created.
 
-    Walk committed experiments in creation order; each one whose score
+    Walk valid committed-result experiments in creation order; each one whose score
     surpasses the running best becomes a member of this set. The overall
     champion (the last entry) is also returned separately so the renderer
     can mark it with ★ and leave the rest as the amber spine.
@@ -120,7 +129,7 @@ def _running_best(graph: dict, metric: str) -> tuple[set[str], str | None]:
     best_id: str | None = None
     best_score: float | None = None
     for n in ordered:
-        if n.get("status") != "committed" or n.get("score") is None:
+        if not is_valid_result_node(graph, n):
             continue
         s = n["score"]
         if best_score is None or (is_max and s > best_score) or (not is_max and s < best_score):
@@ -228,7 +237,7 @@ def _render_run(
     for i, n in enumerate(exps):
         if best_idx is not None and i > best_idx:
             break
-        if n.get("status") != "committed" or n.get("score") is None:
+        if not is_valid_result_node(graph, n):
             continue
         s = n["score"]
         if running is None or (is_max and s > running) or (not is_max and s < running):
@@ -423,7 +432,6 @@ def _fmt_score(s: float | None) -> str:
 def _compute_stats(graph: dict, metric: str) -> dict:
     """Stats mirroring the dashboard's /api/stats card payload."""
     nodes = graph.get("nodes", {})
-    is_max = metric == "max"
     exps = [n for nid, n in nodes.items() if nid != "root"]
     by_status: dict[str, int] = {}
     for n in exps:
@@ -431,14 +439,9 @@ def _compute_stats(graph: dict, metric: str) -> dict:
             n.get("status") or "pending", 0
         ) + 1
 
-    best_score = None
-    best_id = None
-    for n in exps:
-        if n.get("status") != "committed" or n.get("score") is None:
-            continue
-        s = n["score"]
-        if best_score is None or (is_max and s > best_score) or (not is_max and s < best_score):
-            best_score, best_id = s, n["id"]
+    best_node = best_committed_node(graph, metric)
+    best_score = best_committed_score(graph, metric)
+    best_id = best_node["id"] if best_node else None
 
     # Baseline = first committed child of root, in creation order.
     baseline = None
@@ -447,15 +450,7 @@ def _compute_stats(graph: dict, metric: str) -> dict:
             baseline = n["score"]
             break
 
-    # Frontier = committed leaves with no committed/active children, not pruned.
-    frontier = 0
-    for n in exps:
-        if n.get("status") != "committed" or n.get("pruned_reason"):
-            continue
-        children = [nodes.get(cid, {}) for cid in n.get("children", [])]
-        if any(c.get("status") in {"committed", "active"} for c in children):
-            continue
-        frontier += 1
+    frontier = len(frontier_nodes(graph))
 
     return {
         "total": len(exps),
@@ -537,7 +532,7 @@ def _build_top_table(graph: dict, cfg: dict, width: int, use_color: bool,
     is_max = metric == "max"
     committed = [
         n for nid, n in nodes.items()
-        if nid != "root" and n.get("status") == "committed" and n.get("score") is not None
+        if nid != "root" and is_valid_result_node(graph, n)
     ]
     if not committed:
         return [

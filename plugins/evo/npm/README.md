@@ -25,6 +25,8 @@ skill needs one to run multiple experiments per round.
 | `skills/discover/` | First-run setup: explore repo, propose optimization dimensions, build benchmark, run first experiment |
 | `skills/optimize/` | The search loop: parallel subagents form hypotheses, edit, get scored, frontier picks next branch |
 | `skills/subagent/` | Per-experiment brief contract for the optimize round's fanout |
+| `skills/report/` | Terminal score chart mirroring the dashboard scatter plot |
+| `skills/ship/` | Distill the best valid experiment into a clean mergeable change |
 | `skills/infra-setup/` | Provider matrix for remote-sandbox backends (Modal, E2B, Daytona, etc.) |
 
 ## Versioning

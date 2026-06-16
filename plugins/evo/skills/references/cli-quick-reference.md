@@ -177,7 +177,7 @@ evo run <exp_id> --check [--timeout <seconds>]      # same override semantics fo
 evo abort <exp_id> [--timeout <seconds>] [--force]  # stop a mid-run experiment (driver + subprocess tree)
 evo done <exp_id> --score <float> [--traces <dir>] [--no-compare]
 evo discard <exp_id> --reason "<why>" [--failure-class build|eval|hypothesis] [--force]
-evo prune <exp_id> [--reason "<why>"]
+evo prune <exp_id> [--exhausted|--invalid] [--yes] [--reason "<why>"]
 evo restore <exp_id>
 evo gc
 ```
@@ -206,11 +206,10 @@ Lifecycle command rules:
   build|eval|hypothesis` records why it failed (routes reuse vs branch —
   see **Artifacts & reuse**); declared artifacts are preserved before the
   worktree is deleted.
-- `evo prune` accepts `committed` or `evaluated` nodes. Marks the lineage
-  exhausted; the result stays available for `evo restore` later.
-  `--reason` is optional — omit it for routine round-N cleanups (a stderr
-  warning notes the omission); pass one for one-off prunes whose context
-  isn't obvious from the parent prune.
+- `evo prune` accepts `committed` or `evaluated` nodes. `--exhausted`
+  (default/legacy) closes a branch while preserving a valid result. `--invalid`
+  excludes the node and descendants from best/frontier. `--yes` is required only
+  with `--invalid` on the current best valid spine.
 - `evo restore` reverts a prune or discard. Discarded nodes can be
   restored as long as the result hasn't been garbage-collected; if it
   has, the error message tells you where to find the saved diff.

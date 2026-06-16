@@ -331,16 +331,18 @@ After all subagents complete:
 
 **Cross-cut the round's evaluated nodes.** Before moving on, read `experiments/<id>/attempts/NNN/outcome.json` for each evaluated node from this round. The structured `gates[]` entries and `benchmark.result` let you spot shared failure modes the subagent summaries may have glossed over (e.g., three different subagents produced evaluated nodes whose gate_failures all included `refund_flow` -- that's a structural constraint the next round must confront, not three independent bad hypotheses).
 
-Prune dead branches where 3+ children all regressed:
+Prune branches you have decided are exhausted:
   ```bash
-  evo prune <exp_id> --reason "exhausted: N children all regressed"
+  evo prune <exp_id> --exhausted --reason "exhausted: <why>"
   ```
 
-`evo prune` accepts `committed` or `evaluated` nodes. Use it when you want
-to mark a lineage exhausted while preserving the result for later review or
-reference. Prune keeps the git commit alive (anchored at `refs/evo-anchor/<run>/<exp>`)
-so the node can be restored if needed. **Never `evo discard` a committed
-node** — it would orphan the branch ref and risk losing the commit.
+`evo prune` accepts `committed` or `evaluated` nodes:
+- `--exhausted` (default/legacy): stop branching here; the result still counts.
+- `--invalid`: this result is wrong; exclude it and descendants from best/frontier.
+- `--yes`: required only with `--invalid` on the current best valid spine.
+
+Use `--invalid --yes` when you have proven a best-spine result or ancestor is
+wrong. **Never `evo discard` a committed node** -- prune preserves its commit.
 
 If a previously-pruned (or discarded-then-restored) node is worth revisiting:
   ```bash
@@ -444,18 +446,24 @@ Proposals are advisory, not mandatory. If none look better than what step 3's sc
 - User hasn't interrupted
 - Score hasn't reached the theoretical maximum
 
+To continue, go back to step 1.
+
 **Stop** if:
 - Stall counter >= stall limit (N consecutive rounds with no improvement)
 - Score reached theoretical maximum (1.0 for max metric, 0.0 for min metric)
 - User interrupted
 
-On stop, print a final summary:
+On stop, the loop is done -- do not go back to step 1. Print a final summary:
 - Best score achieved and experiment ID
 - Total experiments run across all rounds
 - The winning diff: `evo diff <best_exp_id>`
 - Suggested next steps if the score hasn't converged
-
-Go back to step 1.
+- **How to land it:** point the user at `/evo:ship` to turn the winning
+  experiment into a mergeable change (a PR when the repo has a remote, else a
+  merge into the working branch). The raw winning diff is not the artifact to
+  merge by hand -- `/evo:ship` distills it to the minimal clean change and
+  attaches a mergeability report. Mention this whenever the run produced a
+  committed experiment that beats the baseline.
 
 ## Polling discipline
 
