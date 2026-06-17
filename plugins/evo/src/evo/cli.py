@@ -558,9 +558,9 @@ def cmd_defaults_set(args: argparse.Namespace) -> int:
     return 0
 
 
-def _current_telemetry_workspace_props() -> dict[str, Any]:
+def _current_telemetry_workspace_props(exp_id: str | None = None) -> dict[str, Any]:
     try:
-        return _telemetry_workspace_props(repo_root())
+        return _telemetry_workspace_props(repo_root(), exp_id=exp_id)
     except Exception:
         return {}
 
@@ -623,8 +623,9 @@ def cmd_telemetry(args: argparse.Namespace) -> int:
         return 0
 
     if args.telemetry_action == "feedback":
+        exp_id = getattr(args, "exp_id", None)
         context = (
-            _current_telemetry_workspace_props()
+            _current_telemetry_workspace_props(exp_id=exp_id)
             if telemetry.telemetry_enabled()
             else {}
         )
@@ -6176,6 +6177,7 @@ def build_parser() -> argparse.ArgumentParser:
     telemetry_feedback_p.add_argument("--expected", required=True)
     telemetry_feedback_p.add_argument("--actual", required=True)
     telemetry_feedback_p.add_argument("--repro", required=True)
+    telemetry_feedback_p.add_argument("--exp-id", help="optional related experiment id")
     telemetry_feedback_p.add_argument("--tag", action="append", default=[])
     telemetry_feedback_p.set_defaults(func=cmd_telemetry)
 
@@ -7173,6 +7175,14 @@ def _telemetry_workspace_props(root: Path, exp_id: str | None = None) -> dict[st
     wid = telemetry.workspace_id(root)
     if wid:
         props["workspace_id"] = wid
+    if exp_id:
+        props["experiment_id"] = exp_id
+    try:
+        run_id = _load_meta(root).get("active")
+        if isinstance(run_id, str) and run_id:
+            props["run_id"] = run_id
+    except Exception:
+        pass
     try:
         host = get_host(root)
         if host:
@@ -7182,12 +7192,28 @@ def _telemetry_workspace_props(root: Path, exp_id: str | None = None) -> dict[st
     try:
         config = load_config(root)
         graph = load_graph(root)
-        if exp_id and exp_id in (graph.get("nodes") or {}):
+        nodes = graph.get("nodes") or {}
+        node = nodes.get(exp_id) if exp_id else None
+        if isinstance(node, dict):
+            parent_id = node.get("parent")
+            if isinstance(parent_id, str) and parent_id:
+                props["parent_experiment_id"] = parent_id
+            status = node.get("status")
+            if isinstance(status, str) and status:
+                props["experiment_status"] = status
+            attempt = node.get("current_attempt")
+            if isinstance(attempt, int):
+                props["attempt"] = attempt
+            props["context"] = {
+                "has_score": node.get("score") is not None,
+                "has_children": bool(node.get("children")),
+            }
+        if exp_id and exp_id in nodes:
             from .backends import backend_spec_for_node
 
             backend_name, backend_config = backend_spec_for_node(
                 root,
-                graph["nodes"][exp_id],
+                nodes[exp_id],
                 workspace_config=config,
             )
         else:
@@ -7278,6 +7304,7 @@ def _emit_experiment_result_telemetry(
             "experiment_id": exp_id,
             "outcome": outcome,
             "check": check,
+            "workflow_phase": "check" if check else "experiment_result",
         }
         if metric:
             props["metric"] = metric
@@ -7348,6 +7375,7 @@ def _emit_branch_closed_telemetry(
             **_telemetry_workspace_props(root, exp_id=exp_id),
             "experiment_id": exp_id,
             "close_type": close_type,
+            "workflow_phase": "branch_closed",
             "status_before": str(node.get("status") or "unknown"),
             "had_score": node.get("score") is not None,
             "reason_type": _branch_close_reason_type(
@@ -7372,6 +7400,7 @@ def _telemetry_track_command(args: argparse.Namespace, rc: int, started_at: floa
         from . import telemetry
 
         props: dict[str, Any] = {}
+        props["trigger"] = "cli"
         command = getattr(args, "command", None)
         if getattr(args, "host", None) in SUPPORTED_HOSTS:
             props["host"] = args.host
@@ -7389,17 +7418,22 @@ def _telemetry_track_command(args: argparse.Namespace, rc: int, started_at: floa
                 root = None
         if command == "install" and rc == 0:
             event = "installed"
+            props["workflow_phase"] = "install"
         elif command == "init" and rc == 0:
             event = "workspace_initialized"
+            props["workflow_phase"] = "init"
         elif command == "new" and rc == 0:
             event = "experiment_created"
+            props["workflow_phase"] = "experiment_created"
             if getattr(args, "exp_id", None):
                 props["experiment_id"] = args.exp_id
-            props["parent_type"] = (
-                "root" if getattr(args, "parent", None) == "root" else "experiment"
-            )
+            parent = getattr(args, "parent", None)
+            if parent:
+                props["parent_experiment_id"] = parent
+            props["parent_type"] = "root" if parent == "root" else "experiment"
         elif command == "autonomous" and rc == 0:
             event = "optimize_started"
+            props["workflow_phase"] = "optimize_started"
             props["autonomous"] = (str(getattr(args, "state", "") or "on") == "on")
         else:
             return

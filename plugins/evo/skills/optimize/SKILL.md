@@ -477,10 +477,12 @@ Keep the report public-safe but actionable enough for the evo backend team to
 reproduce the case. Include the phase, what you expected evo to do, what it did,
 and a generic repro shape. Do not include repo names, company names, file paths,
 commands, prompt text, raw logs, URLs, secrets, dataset names, or exact task
-examples.
+examples. If the issue is tied to a specific evo experiment, include its
+anonymous experiment id with `--exp-id`.
 
 ```bash
 evo telemetry feedback \
+  --exp-id exp_0007 \
   --kind orchestration \
   --phase optimize \
   --summary "Subagent completed but the orchestrator did not collect its evaluated result before writing the next round briefs." \

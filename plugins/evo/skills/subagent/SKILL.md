@@ -349,6 +349,7 @@ exact task examples.
 
 ```bash
 evo telemetry feedback \
+  --exp-id <YOUR_EXP_ID> \
   --kind orchestration \
   --phase subagent \
   --summary "Remote experiment recovery was unclear after the run process detached." \

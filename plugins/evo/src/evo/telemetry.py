@@ -3,12 +3,14 @@
 Telemetry is intentionally CLI-side only. It never reads benchmark traces,
 project notes, prompts, command strings, file paths, environment values, git
 remotes, or raw exception text. Payloads are sent to evo's Cloudflare Worker,
-which performs another allowlist/scrub pass before forwarding to PostHog.
+which performs another allowlist/scrub pass before first-party storage and any
+optional server-side mirrors.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import random
@@ -32,12 +34,20 @@ TELEMETRY_EVENTS_URL = "https://telemetry.evo-hq.com/v1/events"
 DEFAULT_TIMEOUT_SECONDS = 0.3
 FEEDBACK_TIMEOUT_SECONDS = 1.0
 CONFIG_TTL_SECONDS = 24 * 60 * 60
+MAX_CONTEXT_ITEMS = 24
+MAX_CONTEXT_KEY_LENGTH = 48
+MAX_CONTEXT_VALUE_LENGTH = 160
+
+_SESSION_ID = str(uuid.uuid4())
 
 _SECRET_TOKEN_RE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
     r"ph[ckx]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b"
 )
 _LONG_HEX_RE = re.compile(r"\b[A-Fa-f0-9]{40,}\b")
+_EMAIL_RE = re.compile(r"\b\S+@\S+\.\S+\b")
+_ENV_ASSIGN_RE = re.compile(r"\b[A-Z_][A-Z0-9_]{2,}\s*=\s*\S+")
+_PATH_RE = re.compile(r"\b(?:[A-Za-z]:\\|~/|/)[^\s\"'`]+")
 
 
 def telemetry_path() -> Path:
@@ -156,6 +166,7 @@ def normalize_os_name(name: str | None = None) -> str:
 def base_properties() -> dict[str, Any]:
     return {
         "install_id": install_id(create=True),
+        "session_id": _SESSION_ID,
         "evo_version": __version__,
         "os": normalize_os_name(),
     }
@@ -264,6 +275,9 @@ def scrub_text(value: str, max_len: int) -> str:
     for marker in ("http://", "https://", "git@", "ssh://"):
         if marker in value:
             value = value.replace(marker, "<redacted>:")
+    value = _EMAIL_RE.sub("<email>", value)
+    value = _ENV_ASSIGN_RE.sub("<env>", value)
+    value = _PATH_RE.sub("<path>", value)
     value = _SECRET_TOKEN_RE.sub("<secret>", value)
     value = _LONG_HEX_RE.sub("<token>", value)
     return " ".join(value.split())[:max_len]
@@ -292,6 +306,43 @@ def scrub_tags(tags: list[str]) -> list[str]:
     return out
 
 
+def scrub_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Bounded public-safe context for future analytics joins.
+
+    Context is intentionally shallow: short keys and primitive values only.
+    This lets newer CLI/skill flows attach low-risk facets without expanding
+    the core event contract for every dashboard question.
+    """
+    out: dict[str, Any] = {}
+    for raw_key, raw_value in context.items():
+        if len(out) >= MAX_CONTEXT_ITEMS:
+            break
+        key = "".join(
+            ch.lower() if ch.isalnum() or ch in {"-", "_", ".", ":"} else "_"
+            for ch in str(raw_key).strip()
+        ).strip("_")[:MAX_CONTEXT_KEY_LENGTH]
+        if not key:
+            continue
+        value: Any
+        if isinstance(raw_value, bool):
+            value = raw_value
+        elif (
+            isinstance(raw_value, (int, float))
+            and not isinstance(raw_value, bool)
+            and math.isfinite(raw_value)
+        ):
+            value = raw_value
+        elif isinstance(raw_value, str):
+            cleaned = scrub_text(raw_value, MAX_CONTEXT_VALUE_LENGTH)
+            if not cleaned or "<" in cleaned or "@" in cleaned:
+                continue
+            value = cleaned
+        else:
+            continue
+        out[key] = value
+    return out
+
+
 def capture(
     event: str,
     properties: dict[str, Any] | None = None,
@@ -302,6 +353,8 @@ def capture(
     if not telemetry_enabled():
         return
     props = {**base_properties(), **(properties or {})}
+    if isinstance(props.get("context"), dict):
+        props["context"] = scrub_context(props["context"])
     send_timeout = timeout_seconds(timeout if timeout is not None else DEFAULT_TIMEOUT_SECONDS)
     if flush:
         _send_event(event, props, send_timeout)
@@ -336,6 +389,8 @@ def capture_usecase(
     if not telemetry_enabled():
         return False
     props = dict(properties or {})
+    props.setdefault("trigger", "cli")
+    props.setdefault("workflow_phase", "usecase")
     props.update(
         {
             "description": scrub_text(description, 280),
@@ -365,6 +420,8 @@ def capture_feedback(
     if not telemetry_enabled():
         return False
     props = dict(properties or {})
+    props.setdefault("trigger", "cli")
+    props.setdefault("workflow_phase", "feedback")
     props.update(
         {
             "kind": scrub_text(kind, 80),
@@ -391,6 +448,8 @@ def disable_with_final_event(properties: dict[str, Any] | None = None) -> bool:
     if should_send:
         props = dict(properties or {})
         props["disabled_method"] = "command"
+        props.setdefault("trigger", "cli")
+        props.setdefault("workflow_phase", "telemetry_disabled")
         capture("telemetry_disabled", props, flush=True, timeout=0.5)
     set_enabled(False)
     return should_send

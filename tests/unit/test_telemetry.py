@@ -87,7 +87,16 @@ def test_disable_with_final_event_sends_before_persisting_off(
 
     assert telemetry.disable_with_final_event() is True
     assert events == [
-        ("telemetry_disabled", {"disabled_method": "command"}, True, 0.5)
+        (
+            "telemetry_disabled",
+            {
+                "disabled_method": "command",
+                "trigger": "cli",
+                "workflow_phase": "telemetry_disabled",
+            },
+            True,
+            0.5,
+        )
     ]
     assert telemetry.telemetry_enabled() is False
 
@@ -126,9 +135,9 @@ def test_base_properties_use_minimal_identifier_set() -> None:
     props = telemetry.base_properties()
 
     assert props["install_id"]
+    assert props["session_id"]
     assert props["evo_version"]
     assert props["os"]
-    assert "session_id" not in props
     assert "python" not in props
 
 
@@ -170,6 +179,37 @@ def test_capture_flush_swallows_network_errors(
     telemetry.capture("workspace_initialized", {"outcome": "success"}, flush=True)
 
 
+def test_capture_scrubs_forward_compatible_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[str, dict, float]] = []
+    monkeypatch.setattr(
+        telemetry,
+        "_send_event",
+        lambda event, props, timeout: captured.append((event, props, timeout)),
+    )
+
+    telemetry.capture(
+        "workspace_initialized",
+        {
+            "context": {
+                "Workflow Phase": "pre-verify",
+                "attempt": 2,
+                "had_score": True,
+                "private_path": "/Users/alok/secret/repo",
+            }
+        },
+        flush=True,
+    )
+
+    context = captured[0][1]["context"]
+    assert context == {
+        "workflow_phase": "pre-verify",
+        "attempt": 2,
+        "had_score": True,
+    }
+
+
 def test_usecase_sends_sanitized_description_and_tags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -194,6 +234,8 @@ def test_usecase_sends_sanitized_description_and_tags(
     assert sent is True
     event, props, flush, timeout = captured[0]
     assert event == "usecase"
+    assert props["trigger"] == "cli"
+    assert props["workflow_phase"] == "usecase"
     assert props["description"] == "Optimizing a tool-calling agent for pass rate"
     assert props["tags"] == ["coding-agent", "retry-policy", "pass-rate"]
     assert flush is True
@@ -229,6 +271,8 @@ def test_usecase_preserves_workspace_context(
 
     assert sent is True
     props = captured[0][1]
+    assert props["trigger"] == "cli"
+    assert props["workflow_phase"] == "usecase"
     assert props["workspace_id"] == "workspace-1"
     assert props["host"] == "opencode"
     assert props["backend"] == "remote"
@@ -304,6 +348,8 @@ def test_feedback_sends_minimal_safe_fields(
     assert sent is True
     event, props, flush, timeout = captured[0]
     assert event == "feedback"
+    assert props["trigger"] == "cli"
+    assert props["workflow_phase"] == "feedback"
     assert props["kind"] == "bug"
     assert props["phase"] == "run"
     assert props["summary"] == "benchmark crashed on retry"
@@ -348,6 +394,8 @@ def test_cli_command_tracking_flushes_with_short_timeout(
     assert props["host"] == "codex"
     assert props["metric"] == "max"
     assert props["backend"] == "worktree"
+    assert props["trigger"] == "cli"
+    assert props["workflow_phase"] == "init"
     assert "command" not in props
     assert "instrumentation_mode" not in props
     assert flush is True
@@ -383,6 +431,8 @@ def test_autonomous_command_tracks_optimize_start(
     event, props, flush, timeout = captured[0]
     assert event == "optimize_started"
     assert props["autonomous"] is True
+    assert props["trigger"] == "cli"
+    assert props["workflow_phase"] == "optimize_started"
     assert props["workspace_id"] == "workspace-1"
     assert props["host"] == "codex"
     assert "command" not in props
@@ -470,6 +520,54 @@ def test_cli_usecase_does_not_create_context_when_disabled(
     assert rc == 0
 
 
+def test_cli_feedback_can_attach_experiment_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_capture_feedback(**kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(telemetry, "capture_feedback", fake_capture_feedback)
+    monkeypatch.setattr(
+        cli,
+        "_current_telemetry_workspace_props",
+        lambda exp_id=None: {
+            "workspace_id": "workspace-1",
+            "run_id": "run_0000",
+            "experiment_id": exp_id,
+            "parent_experiment_id": "exp_0001",
+            "attempt": 3,
+            "host": "codex",
+        },
+    )
+
+    rc = cli.cmd_telemetry(
+        argparse.Namespace(
+            telemetry_action="feedback",
+            kind="bug",
+            phase="run",
+            summary="retry failed after prune",
+            expected="agent should recover",
+            actual="agent repeated same bad branch",
+            repro="run optimize, prune invalid branch, then retry",
+            tag=["orchestration"],
+            exp_id="exp_0002",
+        )
+    )
+
+    assert rc == 0
+    assert captured["properties"] == {
+        "workspace_id": "workspace-1",
+        "run_id": "run_0000",
+        "experiment_id": "exp_0002",
+        "parent_experiment_id": "exp_0001",
+        "attempt": 3,
+        "host": "codex",
+    }
+
+
 def test_workspace_props_prefer_node_backend(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     run_dir = root / ".evo" / "run_0000"
@@ -489,6 +587,11 @@ def test_workspace_props_prefer_node_backend(tmp_path: Path) -> None:
                     "root": {"id": "root"},
                     "exp_0000": {
                         "id": "exp_0000",
+                        "parent": "root",
+                        "status": "evaluated",
+                        "current_attempt": 2,
+                        "score": 0.42,
+                        "children": ["exp_0001"],
                         "backend": "remote",
                         "backend_config": {"provider": "modal"},
                         "gates": [{"name": "score-floor"}],
@@ -502,6 +605,12 @@ def test_workspace_props_prefer_node_backend(tmp_path: Path) -> None:
     props = cli._telemetry_workspace_props(root, exp_id="exp_0000")
 
     assert props["workspace_id"]
+    assert props["experiment_id"] == "exp_0000"
+    assert props["run_id"] == "run_0000"
+    assert props["parent_experiment_id"] == "root"
+    assert props["experiment_status"] == "evaluated"
+    assert props["attempt"] == 2
+    assert props["context"] == {"has_score": True, "has_children": True}
     assert props["host"] == "opencode"
     assert props["backend"] == "remote"
     assert props["provider"] == "modal"
@@ -573,6 +682,7 @@ def test_experiment_result_telemetry_sends_directional_deltas(
     assert props["workspace_id"] == "workspace-1"
     assert props["host"] == "codex"
     assert props["outcome"] == "committed"
+    assert props["workflow_phase"] == "experiment_result"
     assert props["metric"] == metric
     assert props["delta_vs_parent"] == delta_parent
     assert props["delta_vs_best"] == delta_best
@@ -617,6 +727,7 @@ def test_branch_closed_telemetry_sends_reason_category(
     assert props["workspace_id"] == "workspace-1"
     assert props["backend"] == "worktree"
     assert props["close_type"] == "prune"
+    assert props["workflow_phase"] == "branch_closed"
     assert props["status_before"] == "evaluated"
     assert props["had_score"] is True
     assert props["reason_type"] == "bad_result"
