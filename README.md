@@ -186,6 +186,21 @@ uv tool install --force 'evo-hq-cli==0.4.1a2' && \
 
 Substitute the target alpha version. The CLI uses PEP 440 form (`0.4.1a2`); the marketplace tag uses the dash form (`v0.4.1-alpha.2`).
 
+## Telemetry
+
+evo sends anonymous telemetry and usage stats that helps us improve evo.
+Disable it globally anytime:
+
+```bash
+evo telemetry off
+```
+
+Or for one command/session:
+
+```bash
+EVO_TELEMETRY=0 evo ...
+```
+
 ## Dev install
 
 For development on evo:

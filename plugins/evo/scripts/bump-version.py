@@ -39,7 +39,15 @@ SDK_NODE_ROOT = REPO_ROOT / "sdk" / "node"
 
 # Skills that ship `evo_version` frontmatter. Keep in sync with
 # plugins/evo/skills/ subdirs and npm/scripts/sync-from-source.sh.
-SKILLS = ("discover", "optimize", "subagent", "infra-setup", "report", "finetuning")
+SKILLS = (
+    "discover",
+    "optimize",
+    "subagent",
+    "infra-setup",
+    "report",
+    "ship",
+    "finetuning",
+)
 
 # Discover skill's step-0 has user-facing version literals in its body
 # (not just frontmatter). Regex-replace the old version anywhere it

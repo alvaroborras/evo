@@ -1,7 +1,7 @@
 ---
 name: subagent
 description: Protocol that evo optimization subagents follow when dispatched from /optimize. Auto-loaded by spawned subagents via their host's skill loader. The orchestrator may also invoke this skill to understand the brief shape its dispatched subagents expect + what they're required to emit -- useful when writing briefs or debugging a subagent's behavior.
-evo_version: 0.5.3
+evo_version: 0.6.0-alpha.1
 ---
 
 # Evo Subagent Protocol
@@ -334,6 +334,29 @@ Good candidates: a specific benchmark task that was hard to fix, a test for a cr
 Continue if budget remains AND (last outcome was committed, OR you have a meaningfully different idea after an evaluated/discarded outcome). When continuing after a committed experiment, update your parent to the newly committed ID.
 
 Stop if budget exhausted, infra failure, or you've exhausted variations with no improvement.
+
+### 9. Report evo-side feedback when evo itself blocked you
+
+Use feedback for evo product/orchestration issues, not for ordinary bad
+experiments. Good triggers: confusing `evo run` behavior, remote workspace
+commands that were hard to recover from, verifier handoff problems, missing
+state that prevented you from following the brief, or a policy/gate that blocked
+the wrong thing. The command is anonymous and no-ops when telemetry is off.
+
+Keep it public-safe and reproducible. Do not include repo names, company names,
+file paths, commands, prompt text, raw logs, URLs, secrets, dataset names, or
+exact task examples.
+
+```bash
+evo telemetry feedback \
+  --kind orchestration \
+  --phase subagent \
+  --summary "Remote experiment recovery was unclear after the run process detached." \
+  --expected "Re-running evo run should clearly say whether it resumed or needs a fresh experiment." \
+  --actual "The subagent could not tell whether the active attempt was recoverable." \
+  --repro "Use a remote backend, interrupt a long-running experiment, then ask a subagent to continue the same exp_id." \
+  --tag remote-backend --tag recovery --tag subagent
+```
 
 ## Enriching traces
 

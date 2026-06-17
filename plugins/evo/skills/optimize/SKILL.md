@@ -2,7 +2,7 @@
 name: optimize
 description: Drive structured autoresearch iteration after evo:discover and the baseline commit -- scan-subagent cross-cutting analysis between rounds, frontier-based parent selection, ideator dispatch on stall, verifier pre/post hooks, annotation discipline. Width is set via subagents=N (1 for serial workloads, larger for parallel); the loop's structural value applies at any width.
 argument-hint: "[subagents=N] [budget=N] [stall=N]"
-evo_version: 0.5.3
+evo_version: 0.6.0-alpha.1
 ---
 
 Run the `evo` optimization loop. Each round, the orchestrator writes structured briefs and spawns subagents that execute within them. Each subagent is semi-autonomous: it reads the pointer traces, forms the concrete edit, runs experiments, and can iterate within its branch. Runs until interrupted or the stall limit is reached.
@@ -464,6 +464,31 @@ On stop, the loop is done -- do not go back to step 1. Print a final summary:
   merge by hand -- `/evo:ship` distills it to the minimal clean change and
   attaches a mergeability report. Mention this whenever the run produced a
   committed experiment that beats the baseline.
+
+### 8. Report evo-side feedback when evo itself went wrong
+
+Use feedback for evo product/orchestration issues, not for ordinary bad
+experiments. Good triggers: confusing CLI behavior, subagent handoff failures,
+workflow/meta-controller mistakes, recovery that failed, remote backend handling
+that was hard to diagnose, or an evo policy/gate that blocked the wrong thing.
+The command is anonymous and no-ops when telemetry is off; do not branch on that.
+
+Keep the report public-safe but actionable enough for the evo backend team to
+reproduce the case. Include the phase, what you expected evo to do, what it did,
+and a generic repro shape. Do not include repo names, company names, file paths,
+commands, prompt text, raw logs, URLs, secrets, dataset names, or exact task
+examples.
+
+```bash
+evo telemetry feedback \
+  --kind orchestration \
+  --phase optimize \
+  --summary "Subagent completed but the orchestrator did not collect its evaluated result before writing the next round briefs." \
+  --expected "Round collection should wait for all dispatched subagents or clearly report the missing one." \
+  --actual "The next round was planned from partial results, leaving one evaluated node out of the pattern scan." \
+  --repro "Run optimize with multiple subagents on a workspace where one branch finishes after the first completion notification." \
+  --tag optimize-loop --tag subagent-handoff --tag collection
+```
 
 ## Polling discipline
 

@@ -558,6 +558,92 @@ def cmd_defaults_set(args: argparse.Namespace) -> int:
     return 0
 
 
+def _current_telemetry_workspace_props() -> dict[str, Any]:
+    try:
+        return _telemetry_workspace_props(repo_root())
+    except Exception:
+        return {}
+
+
+def cmd_telemetry(args: argparse.Namespace) -> int:
+    from . import telemetry
+
+    if args.telemetry_action == "status":
+        data = telemetry.status()
+        if getattr(args, "json", False):
+            print(json.dumps(data, indent=2, sort_keys=True))
+            return 0
+        state = "on" if data["enabled"] else "off"
+        print(f"telemetry: {state} ({data['source']})")
+        print(f"path: {data['path']}")
+        print(f"install_id: {data['install_id'] or '<not created>'}")
+        print(f"endpoint: {data['endpoint']}")
+        return 0
+
+    if args.telemetry_action == "on":
+        telemetry.set_enabled(True)
+        print("Telemetry enabled.")
+        return 0
+
+    if args.telemetry_action == "off":
+        context = (
+            _current_telemetry_workspace_props()
+            if telemetry.telemetry_enabled()
+            else {}
+        )
+        sent = telemetry.disable_with_final_event(
+            properties=context
+        )
+        suffix = " (sent final opt-out event)" if sent else ""
+        print(f"Telemetry disabled.{suffix}")
+        return 0
+
+    if args.telemetry_action == "reset-id":
+        new_id = telemetry.reset_install_id()
+        print(f"Telemetry install_id reset: {new_id}")
+        return 0
+
+    if args.telemetry_action == "usecase":
+        context = (
+            _current_telemetry_workspace_props()
+            if telemetry.telemetry_enabled()
+            else {}
+        )
+        sent = telemetry.capture_usecase(
+            args.description,
+            args.tag or [],
+            properties=context,
+        )
+        if sent:
+            try:
+                _record_telemetry_usecase_tags(repo_root(), args.tag or [])
+            except Exception:
+                pass
+        print("Use case sent." if sent else "Telemetry disabled; use case not sent.")
+        return 0
+
+    if args.telemetry_action == "feedback":
+        context = (
+            _current_telemetry_workspace_props()
+            if telemetry.telemetry_enabled()
+            else {}
+        )
+        sent = telemetry.capture_feedback(
+            kind=args.kind,
+            phase=args.phase,
+            summary=args.summary,
+            expected=args.expected,
+            actual=args.actual,
+            repro=args.repro,
+            tags=args.tag or [],
+            properties=context,
+        )
+        print("Feedback sent." if sent else "Telemetry disabled; feedback not sent.")
+        return 0
+
+    raise RuntimeError(f"unknown telemetry action: {args.telemetry_action}")
+
+
 def _redact_config_value(value: Any) -> Any:
     if isinstance(value, dict):
         redacted = {}
@@ -1682,6 +1768,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     out = {"id": node["id"], "worktree": node["worktree"], "target": str(target)}
     if seed:
         out["from_artifact"] = seed
+    args.exp_id = node["id"]
     print(json.dumps(out, indent=2))
     return 0
 
@@ -2422,6 +2509,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 current_node["error"] = error_msg
 
             update_node(root, args.exp_id, _mark_failed)
+            metric = str(config.get("metric", "max"))
+            parent_score = _resolve_parent_score(graph, node["parent"])
             if attempt_n > 0:
                 _write_attempt_state(
                     root, args.exp_id, attempt_n,
@@ -2431,9 +2520,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                 _write_attempt_outcome(
                     root, args.exp_id, attempt_n, "failed",
                     node=node, started_at=started_at, error=error_msg,
-                    parent_score=_resolve_parent_score(graph, node["parent"]),
-                    metric=config.get("metric"),
+                    parent_score=parent_score,
+                    metric=metric,
                 )
+            _emit_experiment_result_telemetry(
+                root,
+                args.exp_id,
+                outcome="failed",
+                metric=metric,
+                parent_score=parent_score,
+                best_before_score=best_committed_score(graph, metric),
+                failure_type="infra",
+            )
             try:
                 from .backends import DiscardCtx as _DCtx
                 failed_node = dict(node)
@@ -2789,6 +2887,14 @@ def _cmd_run_check(
             "error": error,
         }
         atomic_write_json(check_dir / "check.json", payload)
+        _emit_experiment_result_telemetry(
+            root,
+            args.exp_id,
+            outcome="check_passed" if status == "passed" else "check_failed",
+            metric=str(config.get("metric")) if config.get("metric") else None,
+            check=True,
+            failure_type=_telemetry_failure_type(error),
+        )
 
 
 def _cmd_run_impl(
@@ -2927,6 +3033,7 @@ def _cmd_run_impl(
     result_path = a_dir / "result.json"
     metric = config["metric"]
     parent_score = _resolve_parent_score(graph, node["parent"])
+    best_before_score = best_committed_score(graph, metric)
 
     # In remote mode the workspace lives inside the sandbox; the benchmark
     # writes to sandbox-local paths and we fetch artifacts back to local
@@ -3322,6 +3429,15 @@ def _cmd_run_impl(
                 benchmark=benchmark_record, runtime=runtime_records, gates=gate_records,
                 commit=commit, parent_score=parent_score, metric=metric,
             )
+            _emit_experiment_result_telemetry(
+                root,
+                args.exp_id,
+                outcome="committed",
+                metric=metric,
+                score=score,
+                parent_score=parent_score,
+                best_before_score=best_before_score,
+            )
             # Release the workspace lease on transition into `committed`.
             # Worktree backend: no-op. Pool backend: returns the slot to the
             # free queue. Failed and evaluated transitions retain the lease.
@@ -3356,6 +3472,16 @@ def _cmd_run_impl(
             node=node, started_at=started_at, score=score,
             benchmark=benchmark_record, runtime=runtime_records, gates=gate_records,
             parent_score=parent_score, metric=metric,
+        )
+        _emit_experiment_result_telemetry(
+            root,
+            args.exp_id,
+            outcome="evaluated",
+            metric=metric,
+            score=score,
+            parent_score=parent_score,
+            best_before_score=best_before_score,
+            failure_type="gate" if not gate_passed else None,
         )
         remaining = max_attempts - (evaluated_attempts + 1)
         suffix = f" ({remaining} attempts remaining)" if remaining > 0 else " (no attempts remaining -- retry blocked)"
@@ -3405,6 +3531,16 @@ def _cmd_run_impl(
             benchmark=benchmark_record, runtime=runtime_records, gates=gate_records,
             error=error_msg, parent_score=parent_score, metric=metric,
         )
+        _emit_experiment_result_telemetry(
+            root,
+            args.exp_id,
+            outcome="failed",
+            metric=metric,
+            score=salvaged_score,
+            parent_score=parent_score,
+            best_before_score=best_before_score,
+            failure_type=_telemetry_failure_type(error_msg),
+        )
         print(f"FAILED {args.exp_id} {exc}")
         return 1
 
@@ -3449,12 +3585,21 @@ def _record_done_result(root: Path, args: argparse.Namespace) -> int:
             current_node["score"] = args.score
         update_node(root, args.exp_id, _mark_failed)
         _finalize_result(root, args.exp_id, node, args.score, "failed", {"recorded_only": True})
+        _emit_experiment_result_telemetry(
+            root,
+            args.exp_id,
+            outcome="failed",
+            metric=str(config.get("metric")) if config.get("metric") else None,
+            score=args.score,
+            failure_type="unknown",
+        )
         print(f"RECORDED {args.exp_id} score={args.score} (no compare)")
         return 0
 
     _block_if_epoch_requires_baseline(root, node["parent"], no_compare=False)
     parent_score = _resolve_parent_score(graph, node["parent"])
     metric = config["metric"]
+    best_before_score = best_committed_score(graph, metric)
     keep = compare_scores(metric, args.score, parent_score)
     if config.get("comparison_blocked") and node["parent"] == "root":
         mark_comparison_blocked(root, False)
@@ -3474,6 +3619,15 @@ def _record_done_result(root: Path, args: argparse.Namespace) -> int:
         _lb(root, node=committed_node, workspace_config=config).release_lease(
             _DCtx(root=root, node=committed_node)
         )
+    _emit_experiment_result_telemetry(
+        root,
+        args.exp_id,
+        outcome=status,
+        metric=metric,
+        score=args.score,
+        parent_score=parent_score,
+        best_before_score=best_before_score,
+    )
     print(f"{status.upper()} {args.exp_id} {args.score}")
     return 0
 
@@ -3547,6 +3701,14 @@ def cmd_discard(args: argparse.Namespace) -> int:
     _finalize_result(root, args.exp_id, node, node.get("score"), "discarded", result_extra)
 
     _capture_discard_time_diff(root, args.exp_id, node, graph)
+    _emit_branch_closed_telemetry(
+        root,
+        args.exp_id,
+        node,
+        close_type="discard",
+        reason=args.reason,
+        failure_class=fclass,
+    )
 
     delete_discarded_experiment(root, node)
     print(f"DISCARDED {args.exp_id}: {args.reason}")
@@ -3696,6 +3858,14 @@ def cmd_prune(args: argparse.Namespace) -> int:
         current_node["prune_kind"] = prune_kind
 
     update_node(root, args.exp_id, _mark)
+    _emit_branch_closed_telemetry(
+        root,
+        args.exp_id,
+        graph["nodes"].get(args.exp_id, {"id": args.exp_id}),
+        close_type="prune",
+        reason=args.reason,
+        prune_kind=prune_kind,
+    )
     kind_suffix = f" [{prune_kind}]"
     if args.reason is None:
         print(
@@ -4637,7 +4807,18 @@ def cmd_install(args: argparse.Namespace) -> int:
     """
     from . import host_install
     try:
-        return host_install.install(args.host, args)
+        rc = host_install.install(args.host, args)
+        if rc == 0:
+            try:
+                from . import telemetry
+                if telemetry.telemetry_enabled():
+                    print(
+                        "evo sends anonymous usage stats to improve the tool. "
+                        "Turn it off anytime with `evo telemetry off`."
+                    )
+            except Exception:
+                pass
+        return rc
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -5962,6 +6143,42 @@ def build_parser() -> argparse.ArgumentParser:
     defaults_set_p.add_argument("value", help="on or off")
     defaults_set_p.set_defaults(func=cmd_defaults)
 
+    telemetry_p = sub.add_parser(
+        "telemetry",
+        help="show or update anonymous usage telemetry settings",
+    )
+    telemetry_sub = telemetry_p.add_subparsers(dest="telemetry_action", required=True)
+    telemetry_status_p = telemetry_sub.add_parser("status", help="show telemetry status")
+    telemetry_status_p.add_argument("--json", action="store_true", help="emit JSON")
+    telemetry_status_p.set_defaults(func=cmd_telemetry)
+    telemetry_on_p = telemetry_sub.add_parser("on", help="enable telemetry globally")
+    telemetry_on_p.set_defaults(func=cmd_telemetry)
+    telemetry_off_p = telemetry_sub.add_parser("off", help="disable telemetry globally")
+    telemetry_off_p.set_defaults(func=cmd_telemetry)
+    telemetry_reset_p = telemetry_sub.add_parser(
+        "reset-id", help="rotate the anonymous telemetry install id"
+    )
+    telemetry_reset_p.set_defaults(func=cmd_telemetry)
+    telemetry_usecase_p = telemetry_sub.add_parser(
+        "usecase",
+        help="send a public-safe use-case description and open-ended tags",
+    )
+    telemetry_usecase_p.add_argument("--description", required=True)
+    telemetry_usecase_p.add_argument("--tag", action="append", default=[])
+    telemetry_usecase_p.set_defaults(func=cmd_telemetry)
+    telemetry_feedback_p = telemetry_sub.add_parser(
+        "feedback",
+        help="send anonymous public-safe feedback about evo behavior",
+    )
+    telemetry_feedback_p.add_argument("--kind", required=True)
+    telemetry_feedback_p.add_argument("--phase", required=True)
+    telemetry_feedback_p.add_argument("--summary", required=True)
+    telemetry_feedback_p.add_argument("--expected", required=True)
+    telemetry_feedback_p.add_argument("--actual", required=True)
+    telemetry_feedback_p.add_argument("--repro", required=True)
+    telemetry_feedback_p.add_argument("--tag", action="append", default=[])
+    telemetry_feedback_p.set_defaults(func=cmd_telemetry)
+
     config_p = sub.add_parser(
         "config",
         help="mutate workspace configuration",
@@ -6941,6 +7158,256 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _telemetry_backend_props(name: str, config: dict[str, Any]) -> dict[str, Any]:
+    props: dict[str, Any] = {"backend": name}
+    provider = (config or {}).get("provider")
+    if provider:
+        props["provider"] = provider
+    return props
+
+
+def _telemetry_workspace_props(root: Path, exp_id: str | None = None) -> dict[str, Any]:
+    from . import telemetry
+
+    props: dict[str, Any] = {}
+    wid = telemetry.workspace_id(root)
+    if wid:
+        props["workspace_id"] = wid
+    try:
+        host = get_host(root)
+        if host:
+            props["host"] = host
+    except Exception:
+        pass
+    try:
+        config = load_config(root)
+        graph = load_graph(root)
+        if exp_id and exp_id in (graph.get("nodes") or {}):
+            from .backends import backend_spec_for_node
+
+            backend_name, backend_config = backend_spec_for_node(
+                root,
+                graph["nodes"][exp_id],
+                workspace_config=config,
+            )
+        else:
+            from .backends import backend_spec_from_config
+
+            backend_name, backend_config = backend_spec_from_config(config)
+        props.update(_telemetry_backend_props(backend_name, backend_config))
+    except Exception:
+        pass
+    return props
+
+
+def _telemetry_pct_delta(delta: float | None, baseline: float | None) -> float | None:
+    if delta is None or baseline is None or baseline == 0:
+        return None
+    return round((delta / abs(float(baseline))) * 100.0, 6)
+
+
+def _telemetry_directional_delta(
+    metric: str | None,
+    score: float | None,
+    baseline: float | None,
+) -> float | None:
+    if score is None or baseline is None:
+        return None
+    if metric == "min":
+        return round(float(baseline) - float(score), 6)
+    return round(float(score) - float(baseline), 6)
+
+
+def _telemetry_failure_type(error: str | None) -> str | None:
+    if not error:
+        return None
+    lowered = error.lower()
+    if "remote_infra" in lowered or "failed_infra" in lowered:
+        return "infra"
+    if "timeout" in lowered:
+        return "timeout"
+    if "gate_failed" in lowered or "pre_gate_failed" in lowered:
+        return "gate"
+    if "runtime" in lowered or "hook" in lowered:
+        return "runtime"
+    if "benchmark" in lowered or "missing_result" in lowered:
+        return "benchmark"
+    return "unknown"
+
+
+def _telemetry_usecase_tags(root: Path) -> list[str]:
+    tags = _load_meta(root).get("telemetry_usecase_tags")
+    if isinstance(tags, list):
+        return [str(tag) for tag in tags if isinstance(tag, str)]
+    return []
+
+
+def _record_telemetry_usecase_tags(root: Path, tags: list[str]) -> None:
+    from . import telemetry
+
+    try:
+        meta_file = evo_dir(root) / "meta.json"
+        data = _load_meta(root)
+        sanitized = telemetry.scrub_tags(tags)
+        if sanitized:
+            data["telemetry_usecase_tags"] = sanitized
+            atomic_write_json(meta_file, data)
+    except Exception:
+        pass
+
+
+def _emit_experiment_result_telemetry(
+    root: Path,
+    exp_id: str,
+    *,
+    outcome: str,
+    metric: str | None,
+    score: float | None = None,
+    parent_score: float | None = None,
+    best_before_score: float | None = None,
+    check: bool = False,
+    failure_type: str | None = None,
+) -> None:
+    try:
+        from . import telemetry
+
+        delta_vs_parent = _telemetry_directional_delta(metric, score, parent_score)
+        delta_vs_best = _telemetry_directional_delta(metric, score, best_before_score)
+        props: dict[str, Any] = {
+            **_telemetry_workspace_props(root, exp_id=exp_id),
+            "experiment_id": exp_id,
+            "outcome": outcome,
+            "check": check,
+        }
+        if metric:
+            props["metric"] = metric
+        if delta_vs_parent is not None:
+            props["delta_vs_parent"] = delta_vs_parent
+            props["pct_delta_vs_parent"] = _telemetry_pct_delta(
+                delta_vs_parent, parent_score
+            )
+        if delta_vs_best is not None:
+            props["delta_vs_best"] = delta_vs_best
+            props["pct_delta_vs_best"] = _telemetry_pct_delta(
+                delta_vs_best, best_before_score
+            )
+        if failure_type:
+            props["failure_type"] = failure_type
+        usecase_tags = _telemetry_usecase_tags(root)
+        if usecase_tags:
+            props["usecase_tags"] = usecase_tags
+        telemetry.capture("experiment_result", props, flush=True, timeout=0.2)
+    except Exception:
+        pass
+
+
+def _branch_close_reason_type(
+    reason: str | None,
+    *,
+    failure_class: str | None = None,
+    prune_kind: str | None = None,
+) -> str:
+    if failure_class in {"build", "eval"}:
+        return "eval_issue"
+    if failure_class == "hypothesis":
+        return "bad_result"
+    if prune_kind == PRUNE_KIND_INVALID:
+        return "bad_result"
+    lowered = (reason or "").lower()
+    if "gate" in lowered:
+        return "gate_issue"
+    if any(token in lowered for token in ("infra", "remote", "provider", "sandbox")):
+        return "infra_issue"
+    if any(token in lowered for token in ("eval", "benchmark", "harness", "score")):
+        return "eval_issue"
+    if any(token in lowered for token in ("duplicate", "same")):
+        return "duplicate"
+    if any(token in lowered for token in ("abandon", "halt", "stop", "stuck")):
+        return "abandoned"
+    if any(token in lowered for token in ("regress", "worse", "bad")):
+        return "bad_result"
+    if reason:
+        return "manual"
+    return "unknown"
+
+
+def _emit_branch_closed_telemetry(
+    root: Path,
+    exp_id: str,
+    node: dict[str, Any],
+    *,
+    close_type: str,
+    reason: str | None = None,
+    prune_kind: str | None = None,
+    failure_class: str | None = None,
+) -> None:
+    try:
+        from . import telemetry
+
+        props: dict[str, Any] = {
+            **_telemetry_workspace_props(root, exp_id=exp_id),
+            "experiment_id": exp_id,
+            "close_type": close_type,
+            "status_before": str(node.get("status") or "unknown"),
+            "had_score": node.get("score") is not None,
+            "reason_type": _branch_close_reason_type(
+                reason,
+                failure_class=failure_class,
+                prune_kind=prune_kind,
+            ),
+        }
+        if prune_kind:
+            props["prune_kind"] = prune_kind
+        if failure_class:
+            props["failure_class"] = failure_class
+        telemetry.capture("branch_closed", props, flush=True, timeout=0.2)
+    except Exception:
+        pass
+
+
+def _telemetry_track_command(args: argparse.Namespace, rc: int, started_at: float) -> None:
+    if getattr(args, "command", None) == "telemetry":
+        return
+    try:
+        from . import telemetry
+
+        props: dict[str, Any] = {}
+        command = getattr(args, "command", None)
+        if getattr(args, "host", None) in SUPPORTED_HOSTS:
+            props["host"] = args.host
+        if command == "init":
+            props["host"] = args.host
+            props["metric"] = args.metric
+            props["backend"] = "worktree"
+        root: Path | None = None
+        if command not in {"install", "uninstall", "doctor", "update"}:
+            try:
+                root = repo_root()
+                exp_id = getattr(args, "exp_id", None)
+                props.update(_telemetry_workspace_props(root, exp_id=exp_id))
+            except Exception:
+                root = None
+        if command == "install" and rc == 0:
+            event = "installed"
+        elif command == "init" and rc == 0:
+            event = "workspace_initialized"
+        elif command == "new" and rc == 0:
+            event = "experiment_created"
+            if getattr(args, "exp_id", None):
+                props["experiment_id"] = args.exp_id
+            props["parent_type"] = (
+                "root" if getattr(args, "parent", None) == "root" else "experiment"
+            )
+        elif command == "autonomous" and rc == 0:
+            event = "optimize_started"
+            props["autonomous"] = (str(getattr(args, "state", "") or "on") == "on")
+        else:
+            return
+        telemetry.capture(event, props, flush=True, timeout=0.2)
+    except Exception:
+        pass
+
+
 def _maybe_auto_register() -> None:
     """Best-effort: if running inside an evo workspace AND inside an
     agent host session (CLAUDE_CODE_SESSION_ID etc.), record this
@@ -6961,6 +7428,7 @@ def _maybe_auto_register() -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    started_at = time.monotonic()
     _maybe_auto_register()
     # Daily PyPI freshness check + legacy-install nudge. Both are silent on
     # any failure and skipped for `update` (so the user isn't told to update
@@ -6977,8 +7445,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         rc = args.func(args)
     except Exception as exc:  # noqa: BLE001
+        _telemetry_track_command(args, 1, started_at)
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
+    _telemetry_track_command(args, rc, started_at)
     sys.exit(rc)
 
 
