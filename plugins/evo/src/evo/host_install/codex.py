@@ -5,7 +5,11 @@ done by adding a `[plugins."<name>@<marketplace>"]` section."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import platform
+import shlex
+import subprocess
 from pathlib import Path
 
 from ._hook_drain import (
@@ -26,6 +30,74 @@ not already done). This command:
   - adds [plugins."evo@evo-hq"]          (enables the plugin)
 in ~/.codex/config.toml.
 """
+
+
+def _command_quote(path: Path) -> str:
+    """Return a shell-safe command token for an absolute executable path."""
+    text = str(path)
+    if platform.system().lower() == "windows":
+        return subprocess.list2cmdline([text])
+    return shlex.quote(text)
+
+
+def _stable_hook_command() -> str:
+    """Codex-safe hook command.
+
+    Codex does not guarantee Claude Code's `${CLAUDE_PLUGIN_ROOT}` env var.
+    Materialize the user's stable evo hook binary path at install time so
+    Codex hook execution does not depend on plugin-root expansion, cwd, or PATH.
+    """
+    return _command_quote(stable_binary_path().resolve())
+
+
+def _materialize_codex_hooks(hooks_json_path: Path) -> bool:
+    """Rewrite an installed Codex hooks.json to use machine-local commands.
+
+    The source plugin's hooks.json is shared with Claude Code and intentionally
+    keeps `${CLAUDE_PLUGIN_ROOT}`. Codex-installed copies get rewritten because
+    recent Codex versions may run plugin hooks without that variable, turning
+    `${CLAUDE_PLUGIN_ROOT}/bin/evo-hook-drain` into `/bin/evo-hook-drain`
+    (exit 127).
+    """
+    try:
+        data = json.loads(hooks_json_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    changed = False
+    drain_cmd = _stable_hook_command()
+    hooks = data.get("hooks") or {}
+    for event_name, groups in list(hooks.items()):
+        updated_groups = []
+        for group in groups or []:
+            handlers = []
+            for handler in group.get("hooks", []) or []:
+                if handler.get("type") != "command":
+                    handlers.append(handler)
+                    continue
+                cmd = str(handler.get("command") or "")
+                if "evo-hook-drain" in cmd:
+                    if cmd != drain_cmd:
+                        handler = {**handler, "command": drain_cmd}
+                        changed = True
+                    handlers.append(handler)
+                elif "wait_hint.sh" in cmd:
+                    # Optional UX hint. Keeping a Claude-only path here makes
+                    # Codex emit hook failures, which is worse than omitting it.
+                    changed = True
+                    continue
+                else:
+                    handlers.append(handler)
+            group["hooks"] = handlers
+            if handlers:
+                updated_groups.append(group)
+            else:
+                changed = True
+        hooks[event_name] = updated_groups
+
+    if changed:
+        hooks_json_path.write_text(json.dumps(data, indent=2) + "\n")
+    return changed
 
 
 def _codex_base() -> Path:
@@ -269,12 +341,9 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = True) ->
                          ".git", ".venv", "__pycache__", "build", "dist",
                          ".pytest_cache", "*.egg-info"))
 
-    # Stage the platform-native evo-hook-drain binary. hooks.json points
-    # at <PLUGIN_ROOT>/bin/evo-hook-drain; without the binary every hook
-    # fire would be a no-op. The cache_dst was just (re)created above
-    # (rmtree if existed) so a fresh fetch is always correct here —
-    # `force=False` (default) avoids re-fetch only when the file is
-    # already at dest, which never happens since we just wiped.
+    # Stage the platform-native evo-hook-drain binary. Codex hook commands
+    # are materialized below to call the stable per-user binary directly,
+    # avoiding host-managed plugin-root env vars.
     ensure_hook_drain_binary(cache_dst)
 
     # Mirror the binary into the marketplace snapshot so codex's next
@@ -286,6 +355,14 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = True) ->
     # would dirty it.
     if not from_path:
         mirror_hook_drain_binary(cache_dst, plugin_root)
+
+    nested_hooks = cache_dst / "hooks" / "hooks.json"
+    if nested_hooks.exists() and _materialize_codex_hooks(nested_hooks):
+        print(f"updated {nested_hooks}: materialized Codex hook commands")
+    if not from_path:
+        snapshot_hooks = plugin_root / "hooks" / "hooks.json"
+        if snapshot_hooks.exists() and _materialize_codex_hooks(snapshot_hooks):
+            print(f"updated {snapshot_hooks}: materialized Codex hook commands")
 
     # Update config.toml: ensure `[features] plugin_hooks = true`
     # (gates whether codex fires plugin hooks at all) AND
@@ -312,7 +389,6 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = True) ->
     # registered but won't fire. Two paths to enable:
     #   - Interactive: user opens `codex` → `/hooks` → trusts each
     #   - Headless:    pass `--trust-hooks` to this command
-    nested_hooks = cache_dst / "hooks" / "hooks.json"
     if not nested_hooks.exists():
         print(
             "\n(no hooks/hooks.json in plugin — skill-only install complete)"
@@ -752,6 +828,18 @@ def doctor(args: argparse.Namespace) -> int:
         hooks_json = versions[-1] / "hooks" / "hooks.json"
         if not hooks_json.exists():
             continue
+        try:
+            hooks_text = hooks_json.read_text()
+        except OSError:
+            hooks_text = ""
+        if "CLAUDE_PLUGIN_ROOT" in hooks_text:
+            print(
+                f"✗ Codex hooks still reference CLAUDE_PLUGIN_ROOT in {hooks_json}; "
+                f"recent Codex versions may run them as /bin/evo-hook-drain "
+                f"(exit 127)\n"
+                f"  Run: evo install codex --force"
+            )
+            rc = 1
         expected = _expected_hook_state(hooks_json, f"evo@{mkt_name}")
         if not expected:
             continue

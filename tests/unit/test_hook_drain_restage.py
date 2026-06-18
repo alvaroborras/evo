@@ -103,6 +103,13 @@ class _CodexSandbox(_SandboxBase):
                         "command": "${CLAUDE_PLUGIN_ROOT}/bin/evo-hook-drain",
                     }],
                 }],
+                "PostToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/wait_hint.sh",
+                    }],
+                }],
             }
         }))
         (self.codex_home / "config.toml").write_text(
@@ -126,6 +133,43 @@ class TestCodexRestageSurvival(_CodexSandbox):
             (self.snapshot / "plugins" / "evo" / "bin" / HOOK_NAME).exists()
         )
 
+    def test_install_materializes_codex_hooks_in_cache_and_snapshot(self):
+        rc = codex._install_via_filecopy(None)
+        self.assertEqual(rc, 0)
+
+        for hooks_json in (
+            self._cache_plugin_dir() / "hooks" / "hooks.json",
+            self.snapshot / "plugins" / "evo" / "hooks" / "hooks.json",
+        ):
+            text = hooks_json.read_text()
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", text)
+            self.assertNotIn("wait_hint.sh", text)
+            self.assertIn(str(self.root / ".evo" / "bin" / HOOK_NAME), text)
+
+    @unittest.skipIf(sys.platform == "win32", "shell-script smoke is posix-only")
+    def test_materialized_hook_runs_without_claude_plugin_root(self):
+        import subprocess
+
+        self.assertEqual(codex._install_via_filecopy(None), 0)
+        stable = self.root / ".evo" / "bin" / HOOK_NAME
+        stable.write_text("#!/bin/sh\ncat >/dev/null\nprintf '{}'\n")
+        stable.chmod(0o755)
+
+        hooks = json.loads((self._cache_plugin_dir() / "hooks" / "hooks.json").read_text())
+        command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        env = os.environ.copy()
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
+        result = subprocess.run(
+            command,
+            input=b'{"hook_event_name":"SessionStart","session_id":"s"}',
+            capture_output=True,
+            env=env,
+            shell=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), b"{}")
+
     def test_binary_survives_codex_restage(self):
         """The regression: codex wipes the cache dir and re-copies the
         snapshot. With the binary mirrored into the snapshot, the
@@ -141,6 +185,8 @@ class TestCodexRestageSurvival(_CodexSandbox):
             "(hooks would exit 127)",
         )
         self.assertTrue(os.access(restaged, os.X_OK))
+        text = (cache_dir / "hooks" / "hooks.json").read_text()
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", text)
 
     def test_doctor_warns_when_snapshot_binary_missing(self):
         import argparse
