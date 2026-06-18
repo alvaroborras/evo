@@ -145,7 +145,19 @@ class TestCodexRestageSurvival(_CodexSandbox):
             text = hooks_json.read_text()
             self.assertNotIn("CLAUDE_PLUGIN_ROOT", text)
             self.assertNotIn("wait_hint.sh", text)
-            self.assertIn(str(self.root / ".evo" / "bin" / HOOK_NAME), text)
+            data = json.loads(text)
+            commands = [
+                handler["command"]
+                for groups in data["hooks"].values()
+                for group in groups
+                for handler in group.get("hooks", [])
+                if handler.get("type") == "command"
+            ]
+            self.assertTrue(commands)
+            for command in commands:
+                self.assertTrue(
+                    Path(command).samefile(self.root / ".evo" / "bin" / HOOK_NAME)
+                )
 
     @unittest.skipIf(sys.platform == "win32", "shell-script smoke is posix-only")
     def test_materialized_hook_runs_without_claude_plugin_root(self):
