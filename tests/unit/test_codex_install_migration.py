@@ -308,6 +308,18 @@ class TestDoctorHookBinary(_Base):
         b.write_bytes(b"\x7fELF-fake\n")
         os.chmod(b, 0o755)
 
+    def _stage_hooks(self, version: str, command: str) -> None:
+        hooks = (
+            self.codex_home / "plugins" / "cache" / "evo-hq" / "evo"
+            / version / "hooks" / "hooks.json"
+        )
+        hooks.parent.mkdir(parents=True, exist_ok=True)
+        hooks.write_text(
+            '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":'
+            + repr(command).replace("'", '"')
+            + '}]}]}}\n'
+        )
+
     def _run_doctor(self) -> int:
         import argparse
         import contextlib
@@ -347,6 +359,12 @@ class TestDoctorHookBinary(_Base):
         (self.codex_home / ".tmp" / "marketplaces" / "evo-hq").mkdir(parents=True)
         self._stage_binary("0.4.5")
         self.assertEqual(self._run_doctor(), 0)
+
+    def test_doctor_fails_when_codex_hooks_still_depend_on_claude_plugin_root(self):
+        self._healthy_config()
+        self._stage_binary("0.6.0")
+        self._stage_hooks("0.6.0", "${CLAUDE_PLUGIN_ROOT}/bin/evo-hook-drain")
+        self.assertEqual(self._run_doctor(), 1)
 
 
 if __name__ == "__main__":

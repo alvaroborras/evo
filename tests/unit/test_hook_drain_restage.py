@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -103,6 +104,13 @@ class _CodexSandbox(_SandboxBase):
                         "command": "${CLAUDE_PLUGIN_ROOT}/bin/evo-hook-drain",
                     }],
                 }],
+                "PostToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/wait_hint.sh",
+                    }],
+                }],
             }
         }))
         (self.codex_home / "config.toml").write_text(
@@ -126,6 +134,57 @@ class TestCodexRestageSurvival(_CodexSandbox):
             (self.snapshot / "plugins" / "evo" / "bin" / HOOK_NAME).exists()
         )
 
+    def test_install_materializes_codex_hooks_in_cache_and_snapshot(self):
+        rc = codex._install_via_filecopy(None)
+        self.assertEqual(rc, 0)
+
+        for hooks_json in (
+            self._cache_plugin_dir() / "hooks" / "hooks.json",
+            self.snapshot / "plugins" / "evo" / "hooks" / "hooks.json",
+        ):
+            text = hooks_json.read_text()
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", text)
+            self.assertNotIn("wait_hint.sh", text)
+            data = json.loads(text)
+            commands = [
+                handler["command"]
+                for groups in data["hooks"].values()
+                for group in groups
+                for handler in group.get("hooks", [])
+                if handler.get("type") == "command"
+            ]
+            self.assertTrue(commands)
+            for command in commands:
+                self.assertTrue(
+                    Path(command).samefile(self.root / ".evo" / "bin" / HOOK_NAME)
+                )
+
+    @unittest.skipIf(sys.platform == "win32", "shell-script smoke is posix-only")
+    def test_materialized_hook_runs_without_claude_plugin_root(self):
+        import subprocess
+
+        self.assertEqual(codex._install_via_filecopy(None), 0)
+        stable = self.root / ".evo" / "bin" / HOOK_NAME
+        stable.write_text("#!/bin/sh\ncat >/dev/null\nprintf '{}'\n")
+        stable.chmod(0o755)
+
+        hooks = json.loads(
+            (self._cache_plugin_dir() / "hooks" / "hooks.json").read_text()
+        )
+        command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        env = os.environ.copy()
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
+        result = subprocess.run(
+            command,
+            input=b'{"hook_event_name":"SessionStart","session_id":"s"}',
+            capture_output=True,
+            env=env,
+            shell=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), b"{}")
+
     def test_binary_survives_codex_restage(self):
         """The regression: codex wipes the cache dir and re-copies the
         snapshot. With the binary mirrored into the snapshot, the
@@ -141,6 +200,48 @@ class TestCodexRestageSurvival(_CodexSandbox):
             "(hooks would exit 127)",
         )
         self.assertTrue(os.access(restaged, os.X_OK))
+        text = (cache_dir / "hooks" / "hooks.json").read_text()
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", text)
+
+    @unittest.skipIf(sys.platform == "win32", "shell-script smoke is posix-only")
+    def test_upgrade_repairs_previous_codex_install_after_host_restage(self):
+        """User path: an older evo install is present, Codex re-stages its
+        cache from that old marketplace snapshot, then the new installer
+        must repair both hook commands and the snapshot for future starts."""
+        stale_cache = self._cache_plugin_dir()
+        shutil.copytree(self.snapshot / "plugins" / "evo", stale_cache)
+        self.assertIn(
+            "CLAUDE_PLUGIN_ROOT",
+            (stale_cache / "hooks" / "hooks.json").read_text(),
+        )
+
+        self.assertEqual(codex._install_via_filecopy(None), 0)
+        stable = self.root / ".evo" / "bin" / HOOK_NAME
+        stable.write_text("#!/bin/sh\ncat >/dev/null\nprintf '{}'\n")
+        stable.chmod(0o755)
+
+        for hooks_json in (
+            self._cache_plugin_dir() / "hooks" / "hooks.json",
+            self.snapshot / "plugins" / "evo" / "hooks" / "hooks.json",
+        ):
+            text = hooks_json.read_text()
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", text)
+            self.assertNotIn("wait_hint.sh", text)
+
+        hooks = json.loads((self._cache_plugin_dir() / "hooks" / "hooks.json").read_text())
+        command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        env = os.environ.copy()
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
+        result = subprocess.run(
+            command,
+            input=b'{"hook_event_name":"SessionStart","session_id":"upgrade"}',
+            capture_output=True,
+            env=env,
+            shell=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), b"{}")
 
     def test_doctor_warns_when_snapshot_binary_missing(self):
         import argparse
@@ -156,6 +257,108 @@ class TestCodexRestageSurvival(_CodexSandbox):
         # Latent issue only: doctor must still pass so `evo update`
         # (which skips unhealthy hosts) can re-mirror it.
         self.assertEqual(rc, 0)
+
+
+class TestCodexMarketplaceRefresh(_CodexSandbox):
+    """Version-pinned Codex installs must refresh the marketplace snapshot.
+
+    Codex rejects `marketplace add evo-hq/evo@new-ref` when `evo-hq` is
+    already registered to another ref. The installer must remove/re-add and
+    must not proceed against the stale snapshot.
+    """
+
+    def _with_fake_codex_on_path(self):
+        fake_bin = self.root / "fake-path-bin"
+        fake_bin.mkdir(exist_ok=True)
+        if sys.platform == "win32":
+            (fake_bin / "codex.cmd").write_text("@echo off\r\nexit /b 0\r\n")
+        else:
+            stub = fake_bin / "codex"
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
+        return old_path
+
+    def test_version_pin_retries_after_existing_marketplace_source(self):
+        import argparse
+        from unittest import mock
+
+        target = "0.6.1-alpha.2"
+        plugin_json = (
+            self.snapshot / "plugins" / "evo" / ".codex-plugin" / "plugin.json"
+        )
+        plugin_json.write_text(json.dumps({"name": "evo", "version": "0.6.0"}))
+        old_path = self._with_fake_codex_on_path()
+        calls = []
+        add_attempts = 0
+
+        def fake_call(cmd):
+            nonlocal add_attempts
+            calls.append(cmd)
+            if cmd[:4] == ["codex", "plugin", "marketplace", "remove"]:
+                return 0
+            if cmd[:4] == ["codex", "plugin", "marketplace", "add"]:
+                add_attempts += 1
+                if add_attempts == 1:
+                    return 1
+                plugin_json.write_text(json.dumps({"name": "evo", "version": target}))
+                return 0
+            return 0
+
+        try:
+            with mock.patch("subprocess.call", side_effect=fake_call):
+                rc = codex.install(argparse.Namespace(
+                    from_path=None,
+                    trust_hooks=True,
+                    force=False,
+                    version=target,
+                ))
+        finally:
+            os.environ["PATH"] = old_path
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            [c[:4] for c in calls],
+            [
+                ["codex", "plugin", "marketplace", "add"],
+                ["codex", "plugin", "marketplace", "remove"],
+                ["codex", "plugin", "marketplace", "add"],
+            ],
+        )
+        cache_hooks = (
+            self.codex_home / "plugins" / "cache" / "evo-hq" / "evo" /
+            target / "hooks" / "hooks.json"
+        )
+        self.assertTrue(cache_hooks.exists())
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", cache_hooks.read_text())
+
+    def test_version_pin_fails_closed_when_snapshot_stays_stale(self):
+        import argparse
+        from unittest import mock
+
+        plugin_json = (
+            self.snapshot / "plugins" / "evo" / ".codex-plugin" / "plugin.json"
+        )
+        plugin_json.write_text(json.dumps({"name": "evo", "version": "0.6.0"}))
+        old_path = self._with_fake_codex_on_path()
+
+        try:
+            with mock.patch("subprocess.call", return_value=0):
+                rc = codex.install(argparse.Namespace(
+                    from_path=None,
+                    trust_hooks=True,
+                    force=False,
+                    version="0.6.1-alpha.2",
+                ))
+        finally:
+            os.environ["PATH"] = old_path
+
+        self.assertEqual(rc, 2)
+        self.assertFalse(
+            (self.codex_home / "plugins" / "cache" / "evo-hq" / "evo" /
+             "0.6.0").exists()
+        )
 
 
 class TestWrapperFallback(_SandboxBase):
