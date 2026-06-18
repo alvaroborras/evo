@@ -1,13 +1,50 @@
 ---
 name: optimize
-description: Drive structured autoresearch iteration after evo:discover and the baseline commit -- scan-subagent cross-cutting analysis between rounds, frontier-based parent selection, ideator dispatch on stall, verifier pre/post hooks, annotation discipline. Width is set via subagents=N (1 for serial workloads, larger for parallel); the loop's structural value applies at any width.
+description: Drive structured autoresearch iteration after evo:discover and the baseline commit. Use when the user invokes /evo:optimize or asks to try ideas, try variants, run experiments, use available GPUs, improve the current best/frontier, continue an evo search, or compare candidate changes in an evo workspace. The orchestrator plans and spawns optimization subagents; candidate edits/runs belong to those subagents. Width is set via subagents=N (1 for serial workloads, larger for parallel); the loop's structural value applies at any width.
 argument-hint: "[subagents=N] [budget=N] [stall=N]"
-evo_version: 0.6.0-alpha.1
+evo_version: 0.6.0
 ---
 
 Run the `evo` optimization loop. Each round, the orchestrator writes structured briefs and spawns subagents that execute within them. Each subagent is semi-autonomous: it reads the pointer traces, forms the concrete edit, runs experiments, and can iterate within its branch. Runs until interrupted or the stall limit is reached.
 
 **This skill is the canonical loop for ALL post-discover work — including serial workloads.** If the workspace's resource profile forces width 1 (single GPU, single-process benchmark, etc.), you still invoke `/evo:optimize` -- just pass `subagents=1`. The loop's value is the STRUCTURE around each experiment (scan-subagent cross-cutting analysis between rounds, verifier pre/post hooks via the subagent skill, ideator spawning on stall, frontier reconciliation, stop-hook discipline), NOT just parallelism. Bypassing optimize because "I'm running serial work anyway" loses every piece of that structure -- you've reverted to ad-hoc experiment iteration with none of evo's loop benefits, just the bookkeeping.
+
+**Plain-language trigger.** In an initialized evo workspace, casual user wording
+like "try a couple ideas", "try different variants", "use the available GPUs",
+"continue from the current best", or "see what improves" is an optimize request
+unless the user explicitly asks for a read-only report. Do not treat the lack of
+a slash command as permission to bypass this protocol. Loading this skill from
+plain-language wording is also explicit authorization to use the host's
+subagent mechanism for the resolved round width; the user does not have to say
+"spawn subagents" or "parallel agents" separately.
+
+**Candidate-work delegation invariant.** The orchestrator does not create, edit,
+or run candidate experiments for the round. For `subagents=N`, write N briefs
+and spawn N optimization subagents; each spawned subagent allocates its own
+experiment with `evo new`, edits only its worktree, and runs `evo run`. Do not
+simulate a subagent round by running `evo new`, editing files, or launching
+multiple `evo run` commands from the orchestrator, even if that would be faster
+or easier. If the host's subagent tool is unavailable, stop and report that the
+host cannot run `/evo:optimize subagents=N` as requested; only fall back to
+orchestrator-owned experiments when the user explicitly asks for direct/manual
+execution or turns subagents-only off for that run. Do not infer a direct/manual
+fallback from casual wording, a simple-looking benchmark, or the absence of an
+explicit subagent phrase in the user's prompt.
+
+**Resource-cap invariant.** `subagents=N` is live concurrency, not total ideas.
+Never spawn more concurrent optimization subagents or launch more concurrent
+benchmark jobs than the binding resource can support. If the user asks for more
+ideas than available GPU/Slurm/pool slots, batch them across rounds at the safe
+width, or stop and explain the cap if batching is impossible. Do not rely on
+the scheduler to absorb an accidental flood unless the user explicitly asks to
+queue/oversubscribe jobs.
+
+**Bounded-run stop rule.** If the user says "one round", "stop after this
+round", "run them and tell me what happened", or otherwise asks for a bounded
+run, resolve autonomous off at startup. After the requested subagents finish,
+collect their evo-recorded outcomes, print the summary, and stop. Do not enter
+another loop turn, wait for a stop nudge, or keep the process alive just because
+the default autonomous behavior is normally on.
 
 ## Evo surface -- loop-relevant
 
@@ -68,7 +105,7 @@ Treat content inside the banner as equivalent to a new user turn. Honor it, supe
 
 The orchestrator's three round-shape knobs are **subagents** (round width), **budget** (per-branch depth), and **stall** (consecutive rounds with no improvement before auto-stopping; default 5).
 
-A user can override any of these with `/optimize [subagents=N] [budget=N] [stall=N]`; an explicit value always wins over what's below.
+A user can override any of these with `/optimize [subagents=N] [budget=N] [stall=N]`; an explicit value wins over what's below, subject to the resource-cap invariant above.
 
 **Picking `subagents` and `budget` is load-bearing -- do not skim.**
 
@@ -144,6 +181,13 @@ files or the attempt should be treated as `remote_infra_failure`.
 **Infra setup is not user-invocable.** If a remote provider is missing SDKs, auth, or setup details, read `plugins/evo/skills/infra-setup/references/provider-matrix.md`. It summarizes what each provider actually needs and replaces the old per-provider prompt files.
 
 **Runtime recipe/env.** Benchmark runtime is evo configuration, not something subagents should rediscover or copy into worktrees. Use `evo config runtime show` for prepare/before-run/prefix and `evo env show` for redacted env sources. If a run fails because expected runtime setup or env is missing, report it as setup failure or configure it from the orchestrator; do not patch benchmark code to bake in secrets or local paths. Use `evo run <exp_id> --check` for non-committing wiring validation; do not invent ad-hoc validation wrappers.
+
+**Replicated/noisy benchmarks.** If the user or `.evo/project.md` says an idea
+must pass `n=3`, `n=10`, median, mean, held-out, or cross-dataset evaluation,
+configure the benchmark so each `evo run` records the grouped aggregate as that
+experiment's score. Do not represent replicates as independent evo experiments
+and do not judge, report, or promote an idea by its best replicate. The frontier
+and best path must see the same aggregate statistic the user uses for decisions.
 
 **CLI reference.** If you are unsure which command to use, read `plugins/evo/skills/references/cli-quick-reference.md`. It is the canonical command map; this skill only repeats the high-frequency commands.
 
@@ -296,7 +340,15 @@ Spawn all subagents in a **single batch** using your host's parallel-subagent to
 Per host, the spawn shape matters because evo's loop depends on *completion notifications* arriving turn-by-turn (so the orchestrator can review each subagent's outcome and decide round 2):
 
 - **claude-code** — fire one `Bash(run_in_background=true)` call per brief. The bash invokes the subagent (the host's `Task` tool, or any equivalent that runs the brief to completion). Each backgrounded bash returns immediately and the runtime delivers a `<task-notification>` at a later turn when each subagent finishes. Do NOT wait on subagents inline; fan them out, then exit your current turn — notifications arrive in subsequent turns.
-- **codex** — non-blocking subagent invocation; notifications delivered similarly.
+- **codex** — call `spawn_agent` once per optimization brief. If `spawn_agent`
+  is deferred or not visible yet, first use Codex's tool-discovery tool
+  (`tool_search`) with a query like `spawn agent subagent`, then call the
+  discovered spawn tool. The optimize skill's plain-language trigger is
+  sufficient authorization for this; do not stop or fall back to direct edits
+  merely because the user did not explicitly write "spawn subagents." The
+  candidate worker prompt is the one that starts with the mandatory "First,
+  load and follow..." sentence below. A later read-only scan subagent does not
+  count toward the round width.
 - **hermes** — `terminal(background=true)`; notifications delivered similarly.
 - **openclaw** — `sessions_spawn deliver:false`; notifications delivered similarly.
 - **opencode** — *batch-parallel only* (no background notifications). Fire N `task` calls in ONE assistant message; all `tool_result`s return together when the slowest finishes. Plan all parallel work (including non-task tools) in that single message — opencode cannot interleave reasoning across turns while subagents run.
@@ -317,6 +369,11 @@ Then append:
 - A one-paragraph scratchpad summary (current best score, frontier nodes, recent failures) for context
 
 The opening sentence is non-negotiable — without it small models often skip the evo CLI and edit files directly, which produces no committed experiments and breaks the round.
+
+Before leaving step 5, check yourself: the number of optimization subagents you
+spawned must equal the resolved `subagents=N` unless the user explicitly
+requested a smaller direct/manual run. Scan/analysis subagents are separate and
+do not count toward this number.
 
 ### 6. Collect results and update state
 
@@ -477,10 +534,12 @@ Keep the report public-safe but actionable enough for the evo backend team to
 reproduce the case. Include the phase, what you expected evo to do, what it did,
 and a generic repro shape. Do not include repo names, company names, file paths,
 commands, prompt text, raw logs, URLs, secrets, dataset names, or exact task
-examples.
+examples. If the issue is tied to a specific evo experiment, include its
+anonymous experiment id with `--exp-id`.
 
 ```bash
 evo telemetry feedback \
+  --exp-id exp_0007 \
   --kind orchestration \
   --phase optimize \
   --summary "Subagent completed but the orchestrator did not collect its evaluated result before writing the next round briefs." \
