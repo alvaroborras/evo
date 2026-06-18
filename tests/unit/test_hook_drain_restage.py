@@ -247,6 +247,108 @@ class TestCodexRestageSurvival(_CodexSandbox):
         self.assertEqual(rc, 0)
 
 
+class TestCodexMarketplaceRefresh(_CodexSandbox):
+    """Version-pinned Codex installs must refresh the marketplace snapshot.
+
+    Codex rejects `marketplace add evo-hq/evo@new-ref` when `evo-hq` is
+    already registered to another ref. The installer must remove/re-add and
+    must not proceed against the stale snapshot.
+    """
+
+    def _with_fake_codex_on_path(self):
+        fake_bin = self.root / "fake-path-bin"
+        fake_bin.mkdir(exist_ok=True)
+        if sys.platform == "win32":
+            (fake_bin / "codex.cmd").write_text("@echo off\r\nexit /b 0\r\n")
+        else:
+            stub = fake_bin / "codex"
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
+        return old_path
+
+    def test_version_pin_retries_after_existing_marketplace_source(self):
+        import argparse
+        from unittest import mock
+
+        target = "0.6.1-alpha.2"
+        plugin_json = (
+            self.snapshot / "plugins" / "evo" / ".codex-plugin" / "plugin.json"
+        )
+        plugin_json.write_text(json.dumps({"name": "evo", "version": "0.6.0"}))
+        old_path = self._with_fake_codex_on_path()
+        calls = []
+        add_attempts = 0
+
+        def fake_call(cmd):
+            nonlocal add_attempts
+            calls.append(cmd)
+            if cmd[:4] == ["codex", "plugin", "marketplace", "remove"]:
+                return 0
+            if cmd[:4] == ["codex", "plugin", "marketplace", "add"]:
+                add_attempts += 1
+                if add_attempts == 1:
+                    return 1
+                plugin_json.write_text(json.dumps({"name": "evo", "version": target}))
+                return 0
+            return 0
+
+        try:
+            with mock.patch("subprocess.call", side_effect=fake_call):
+                rc = codex.install(argparse.Namespace(
+                    from_path=None,
+                    trust_hooks=True,
+                    force=False,
+                    version=target,
+                ))
+        finally:
+            os.environ["PATH"] = old_path
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            [c[:4] for c in calls],
+            [
+                ["codex", "plugin", "marketplace", "add"],
+                ["codex", "plugin", "marketplace", "remove"],
+                ["codex", "plugin", "marketplace", "add"],
+            ],
+        )
+        cache_hooks = (
+            self.codex_home / "plugins" / "cache" / "evo-hq" / "evo" /
+            target / "hooks" / "hooks.json"
+        )
+        self.assertTrue(cache_hooks.exists())
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", cache_hooks.read_text())
+
+    def test_version_pin_fails_closed_when_snapshot_stays_stale(self):
+        import argparse
+        from unittest import mock
+
+        plugin_json = (
+            self.snapshot / "plugins" / "evo" / ".codex-plugin" / "plugin.json"
+        )
+        plugin_json.write_text(json.dumps({"name": "evo", "version": "0.6.0"}))
+        old_path = self._with_fake_codex_on_path()
+
+        try:
+            with mock.patch("subprocess.call", return_value=0):
+                rc = codex.install(argparse.Namespace(
+                    from_path=None,
+                    trust_hooks=True,
+                    force=False,
+                    version="0.6.1-alpha.2",
+                ))
+        finally:
+            os.environ["PATH"] = old_path
+
+        self.assertEqual(rc, 2)
+        self.assertFalse(
+            (self.codex_home / "plugins" / "cache" / "evo-hq" / "evo" /
+             "0.6.0").exists()
+        )
+
+
 class TestWrapperFallback(_SandboxBase):
     """The committed bin/evo-hook-drain wrapper keeps hooks working when
     a host re-stage replaces the staged binary with the git tree's

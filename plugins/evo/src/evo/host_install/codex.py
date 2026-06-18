@@ -109,6 +109,16 @@ def _marketplace_cache() -> Path:
     return _codex_base() / ".tmp" / "marketplaces" / "evo-hq"
 
 
+def _marketplace_plugin_version(mkt_root: Path) -> str | None:
+    manifest = mkt_root / "plugins" / "evo" / ".codex-plugin" / "plugin.json"
+    try:
+        data = json.loads(manifest.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    version = data.get("version")
+    return str(version) if version else None
+
+
 def _toggle_plugin_hooks(enable: bool) -> tuple[bool, Path]:
     cfg = _codex_base() / "config.toml"
     if not cfg.exists():
@@ -200,13 +210,14 @@ def install(args: argparse.Namespace) -> int:
     mkt_cache = _marketplace_cache()
     if from_path:
         pass
-    elif mkt_cache.exists() and not force:
+    elif mkt_cache.exists() and not force and not getattr(args, "version", None):
         print(
             f"codex marketplace cache already at {mkt_cache}; "
             "skipping `codex plugin marketplace add` prereq (use --force to refresh)"
         )
     else:
         import subprocess as _sp
+        import sys as _sys
         version = getattr(args, "version", None)
         source = "evo-hq/evo"
         if version:
@@ -215,7 +226,28 @@ def install(args: argparse.Namespace) -> int:
             source = f"{source}@{ref}"
         mkt_cmd = ["codex", "plugin", "marketplace", "add", source]
         print(f"$ {' '.join(mkt_cmd)}")
-        _sp.call(mkt_cmd)
+        rc = _sp.call(mkt_cmd)
+        if rc != 0 and (force or version):
+            rm_cmd = ["codex", "plugin", "marketplace", "remove", "evo-hq"]
+            print(f"$ {' '.join(rm_cmd)}")
+            _sp.call(rm_cmd)
+            print(f"$ {' '.join(mkt_cmd)}")
+            rc = _sp.call(mkt_cmd)
+        if rc != 0:
+            print(
+                f"ERROR: failed to add Codex marketplace source {source!r}",
+                file=_sys.stderr,
+            )
+            return 2
+        if version:
+            actual = _marketplace_plugin_version(mkt_cache)
+            if actual != version:
+                print(
+                    "ERROR: Codex marketplace snapshot version mismatch: "
+                    f"expected {version}, found {actual or 'unknown'} at {mkt_cache}",
+                    file=_sys.stderr,
+                )
+                return 2
 
     # Ensure config.toml exists. On freshly-npm-installed codex (never run
     # interactively), the marketplace add above creates ~/.codex/ but may
