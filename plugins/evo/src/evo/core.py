@@ -1089,6 +1089,8 @@ def is_valid_result_node(
         return False
     if lineage_invalidated_by(graph, node_id) is not None:
         return False
+    if node.get("gate_result") is False:
+        return False
     if node.get("status") == "committed":
         return True
     return bool(is_exhausted_prune(node) and node.get("commit"))

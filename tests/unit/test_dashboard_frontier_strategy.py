@@ -15,6 +15,8 @@ from pathlib import Path
 from evo.backends import backend_state_key
 from evo.backends import pool_state, remote_state
 from evo.core import (
+    PRUNE_KIND_EXHAUSTED,
+    PRUNE_KIND_INVALID,
     atomic_write_json,
     experiments_dir_for,
     graph_path,
@@ -194,6 +196,111 @@ class TestDashboardFrontierStrategy(unittest.TestCase):
         data = self.client.get("/api/workspace").get_json()
         self.assertEqual(data["project_name"], self.root.name)
         self.assertEqual(data["project_name_source"], "repo")
+
+    def test_stats_endpoint_counts_effective_statuses(self):
+        graph = load_graph(self.root)
+        graph["next_id"] = 5
+        graph["nodes"]["root"]["children"] = [
+            "exp_0000",
+            "exp_0001",
+            "exp_0003",
+            "exp_0004",
+        ]
+        graph["nodes"]["exp_0000"] = {
+            "id": "exp_0000",
+            "parent": "root",
+            "children": [],
+            "status": "pruned",
+            "score": 0.9,
+            "hypothesis": "closed winning branch",
+            "created_at": "2026-04-30T00:00:00+00:00",
+            "eval_epoch": 1,
+            "branch": "evo/run_0000/exp_0000",
+            "commit": "abc",
+            "worktree": "/tmp/exp_0000",
+            "benchmark_result": None,
+            "gate_result": True,
+            "gates": [],
+            "pruned_reason": "no more useful children",
+            "prune_kind": PRUNE_KIND_EXHAUSTED,
+        }
+        graph["nodes"]["exp_0001"] = {
+            "id": "exp_0001",
+            "parent": "root",
+            "children": ["exp_0002"],
+            "status": "pruned",
+            "score": 1.0,
+            "hypothesis": "invalid benchmark",
+            "created_at": "2026-04-30T00:01:00+00:00",
+            "eval_epoch": 1,
+            "branch": "evo/run_0000/exp_0001",
+            "commit": "def",
+            "worktree": "/tmp/exp_0001",
+            "benchmark_result": None,
+            "gate_result": True,
+            "gates": [],
+            "pruned_reason": "bad metric",
+            "prune_kind": PRUNE_KIND_INVALID,
+        }
+        graph["nodes"]["exp_0002"] = {
+            "id": "exp_0002",
+            "parent": "exp_0001",
+            "children": [],
+            "status": "committed",
+            "score": 1.2,
+            "hypothesis": "descends from invalid result",
+            "created_at": "2026-04-30T00:02:00+00:00",
+            "eval_epoch": 1,
+            "branch": "evo/run_0000/exp_0002",
+            "commit": "ghi",
+            "worktree": "/tmp/exp_0002",
+            "benchmark_result": None,
+            "gate_result": True,
+            "gates": [],
+        }
+        graph["nodes"]["exp_0003"] = {
+            "id": "exp_0003",
+            "parent": "root",
+            "children": [],
+            "status": "failed",
+            "score": None,
+            "hypothesis": "failed",
+            "created_at": "2026-04-30T00:03:00+00:00",
+            "eval_epoch": 1,
+            "branch": "evo/run_0000/exp_0003",
+            "commit": None,
+            "worktree": "/tmp/exp_0003",
+            "benchmark_result": None,
+            "gate_result": None,
+            "gates": [],
+        }
+        graph["nodes"]["exp_0004"] = {
+            "id": "exp_0004",
+            "parent": "root",
+            "children": [],
+            "status": "pending",
+            "score": None,
+            "hypothesis": "queued",
+            "created_at": "2026-04-30T00:04:00+00:00",
+            "eval_epoch": 1,
+            "branch": "evo/run_0000/exp_0004",
+            "commit": None,
+            "worktree": "/tmp/exp_0004",
+            "benchmark_result": None,
+            "gate_result": None,
+            "gates": [],
+        }
+        atomic_write_json(graph_path(self.root), graph)
+
+        data = self.client.get("/api/stats").get_json()
+        self.assertEqual(data["total_experiments"], 5)
+        self.assertEqual(data["committed"], 1)
+        self.assertEqual(data["pruned"], 0)
+        self.assertEqual(data["invalidated"], 1)
+        self.assertEqual(data["lineage_blocked"], 1)
+        self.assertEqual(data["failed"], 1)
+        self.assertEqual(data["pending"], 1)
+        self.assertEqual(data["best_score"], 0.9)
 
     def test_node_endpoint_reports_latest_check_summary(self):
         graph = load_graph(self.root)

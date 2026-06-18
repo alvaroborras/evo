@@ -12,6 +12,7 @@ from .core import (
     GRAPH_FILE,
     best_committed_node,
     best_committed_score,
+    effective_status,
     evo_dir,
     frontier_nodes,
     is_valid_result_node,
@@ -435,9 +436,8 @@ def _compute_stats(graph: dict, metric: str) -> dict:
     exps = [n for nid, n in nodes.items() if nid != "root"]
     by_status: dict[str, int] = {}
     for n in exps:
-        by_status[n.get("status") or "pending"] = by_status.get(
-            n.get("status") or "pending", 0
-        ) + 1
+        status = effective_status(graph, n)
+        by_status[status] = by_status.get(status, 0) + 1
 
     best_node = best_committed_node(graph, metric)
     best_score = best_committed_score(graph, metric)

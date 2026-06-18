@@ -145,6 +145,62 @@ def test_exhausted_prune_keeps_result_eligible_but_not_frontier() -> None:
     assert [n["id"] for n in frontier_nodes(graph)] == ["exp_0001"]
 
 
+def test_gate_failed_committed_node_is_excluded_from_best_result() -> None:
+    graph = _linked_graph(
+        _node("root", None),
+        _node(
+            "exp_0000",
+            "root",
+            status="committed",
+            score=2.0,
+            commit="abc",
+            gate_result=False,
+        ),
+        _node(
+            "exp_0001",
+            "root",
+            status="committed",
+            score=1.0,
+            commit="def",
+            gate_result=True,
+        ),
+    )
+
+    assert not is_valid_result_node(graph, graph["nodes"]["exp_0000"])
+    assert is_valid_result_node(graph, graph["nodes"]["exp_0001"])
+    assert best_committed_score(graph, "max") == 1.0
+    assert best_committed_node(graph, "max")["id"] == "exp_0001"
+
+
+def test_gate_failed_exhausted_prune_is_excluded_from_best_result() -> None:
+    graph = _linked_graph(
+        _node("root", None),
+        _node(
+            "exp_0000",
+            "root",
+            status="pruned",
+            score=2.0,
+            commit="abc",
+            gate_result=False,
+            pruned_reason="closed branch",
+            prune_kind=PRUNE_KIND_EXHAUSTED,
+        ),
+        _node(
+            "exp_0001",
+            "root",
+            status="committed",
+            score=1.0,
+            commit="def",
+            gate_result=True,
+        ),
+    )
+
+    assert not is_valid_result_node(graph, graph["nodes"]["exp_0000"])
+    assert effective_status(graph, graph["nodes"]["exp_0000"]) == "committed"
+    assert best_committed_score(graph, "max") == 1.0
+    assert best_committed_node(graph, "max")["id"] == "exp_0001"
+
+
 def test_invalid_prune_blocks_node_and_descendants_from_best_and_frontier() -> None:
     graph = _linked_graph(
         _node("root", None),
