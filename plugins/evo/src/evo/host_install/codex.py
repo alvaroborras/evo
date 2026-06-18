@@ -318,7 +318,6 @@ def _install_via_filecopy(from_path: str | None, *, trust_hooks: bool = True) ->
             "\n(no hooks/hooks.json in plugin — skill-only install complete)"
         )
         return 0
-
     if trust_hooks:
         _trust_plugin_hooks(nested_hooks, plugin_id=f"evo@{mkt_name}", cfg=cfg)
     else:

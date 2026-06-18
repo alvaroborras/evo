@@ -1770,6 +1770,11 @@ def cmd_new(args: argparse.Namespace) -> int:
     if seed:
         out["from_artifact"] = seed
     args.exp_id = node["id"]
+    try:
+        from evo.inject.registry import claim_current_session_exp_id
+        claim_current_session_exp_id(root, node["id"])
+    except Exception:
+        pass
     print(json.dumps(out, indent=2))
     return 0
 
@@ -5497,9 +5502,8 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
 
     Autonomous mode enables the always-fire stop nudge: at every turn
     boundary the orchestrator is re-prompted to keep driving the optimize
-    loop, instead of stopping. It is opt-in — the orchestrator runs
-    `evo autonomous on` when /optimize is invoked with the `autonomous`
-    param. A plain /optimize keeps the policy gate but stops naturally.
+    loop, instead of stopping. The optimize skill arms it by default unless
+    the user or stored config explicitly resolves autonomous off.
     `evo autonomous off` (and `evo exit-optimize-mode`) disarm it.
     """
     from .inject.registry import detect_session, mark_autonomous, unmark_autonomous
@@ -5556,9 +5560,8 @@ def cmd_subagents_only(args: argparse.Namespace) -> int:
 
     When armed, the policy deny-gate blocks the orchestrator from editing
     files / running experiments by hand — only subagents do (the
-    delegate-to-subagents discipline). Opt-in: the orchestrator runs
-    `evo subagents-only on` when /optimize is invoked with the
-    `subagents-only` param. A plain /optimize ALLOWS orchestrator edits.
+    delegate-to-subagents discipline). The optimize skill arms it by default
+    unless the user or stored config explicitly resolves subagents-only off.
     `evo subagents-only off` (and `evo exit-optimize-mode`) disarm it.
     """
     from .inject.registry import (
@@ -7033,13 +7036,11 @@ def build_parser() -> argparse.ArgumentParser:
         "autonomous",
         help="Arm/disarm autonomous mode (the always-fire stop-nudge loop) for this session",
         description=(
-            "Opt-in to the autonomous optimize loop: when armed, the "
-            "orchestrator is re-prompted at every turn boundary to keep "
-            "driving the loop until its stall limit or interruption. The "
-            "orchestrator runs `evo autonomous on` when /optimize is invoked "
-            "with the `autonomous` param. Default (disarmed) /optimize keeps "
-            "the policy gate but stops naturally. `off` (or "
-            "`evo exit-optimize-mode`) disarms it."
+            "Autonomous mode re-prompts the orchestrator at every turn "
+            "boundary to keep driving the loop until its stall limit or "
+            "interruption. The optimize skill arms it by default unless the "
+            "user or stored config explicitly resolves autonomous off. `off` "
+            "(or `evo exit-optimize-mode`) disarms it."
         ),
     )
     autonomous_p.add_argument(
@@ -7060,13 +7061,11 @@ def build_parser() -> argparse.ArgumentParser:
         "subagents-only",
         help="Arm/disarm subagents-only mode (orchestrator may not edit; only subagents do)",
         description=(
-            "Opt-in to the delegate-to-subagents policy gate: when armed, the "
-            "orchestrator is blocked from editing files / running experiments "
-            "by hand, forcing it to dispatch to subagents. The orchestrator "
-            "runs `evo subagents-only on` when /optimize is invoked with the "
-            "`subagents-only` param. Default (disarmed) /optimize ALLOWS the "
-            "orchestrator to edit directly. `off` (or `evo exit-optimize-mode`) "
-            "disarms it."
+            "Subagents-only mode blocks the orchestrator from editing files / "
+            "running experiments by hand, forcing it to dispatch to subagents. "
+            "The optimize skill arms it by default unless the user or stored "
+            "config explicitly resolves subagents-only off. `off` (or "
+            "`evo exit-optimize-mode`) disarms it."
         ),
     )
     subagents_only_p.add_argument(

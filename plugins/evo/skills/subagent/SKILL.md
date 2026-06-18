@@ -234,6 +234,13 @@ evo run <exp_id>
 
 This runs benchmark + gate and prints the result.
 
+For noisy or replicated benchmarks, one `evo run` must represent the user's
+decision statistic for the idea. If the brief, user, or `.evo/project.md` says
+`n=3`, `n=10`, median, mean, held-out, or cross-dataset evaluation is required,
+use the configured grouped benchmark path so the experiment records that
+aggregate score. Do not create separate evo experiments for replicates, and do
+not report or promote an idea by its best single replicate.
+
 In remote-backend workspaces, if a prior `evo run <exp_id>` was interrupted
 or the experiment is still `active`, run `evo run <exp_id>` again first. That
 is the recovery path: evo will try to attach to the existing remote process and

@@ -3399,7 +3399,7 @@ function renderRuntimeSettings(panel, ws) {
       </div>
       ${sources.length ? `<div class="settings-block">
         <div class="settings-block-label">File sources</div>
-        ${sources.map(renderRuntimeEnvSource).join('')}
+        ${sources.map((source, index) => renderRuntimeSourceEditor(source, index, source)).join('')}
       </div>` : ''}
       ${Object.keys(configuredKeyPreviews).length ? `<div class="settings-block">
         <div class="settings-block-label">Keys from file sources</div>

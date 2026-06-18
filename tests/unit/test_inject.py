@@ -43,9 +43,11 @@ from evo.inject.paths import (
 )
 from evo.inject.registry import (
     auto_register_from_env,
+    claim_current_session_exp_id,
     detect_session,
     is_registered,
     list_active_sessions,
+    mark_engaged,
     register_session,
 )
 
@@ -189,6 +191,23 @@ class TestRegistry(unittest.TestCase):
         register_session(self.root, "sid2", "codex", exp_id="exp_0001")
         data = json.loads(session_file(self.root, "sid2").read_text())
         assert data["exp_id"] == "exp_0001"
+
+    def test_claim_current_session_exp_id_stores_for_unengaged_session(self):
+        register_session(self.root, "worker_sid", "codex")
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "worker_sid"}, clear=False):
+            assert claim_current_session_exp_id(self.root, "exp_0001")
+        data = json.loads(session_file(self.root, "worker_sid").read_text())
+        assert data["exp_id"] == "exp_0001"
+        assert data["has_evo_engaged"] is False
+
+    def test_claim_current_session_exp_id_refuses_engaged_orchestrator(self):
+        register_session(self.root, "orch_sid", "codex")
+        mark_engaged(self.root, "orch_sid")
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "orch_sid"}, clear=False):
+            assert not claim_current_session_exp_id(self.root, "exp_0001")
+        data = json.loads(session_file(self.root, "orch_sid").read_text())
+        assert data["exp_id"] is None
+        assert data["has_evo_engaged"] is True
 
     def test_register_session_stores_parent_session_id(self):
         register_session(self.root, "sid3", "claude-code", parent_session_id="parent1")

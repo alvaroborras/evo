@@ -37,8 +37,8 @@ STALE_AFTER_SECONDS = 30 * 24 * 60 * 60
 # codex-cli 0.130 — it shows "session id: <uuid>" at startup and exports
 # the same uuid via CODEX_THREAD_ID, not CODEX_SESSION_ID).
 HOST_SESSION_ENV_VARS = (
-    ("claude-code", "CLAUDE_CODE_SESSION_ID"),
     ("codex", "CODEX_THREAD_ID"),
+    ("claude-code", "CLAUDE_CODE_SESSION_ID"),
     ("hermes", "HERMES_SESSION_ID"),
     ("opencode", "OPENCODE_SESSION_ID"),
 )
@@ -194,6 +194,43 @@ def register_session(
     # engagement filter.
     from .queue import init_offset_to_latest
     init_offset_to_latest(root, session_id)
+
+
+def claim_current_session_exp_id(root: Path, exp_id: str) -> bool:
+    """Stamp the current host session as owning `exp_id` after it allocated
+    that experiment with `evo new`.
+
+    Subagents usually do not know their experiment id until `evo new` returns,
+    so `auto_register_from_env()` cannot rely solely on `EVO_EXP_ID`. This is a
+    narrow post-allocation path: only sessions that have not already engaged as
+    an orchestrator may claim an experiment.
+    """
+    detected = detect_session()
+    if not detected:
+        return False
+    _host, sid = detected
+    path = session_file(root, sid)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    if data.get("exp_id"):
+        return data.get("exp_id") == exp_id
+    if data.get("has_evo_engaged") or data.get("optimize_mode") or data.get("subagents_only"):
+        return False
+    data["exp_id"] = exp_id
+    data["exp_id_claimed_at"] = _now_iso()
+    data["has_evo_engaged"] = False
+    data["engaged_at"] = None
+    data["autonomous"] = False
+    data["autonomous_at"] = None
+    try:
+        atomic_write_json(path, data)
+    except OSError:
+        return False
+    return True
 
 
 def _write_optimize_mode_flag(root: Path, session_id: str) -> None:
