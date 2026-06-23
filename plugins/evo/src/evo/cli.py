@@ -4524,6 +4524,74 @@ def cmd_traces(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """Read metrics.jsonl from the latest attempt. With --tail, follow new lines."""
+    root = repo_root()
+    node = _read_node(root, args.exp_id)
+    attempt = int(node.get("current_attempt", 0))
+    if attempt == 0:
+        print("[]")
+        return 0
+    target = attempt_log_path(root, args.exp_id, attempt, "metrics.jsonl")
+    if not target.exists():
+        fallback = Path(node.get("worktree", "")) / "metrics.jsonl"
+        if fallback.exists():
+            target = fallback
+        else:
+            print("[]")
+            return 0
+    if args.tail:
+        fragment = b""
+        seen_size = 0
+        fragment = _print_metrics_lines(target, offset=0, fragment=b"")
+        seen_size = target.stat().st_size
+        try:
+            while True:
+                time.sleep(2)
+                current = target.stat().st_size
+                if current < seen_size:
+                    seen_size = 0
+                    fragment = b""
+                if current > seen_size:
+                    fragment = _print_metrics_lines(target, offset=seen_size, fragment=fragment)
+                    seen_size = current
+        except KeyboardInterrupt:
+            pass
+        return 0
+    _print_metrics_lines(target, offset=0)
+    return 0
+
+
+def _print_metrics_lines(path: Path, *, offset: int, fragment: bytes = b"") -> bytes:
+    """Read JSONL lines from path starting at offset, appending fragment.
+
+    Returns the new fragment (trailing incomplete line) for the next call.
+    """
+    size = path.stat().st_size
+    if offset >= size:
+        return fragment
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        raw = fragment + fh.read()
+    if not raw:
+        return fragment
+
+    # Split on newlines; keep trailing incomplete line as fragment
+    parts = raw.split(b"\n")
+    # All but the last part are complete lines
+    for part in parts[:-1]:
+        line = part.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line.decode("utf-8", errors="replace"))
+            print(json.dumps(parsed))
+        except json.JSONDecodeError:
+            pass
+    # Last part is the incomplete fragment (or empty if raw ended with \n)
+    return parts[-1]
+
+
 def cmd_annotate(args: argparse.Namespace) -> int:
     root = repo_root()
     entry = append_annotation(root, args.exp_id, args.task, args.analysis)
