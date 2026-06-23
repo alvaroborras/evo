@@ -4415,6 +4415,24 @@ def cmd_show(args: argparse.Namespace) -> int:
                 pass
         attempts.append(attempt_payload)
 
+    active_attempt = None
+    if node.get("status") == "active":
+        current = int(node.get("current_attempt", 0))
+        if current > 0:
+            state = _read_attempt_state(root, args.exp_id, current)
+            if state is not None:
+                active_attempt = {"n": current, "state": state}
+                diff_path = attempt_log_path(root, args.exp_id, current, "diff.patch")
+                if diff_path.exists():
+                    try:
+                        active_attempt["diff"] = diff_path.read_text(encoding="utf-8")
+                        parsed = parse_diff_patch(root, args.exp_id, current)
+                        if parsed:
+                            active_attempt["diff_added"] = parsed["added"]
+                            active_attempt["diff_removed"] = parsed["removed"]
+                    except OSError:
+                        pass
+
     # Annotations filtered to this exp.
     all_annotations = load_annotations(root).get("annotations", [])
     annotations = [a for a in all_annotations if a.get("experiment_id") == args.exp_id]
@@ -4432,6 +4450,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         "children": list(node.get("children", [])),
         "effective_gates": collect_gates_from_path(graph, args.exp_id),
         "attempts": attempts,
+        "active_attempt": active_attempt,
         "annotations": annotations,
         "notes": list(node.get("notes", [])),
         "tags": list(node.get("tags", [])),
@@ -6758,6 +6777,17 @@ def build_parser() -> argparse.ArgumentParser:
     traces_p.add_argument("exp_id")
     traces_p.add_argument("task", nargs="?")
     traces_p.set_defaults(func=cmd_traces)
+
+    metrics_p = sub.add_parser(
+        "metrics",
+        help="live-training metrics from metrics.jsonl (loss, reward, lr, ...)",
+    )
+    metrics_p.add_argument("exp_id")
+    metrics_p.add_argument(
+        "--tail", action="store_true",
+        help="follow new lines every 2 seconds (like tail -f)",
+    )
+    metrics_p.set_defaults(func=cmd_metrics)
 
     annotate_p = sub.add_parser("annotate")
     annotate_p.add_argument("exp_id")
