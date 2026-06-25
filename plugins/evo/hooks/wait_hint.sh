@@ -17,6 +17,18 @@
 
 set -u
 
+emit_empty() {
+  printf '{}\n'
+  exit 0
+}
+
+emit_hint() {
+  # Codex and Claude Code hooks expect JSON stdout. Raw reminder text or blank
+  # stdout is treated as invalid hook output by Codex.
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[evo-hint] Long-running command detected. Use `evo wait --for process=<pid> --for log-growth=<path> --for gpu-active --timeout 60m --json` with process liveness, log delta, GPU activity, bounded timeout, and structured exit instead of tail-loop polling. See `evo wait --help`."}}'
+  exit 0
+}
+
 # Read all of stdin (small JSON payload). Tolerate non-pipe invocation.
 payload=""
 if [ ! -t 0 ]; then
@@ -45,7 +57,7 @@ fi
 # Only care about shell tool calls.
 case "$tool_name" in
   Bash|bash|shell|Shell) ;;
-  *) exit 0 ;;
+  *) emit_empty ;;
 esac
 
 # Extract the command string. Same dual-shape tolerance: top-level
@@ -57,7 +69,7 @@ command_str="$(printf '%s' "$payload" \
   | sed -E 's/^"command"[[:space:]]*:[[:space:]]*"(.*)"$/\1/')"
 
 if [ -z "$command_str" ]; then
-  exit 0
+  emit_empty
 fi
 
 # Pattern table — match against the raw command string. Each pattern is a
@@ -85,7 +97,7 @@ while[[:space:]]+:.*sleep
 PATTERNS
 
 if [ "$matched" -eq 0 ]; then
-  exit 0
+  emit_empty
 fi
 
 # Dedup per session. session_id comes from the same payload; on miss we
@@ -97,12 +109,10 @@ session_id="$(extract_str session_id)"
 marker_dir="${TMPDIR:-/tmp}"
 marker_file="${marker_dir%/}/evo-wait-hint-${session_id}.shown"
 if [ -e "$marker_file" ]; then
-  exit 0
+  emit_empty
 fi
 
 # Touch BEFORE printing so concurrent hook fires don't double-emit.
 : > "$marker_file" 2>/dev/null || true
 
-printf '%s\n' "[evo-hint] Long-running command detected. Use \`evo wait --for process=<pid> --for log-growth=<path> --for gpu-active --timeout 60m --json\` (process liveness + log delta + GPU activity, bounded timeout, structured exit) instead of tail-loop polling. See \`evo wait --help\`."
-
-exit 0
+emit_hint

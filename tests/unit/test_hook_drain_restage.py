@@ -568,6 +568,35 @@ class TestWrapperFallback(_SandboxBase):
         self.assertEqual(r.stdout.strip(), b"{}")
 
     @unittest.skipIf(sys.platform == "win32", "shell-script smoke is posix-only")
+    def test_committed_wait_hint_hook_outputs_json(self):
+        import subprocess
+
+        script = REPO_ROOT / "plugins" / "evo" / "hooks" / "wait_hint.sh"
+        no_match = subprocess.run(
+            ["bash", str(script)],
+            input=b'{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"python qgentic_codex.py submit --help"}}',
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(no_match.returncode, 0, no_match.stderr)
+        self.assertEqual(json.loads(no_match.stdout), {})
+
+        env = os.environ.copy()
+        env["TMPDIR"] = str(self.root)
+        matched = subprocess.run(
+            ["bash", str(script)],
+            input=b'{"hook_event_name":"PostToolUse","session_id":"unit-json","tool_name":"Bash","tool_input":{"command":"python train.py"}}',
+            capture_output=True,
+            env=env,
+            timeout=10,
+        )
+        self.assertEqual(matched.returncode, 0, matched.stderr)
+        payload = json.loads(matched.stdout)
+        hso = payload.get("hookSpecificOutput") or {}
+        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
+        self.assertIn("evo wait", hso.get("additionalContext", ""))
+
+    @unittest.skipIf(sys.platform == "win32", "shell-script smoke is posix-only")
     def test_committed_wait_hint_hook_runs_for_claude_plugin_root(self):
         import subprocess
 
