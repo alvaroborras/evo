@@ -162,6 +162,7 @@ class TestSeedArtifactEnv(unittest.TestCase):
                 root, load_config(root), exp_id=node["id"], attempt_label="001",
                 worktree=Path(node["worktree"]), env_traces_dir="t",
                 env_result_path="r.json", env_checkpoint_dir="ck",
+                env_metrics_path="m.json", env_samples_path="s.json",
             )
 
     def test_seed_env_set_when_from_artifact(self):
@@ -279,3 +280,172 @@ class TestDescendantPids(unittest.TestCase):
                     pass
             parent.kill()
             parent.wait(timeout=5)
+
+
+# --------------------------------------------------------------------------- #
+#  Asset registry tests
+# --------------------------------------------------------------------------- #
+
+class TestAssetRegistry(unittest.TestCase):
+    def _setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.root = Path(self.tmpdir)
+        _init_git_repo(self.root)
+        nodes = {
+            "exp_0000": _make_node("exp_0000", "root", "passed"),
+            "exp_0001": _make_node("exp_0001", "exp_0000", "passed"),
+        }
+        _build_workspace(self.root, nodes)
+
+    def _tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # put -------------------------------------------------------------------
+
+    def test_put_in_place(self):
+        from evo.assets import put, get
+        self._setUp()
+        try:
+            src = self.root / "checkpoint.pt"
+            src.write_bytes(b"\x00" * 128)
+            record = put(
+                self.root, str(src), name="ck", kind="checkpoint", exp="exp_0001",
+                tag_pairs=["stage=train"],
+            )
+            self.assertEqual(record["name"], "ck")
+            self.assertEqual(record["kind"], "checkpoint")
+            self.assertEqual(record["produced_by"], "exp_0001")
+            self.assertEqual(record["tags"], {"stage": "train"})
+            self.assertIsNone(record["stored_path"])
+            self.assertEqual(record["size_bytes"], 128)
+            # get returns the same record
+            fetched = get(self.root, "ck")
+            self.assertIsNotNone(fetched)
+            self.assertEqual(fetched["uri"], record["uri"])
+        finally:
+            self._tearDown()
+
+    def test_put_copy_materializes(self):
+        from evo.assets import put, assets_dir
+        self._setUp()
+        try:
+            src = self.root / "model.bin"
+            src.write_bytes(b"\x01" * 64)
+            record = put(self.root, str(src), name="m", kind="adapter", copy=True)
+            self.assertIsNotNone(record["stored_path"])
+            dest = assets_dir(self.root) / "m" / "model.bin"
+            self.assertTrue(dest.exists())
+            self.assertEqual(dest.read_bytes(), b"\x01" * 64)
+        finally:
+            self._tearDown()
+
+    def test_put_mirrors_to_node(self):
+        from evo.assets import put
+        self._setUp()
+        try:
+            src = self.root / "a.txt"
+            src.write_text("hello")
+            put(self.root, str(src), name="a", kind="data", exp="exp_0000")
+            graph = json.loads((self.root / ".evo" / "run_0000" / "graph.json").read_text())
+            node = graph["nodes"]["exp_0000"]
+            artifacts = node.get("benchmark_result", {}).get("artifacts", [])
+            names = [a["name"] for a in artifacts]
+            self.assertIn("a", names)
+        finally:
+            self._tearDown()
+
+    def test_put_rejects_bad_name(self):
+        from evo.assets import put
+        self._setUp()
+        try:
+            src = self.root / "x"
+            src.write_text("x")
+            with self.assertRaises(RuntimeError):
+                put(self.root, str(src), name="bad name!", kind="k")
+        finally:
+            self._tearDown()
+
+    # use -------------------------------------------------------------------
+
+    def test_use_records_consumption(self):
+        from evo.assets import put, use, get
+        self._setUp()
+        try:
+            src = self.root / "data.csv"
+            src.write_text("a,b")
+            put(self.root, str(src), name="data", kind="dataset")
+            use(self.root, "data", exp="exp_0001")
+            record = get(self.root, "data")
+            self.assertIn("exp_0001", record["consumed_by"])
+            # idempotent
+            use(self.root, "data", exp="exp_0001")
+            self.assertEqual(record["consumed_by"].count("exp_0001"), 1)
+        finally:
+            self._tearDown()
+
+    def test_use_unknown_asset_raises(self):
+        from evo.assets import use
+        self._setUp()
+        try:
+            with self.assertRaises(RuntimeError):
+                use(self.root, "nope", exp="exp_0000")
+        finally:
+            self._tearDown()
+
+    # list ------------------------------------------------------------------
+
+    def test_list_filters_by_kind(self):
+        from evo.assets import put, list_assets
+        self._setUp()
+        try:
+            (self.root / "a.txt").write_text("a")
+            (self.root / "b.txt").write_text("b")
+            put(self.root, str(self.root / "a.txt"), name="a", kind="checkpoint")
+            put(self.root, str(self.root / "b.txt"), name="b", kind="dataset")
+            ck = list_assets(self.root, kind="checkpoint")
+            self.assertEqual(len(ck), 1)
+            self.assertEqual(ck[0]["name"], "a")
+        finally:
+            self._tearDown()
+
+    def test_list_filters_by_tag(self):
+        from evo.assets import put, list_assets
+        self._setUp()
+        try:
+            (self.root / "a.txt").write_text("a")
+            (self.root / "b.txt").write_text("b")
+            put(self.root, str(self.root / "a.txt"), name="a", kind="k", tag_pairs=["v=1"])
+            put(self.root, str(self.root / "b.txt"), name="b", kind="k", tag_pairs=["v=2"])
+            v1 = list_assets(self.root, tag_pairs=["v=1"])
+            self.assertEqual(len(v1), 1)
+            self.assertEqual(v1[0]["name"], "a")
+        finally:
+            self._tearDown()
+
+    # rm --------------------------------------------------------------------
+
+    def test_rm_no_consumers(self):
+        from evo.assets import put, remove, get
+        self._setUp()
+        try:
+            (self.root / "x").write_text("x")
+            put(self.root, str(self.root / "x"), name="x", kind="k")
+            remove(self.root, "x")
+            self.assertIsNone(get(self.root, "x"))
+        finally:
+            self._tearDown()
+
+    def test_rm_refuses_if_consumed(self):
+        from evo.assets import put, use, remove
+        self._setUp()
+        try:
+            (self.root / "y").write_text("y")
+            put(self.root, str(self.root / "y"), name="y", kind="k")
+            use(self.root, "y", exp="exp_0000")
+            with self.assertRaises(RuntimeError):
+                remove(self.root, "y")
+            # force=True succeeds
+            remove(self.root, "y", force=True)
+        finally:
+            self._tearDown()

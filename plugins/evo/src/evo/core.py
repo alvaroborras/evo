@@ -22,6 +22,7 @@ META_FILE = "meta.json"
 PROJECT_FILE = "project.md"
 KEYFILE_NAME = "keyfile"
 RUNTIME_ENV_VALUES_FILE = "runtime_env_values.json"
+ASSETS_DIR = "assets"
 
 PRUNE_KIND_EXHAUSTED = "exhausted"
 PRUNE_KIND_INVALID = "invalid"
@@ -525,6 +526,7 @@ def init_workspace(
     ensure_workspace_keyfile(root)
     if not project_path(root).exists():
         atomic_write_text(project_path(root), "# Project Understanding\n\n")
+    (root / WORKSPACE_NAME / run_id / ASSETS_DIR).mkdir(parents=True, exist_ok=True)
     if host is not None:
         set_host(root, host)
     return run_id

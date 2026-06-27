@@ -39,7 +39,6 @@ from .core import (
     delete_discarded_experiment,
     evo_dir,
     effective_status,
-    experiment_log_path,
     experiment_result_path,
     experiments_dir_for,
     fill_command_template,
@@ -58,9 +57,7 @@ from .core import (
     node_target_path,
     load_result,
     parse_diff_patch,
-    parse_score,
     path_to_node,
-    project_path,
     relative_target,
     remove_gate,
     repo_root,
@@ -71,12 +68,9 @@ from .core import (
     set_host,
     update_node,
     utc_now,
-    worktrees_path,
     workspace_path,
     allocate_experiment,
     capture_experiment_diff,
-    remove_worktree_only,
-    render_git_diff,
 )
 from .locking import advisory_lock
 from .report import build_report
@@ -2601,6 +2595,17 @@ def _runtime_env_for_attempt(
             env["EVO_PARENT_POLICY"] = _seed
     except Exception:
         pass  # best-effort; never block a run on seed-env resolution
+    # Asset registry: inject EVO_ASSET_<NAME> for every asset this experiment
+    # has consumed (via `evo asset use <name> <exp>`).
+    try:
+        from .assets import load_registry, assets_dir, _env_key
+        _adata = load_registry(root)
+        for _arec in _adata.get("assets", {}).values():
+            if exp_id in (_arec.get("consumed_by") or []):
+                env[_env_key(_arec["name"])] = _arec.get("uri", "")
+        env["EVO_ASSET_DIR"] = str(assets_dir(root))
+    except Exception:
+        pass  # best-effort; asset env injection must never block a run
     return env
 
 
@@ -3674,6 +3679,90 @@ def _record_done_result(root: Path, args: argparse.Namespace) -> int:
 
 def cmd_done(args: argparse.Namespace) -> int:
     return _record_done_result(repo_root(), args)
+
+
+# ---------------------------------------------------------------------------
+# evo asset
+# ---------------------------------------------------------------------------
+
+def cmd_asset(args: argparse.Namespace) -> int:
+    root = repo_root()
+    action = args.asset_action
+
+    if action == "put":
+        from .assets import put as asset_put
+
+        record = asset_put(
+            root,
+            args.source,
+            name=args.name,
+            kind=args.kind,
+            exp=getattr(args, "exp", None),
+            tag_pairs=getattr(args, "tags", None) or [],
+            copy=bool(getattr(args, "copy", False)),
+            size_bytes=getattr(args, "size_bytes", None),
+        )
+        print(f"asset {record['name']} registered ({record['kind']})")
+        return 0
+
+    if action == "get":
+        from .assets import get as asset_get
+
+        record = asset_get(root, args.name)
+        if record is None:
+            print(f"unknown asset: {args.name}", file=sys.stderr)
+            return 1
+        _print_asset(record)
+        return 0
+
+    if action == "list":
+        from .assets import list_assets
+
+        records = list_assets(
+            root,
+            kind=getattr(args, "kind", None),
+            tag_pairs=getattr(args, "tags", None) or [],
+            produced_by=getattr(args, "produced_by", None),
+            consumed_by=getattr(args, "consumed_by", None),
+        )
+        if not records:
+            print("no matching assets")
+            return 0
+        for r in records:
+            _print_asset(r)
+        return 0
+
+    if action == "use":
+        from .assets import use as asset_use
+
+        asset_use(root, args.name, exp=args.exp)
+        print(f"recorded consumption: {args.name} -> {args.exp}")
+        return 0
+
+    if action == "rm":
+        from .assets import remove as asset_remove
+
+        asset_remove(root, args.name, force=bool(getattr(args, "force", False)))
+        print(f"removed asset: {args.name}")
+        return 0
+
+    print(f"unknown asset action: {action}", file=sys.stderr)
+    return 1
+
+
+def _print_asset(record: dict[str, Any]) -> None:
+    uri = record.get("uri", "")
+    kind = record.get("kind", "")
+    stored = record.get("stored_path") or "(in-place)"
+    produced = record.get("produced_by") or "-"
+    consumed = record.get("consumed_by") or []
+    tags = record.get("tags") or {}
+    tag_str = " ".join(f"{k}={v}" for k, v in sorted(tags.items())) or "-"
+    print(
+        f"{record['name']}  kind={kind}  uri={uri}\n"
+        f"  produced_by={produced}  consumed_by={','.join(consumed) or '-'}\n"
+        f"  stored_path={stored}  tags={tag_str}"
+    )
 
 
 def cmd_discard(args: argparse.Namespace) -> int:
@@ -5694,7 +5783,7 @@ def cmd_exit_optimize_mode(args: argparse.Namespace) -> int:
         print(f"{step}. Decide per PID above: `kill <pid>` to abort, or let it finish.")
         step += 1
     print(f"{step}. Re-run `evo status` and confirm no experiment shows `active`.")
-    print(f"   `evo discard <id> --force --reason \"manual halt\"` cleans any stragglers.")
+    print("   `evo discard <id> --force --reason \"manual halt\"` cleans any stragglers.")
 
     return 0
 
@@ -6241,7 +6330,7 @@ def cmd_direct_status(args: argparse.Namespace) -> int:
         # Also scan exp queues — exp-targeted directives live in their
         # own queue file. (Skip the exhaustive scan for now; report.)
         print(f"event:    {event_id}")
-        print(f"queued:   not found in workspace.jsonl")
+        print("queued:   not found in workspace.jsonl")
     else:
         print(f"event:    {event_id} ({matched.get('text', '')!r})")
         print(f"queued:   {matched.get('ts', '?')}")
@@ -7404,6 +7493,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit a structured JSON exit record instead of the one-line summary.",
     )
     wait_p.set_defaults(func=cmd_wait)
+
+    # -- asset ---------------------------------------------------------------
+    asset_p = sub.add_parser(
+        "asset",
+        help="workspace-level asset registry (put/get/list/use/rm)",
+    )
+    asset_p.add_argument("asset_action", choices=["put", "get", "list", "use", "rm"])
+    asset_p.add_argument("name", nargs="?", default=None)
+    asset_p.add_argument("source", nargs="?", default=None)
+    asset_p.add_argument("--kind", default="generic")
+    asset_p.add_argument("--exp", default=None, help="producer experiment id (for --exp mirroring)")
+    asset_p.add_argument("--tags", nargs="*", default=None, help="k=v tag pairs")
+    asset_p.add_argument("--copy", action="store_true", help="materialize under assets dir instead of in-place")
+    asset_p.add_argument("--size-bytes", type=int, default=None)
+    asset_p.add_argument("--force", action="store_true", help="remove asset even if consumed by live experiments")
+    asset_p.add_argument("--produced-by", default=None, dest="produced_by", help="filter: assets produced by this experiment")
+    asset_p.add_argument("--consumed-by", default=None, dest="consumed_by", help="filter: assets consumed by this experiment")
+    asset_p.set_defaults(func=cmd_asset)
 
     return parser
 
