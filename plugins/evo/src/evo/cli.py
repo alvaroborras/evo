@@ -17,6 +17,7 @@ from .core import (
     PRUNE_KIND_EXHAUSTED,
     PRUNE_KIND_INVALID,
     SUPPORTED_HOSTS,
+    _DiffRefresher,
     _load_meta,
     add_gate,
     add_workspace_note,
@@ -2574,6 +2575,8 @@ def _runtime_env_for_attempt(
     env_traces_dir: str,
     env_result_path: str,
     env_checkpoint_dir: str,
+    env_metrics_path: str,
+    env_samples_path: str,
 ) -> dict[str, str]:
     env = resolve_runtime_env(root, config)
     env["EVO_TRACES_DIR"] = env_traces_dir
@@ -2582,6 +2585,8 @@ def _runtime_env_for_attempt(
     env["EVO_ATTEMPT"] = attempt_label
     env["EVO_RESULT_PATH"] = env_result_path
     env["EVO_CHECKPOINT_DIR"] = env_checkpoint_dir
+    env["EVO_METRICS_PATH"] = env_metrics_path
+    env["EVO_SAMPLES_PATH"] = env_samples_path
     # Reuse path: if this experiment was created with `evo new --from-artifact`,
     # expose the preserved artifact's path so the recipe can warm-start / retest
     # instead of rebuilding from scratch. Category-agnostic (checkpoint/index/...).
@@ -2777,6 +2782,10 @@ def _cmd_run_check(
         env_traces_dir = str(traces_dir.resolve())
         env_result_path = str(result_path.resolve())
         env_checkpoint_dir = str((check_dir / "checkpoints").resolve())
+    metrics_path = check_dir / "metrics.jsonl"
+    samples_path = check_dir / "samples.jsonl"
+    env_metrics_path = str(metrics_path.resolve())
+    env_samples_path = str(samples_path.resolve())
 
     benchmark_cmd = _apply_runtime_prefix(
         config,
@@ -2791,6 +2800,8 @@ def _cmd_run_check(
         env_traces_dir=env_traces_dir,
         env_result_path=env_result_path,
         env_checkpoint_dir=env_checkpoint_dir,
+        env_metrics_path=env_metrics_path,
+        env_samples_path=env_samples_path,
     )
     gate_records: list[dict] = []
     runtime_records: list[dict] = []
@@ -3078,6 +3089,15 @@ def _cmd_run_impl(
         env_result_path = str(result_path.resolve())
         env_checkpoint_dir = str(checkpoint_dir.resolve())
 
+    metrics_path = a_dir / "metrics.jsonl"
+    samples_path = a_dir / "samples.jsonl"
+    stderr_log_path = a_dir / "stderr.log"
+    env_metrics_path = str(metrics_path.resolve())
+    env_samples_path = str(samples_path.resolve())
+    # Pre-create files so training scripts can append immediately.
+    for _p in (metrics_path, samples_path, stderr_log_path):
+        _p.touch(exist_ok=True)
+
     benchmark_cmd = _apply_runtime_prefix(
         config,
         fill_command_template(config["benchmark"], target=target, worktree=worktree),
@@ -3093,6 +3113,8 @@ def _cmd_run_impl(
         env_traces_dir=env_traces_dir,
         env_result_path=env_result_path,
         env_checkpoint_dir=env_checkpoint_dir,
+        env_metrics_path=env_metrics_path,
+        env_samples_path=env_samples_path,
     )
     # Stamp this driver's PID so a re-invocation of `evo run` can detect
     # whether the attempt is actually still in flight (the concurrent-run
@@ -3224,49 +3246,61 @@ def _cmd_run_impl(
         # Run benchmark via sh -c so the user-provided command string
         # (with placeholders interpolated) executes through a shell, same
         # semantics as before.
-        if benchmark_completed:
-            print(
-                f"RECOVERING {args.exp_id} attempt={attempt_n} "
-                f"phase={resume_phase} state={(resume_state or {}).get('status')}"
+        diff_refresher: _DiffRefresher | None = None
+        if not remote and not benchmark_completed:
+            diff_refresher = _DiffRefresher(
+                root, args.exp_id, attempt_n, parent_ref, worktree,
+                executor=executor,
+                exclude_patterns=config.get("diff_exclude_patterns"),
             )
-            bench = None
-        elif resume_journal:
-            print(
-                f"RECOVERING {args.exp_id} attempt={attempt_n} "
-                f"process={resume_journal['process_id']} "
-                f"state={resume_journal.get('state')}"
-            )
-            _write_attempt_state(
-                root, args.exp_id, attempt_n,
-                phase="benchmark", status="attaching", started_at=started_at,
-                extra={"process_id": resume_journal.get("process_id")},
-            )
-            bench = executor.attach(
-                str(resume_journal["process_id"]),
-                cmd=[str(part) for part in resume_journal["command"]],
-                cwd=str(resume_journal.get("cwd") or run_cwd),
-                env=env,
-                timeout=args.timeout,
-                stdout_path=benchmark_log,
-                stderr_path=benchmark_err,
-                mirror_remote_dir=sandbox_traces_dir if remote else None,
-                mirror_local_dir=traces_dir if remote else None,
-                mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
-                append=False,
-            )
-        else:
-            _write_attempt_state(
-                root, args.exp_id, attempt_n,
-                phase="benchmark", status="running", started_at=started_at,
-            )
-            bench = executor.stream(
-                ["sh", "-c", benchmark_cmd],
-                cwd=run_cwd, env=env, timeout=args.timeout,
-                stdout_path=benchmark_log, stderr_path=benchmark_err,
-                mirror_remote_dir=sandbox_traces_dir if remote else None,
-                mirror_local_dir=traces_dir if remote else None,
-                mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
-            )
+            diff_refresher.start()
+        try:
+            if benchmark_completed:
+                print(
+                    f"RECOVERING {args.exp_id} attempt={attempt_n} "
+                    f"phase={resume_phase} state={(resume_state or {}).get('status')}"
+                )
+                bench = None
+            elif resume_journal:
+                print(
+                    f"RECOVERING {args.exp_id} attempt={attempt_n} "
+                    f"process={resume_journal['process_id']} "
+                    f"state={resume_journal.get('state')}"
+                )
+                _write_attempt_state(
+                    root, args.exp_id, attempt_n,
+                    phase="benchmark", status="attaching", started_at=started_at,
+                    extra={"process_id": resume_journal.get("process_id")},
+                )
+                bench = executor.attach(
+                    str(resume_journal["process_id"]),
+                    cmd=[str(part) for part in resume_journal["command"]],
+                    cwd=str(resume_journal.get("cwd") or run_cwd),
+                    env=env,
+                    timeout=args.timeout,
+                    stdout_path=benchmark_log,
+                    stderr_path=benchmark_err,
+                    mirror_remote_dir=sandbox_traces_dir if remote else None,
+                    mirror_local_dir=traces_dir if remote else None,
+                    mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
+                    append=False,
+                )
+            else:
+                _write_attempt_state(
+                    root, args.exp_id, attempt_n,
+                    phase="benchmark", status="running", started_at=started_at,
+                )
+                bench = executor.stream(
+                    ["sh", "-c", benchmark_cmd],
+                    cwd=run_cwd, env=env, timeout=args.timeout,
+                    stdout_path=benchmark_log, stderr_path=benchmark_err,
+                    mirror_remote_dir=sandbox_traces_dir if remote else None,
+                    mirror_local_dir=traces_dir if remote else None,
+                    mirror_dirs=[(sandbox_checkpoint_dir, checkpoint_dir)] if remote else None,
+                )
+        finally:
+            if diff_refresher is not None:
+                diff_refresher.stop()
         if bench is not None and bench.timed_out:
             raise RuntimeError("benchmark_timeout")
         if bench is not None and (bench.exit_code or 0) != 0:
@@ -4415,6 +4449,24 @@ def cmd_show(args: argparse.Namespace) -> int:
                 pass
         attempts.append(attempt_payload)
 
+    active_attempt = None
+    if node.get("status") == "active":
+        current = int(node.get("current_attempt", 0))
+        if current > 0:
+            state = _read_attempt_state(root, args.exp_id, current)
+            if state is not None:
+                active_attempt = {"n": current, "state": state}
+                diff_path = attempt_log_path(root, args.exp_id, current, "diff.patch")
+                if diff_path.exists():
+                    try:
+                        active_attempt["diff"] = diff_path.read_text(encoding="utf-8")
+                        parsed = parse_diff_patch(root, args.exp_id, current)
+                        if parsed:
+                            active_attempt["diff_added"] = parsed["added"]
+                            active_attempt["diff_removed"] = parsed["removed"]
+                    except OSError:
+                        pass
+
     # Annotations filtered to this exp.
     all_annotations = load_annotations(root).get("annotations", [])
     annotations = [a for a in all_annotations if a.get("experiment_id") == args.exp_id]
@@ -4432,6 +4484,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         "children": list(node.get("children", [])),
         "effective_gates": collect_gates_from_path(graph, args.exp_id),
         "attempts": attempts,
+        "active_attempt": active_attempt,
         "annotations": annotations,
         "notes": list(node.get("notes", [])),
         "tags": list(node.get("tags", [])),
@@ -4524,10 +4577,159 @@ def cmd_traces(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """Read metrics.jsonl from the latest attempt. With --tail, follow new lines."""
+    root = repo_root()
+    node = _read_node(root, args.exp_id)
+    attempt = int(node.get("current_attempt", 0))
+    if attempt == 0:
+        print("[]")
+        return 0
+    target = attempt_log_path(root, args.exp_id, attempt, "metrics.jsonl")
+    if not target.exists():
+        fallback = Path(node.get("worktree", "")) / "metrics.jsonl"
+        if fallback.exists():
+            target = fallback
+        else:
+            print("[]")
+            return 0
+    keys = [k.strip() for k in args.keys.split(",")] if args.keys else None
+    if args.tail:
+        fragment = b""
+        seen_size = 0
+        fragment = _print_metrics_lines(target, offset=0, fragment=b"", keys=keys)
+        seen_size = target.stat().st_size
+        try:
+            while True:
+                time.sleep(2)
+                current = target.stat().st_size
+                if current < seen_size:
+                    seen_size = 0
+                    fragment = b""
+                if current > seen_size:
+                    fragment = _print_metrics_lines(target, offset=seen_size, fragment=fragment, keys=keys)
+                    seen_size = current
+        except KeyboardInterrupt:
+            pass
+        return 0
+    _print_metrics_lines(target, offset=0, keys=keys)
+    return 0
+
+
+def _print_metrics_lines(path: Path, *, offset: int, fragment: bytes = b"", keys: list[str] | None = None) -> bytes:
+    """Read JSONL lines from path starting at offset, appending fragment.
+
+    Returns the new fragment (trailing incomplete line) for the next call.
+    If keys is provided, only output lines with those keys present.
+    """
+    size = path.stat().st_size
+    if offset >= size:
+        return fragment
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        raw = fragment + fh.read()
+    if not raw:
+        return fragment
+
+    # Split on newlines; keep trailing incomplete line as fragment
+    parts = raw.split(b"\n")
+    # All but the last part are complete lines
+    for part in parts[:-1]:
+        line = part.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line.decode("utf-8", errors="replace"))
+            if keys is not None:
+                parsed = {k: parsed[k] for k in keys if k in parsed}
+            print(json.dumps(parsed))
+        except json.JSONDecodeError:
+            pass
+    # Last part is the incomplete fragment (or empty if raw ended with \n)
+    return parts[-1]
+
+
+def cmd_samples(args: argparse.Namespace) -> int:
+    """Read samples.jsonl from the latest attempt. With --tail, follow new lines."""
+    root = repo_root()
+    node = _read_node(root, args.exp_id)
+    attempt = int(node.get("current_attempt", 0))
+    if attempt == 0:
+        print("[]")
+        return 0
+    target = attempt_log_path(root, args.exp_id, attempt, "samples.jsonl")
+    if not target.exists():
+        fallback = Path(node.get("worktree", "")) / "samples.jsonl"
+        if fallback.exists():
+            target = fallback
+        else:
+            print("[]")
+            return 0
+    if args.tail:
+        fragment = b""
+        seen_size = 0
+        fragment = _print_metrics_lines(target, offset=0, fragment=b"")
+        seen_size = target.stat().st_size
+        try:
+            while True:
+                time.sleep(2)
+                current = target.stat().st_size
+                if current < seen_size:
+                    seen_size = 0
+                    fragment = b""
+                if current > seen_size:
+                    fragment = _print_metrics_lines(target, offset=seen_size, fragment=fragment)
+                    seen_size = current
+        except KeyboardInterrupt:
+            pass
+        return 0
+    _print_metrics_lines(target, offset=0)
+    return 0
+
+
+def cmd_checkpoints(args: argparse.Namespace) -> int:
+    """List checkpoint files from the latest attempt."""
+    root = repo_root()
+    node = _read_node(root, args.exp_id)
+    attempt = int(node.get("current_attempt", 0))
+    if attempt == 0:
+        print("[]")
+        return 0
+    ckpt_dir = attempt_dir(root, args.exp_id, attempt) / "checkpoints"
+    if not ckpt_dir.exists():
+        print("[]")
+        return 0
+    entries = []
+    for path in sorted(ckpt_dir.rglob("*")):
+        if path.is_file():
+            entries.append({
+                "path": str(path.relative_to(ckpt_dir)),
+                "size": path.stat().st_size,
+                "mtime": path.stat().st_mtime,
+            })
+    print(json.dumps(entries, indent=2))
+    return 0
+
+
 def cmd_annotate(args: argparse.Namespace) -> int:
     root = repo_root()
     entry = append_annotation(root, args.exp_id, args.task, args.analysis)
     print(json.dumps(entry, indent=2))
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export an experiment as a self-contained HTML report."""
+    from .export_html import export_experiment_html
+
+    root = repo_root()
+    output = Path(args.output) if args.output else None
+    path = export_experiment_html(
+        root, args.exp_id,
+        output_path=output,
+        full=args.full,
+    )
+    print(str(path))
     return 0
 
 
@@ -6690,6 +6892,54 @@ def build_parser() -> argparse.ArgumentParser:
     traces_p.add_argument("exp_id")
     traces_p.add_argument("task", nargs="?")
     traces_p.set_defaults(func=cmd_traces)
+
+    metrics_p = sub.add_parser(
+        "metrics",
+        help="live-training metrics from metrics.jsonl (loss, reward, lr, ...)",
+    )
+    metrics_p.add_argument("exp_id")
+    metrics_p.add_argument(
+        "--tail", action="store_true",
+        help="follow new lines every 2 seconds (like tail -f)",
+    )
+    metrics_p.add_argument(
+        "--keys",
+        help="comma-separated list of keys to output (e.g. 'loss,lr,grad_norm')",
+    )
+    metrics_p.set_defaults(func=cmd_metrics)
+
+    samples_p = sub.add_parser(
+        "samples",
+        help="live-training samples from samples.jsonl (text outputs, generations, ...)",
+    )
+    samples_p.add_argument("exp_id")
+    samples_p.add_argument(
+        "--tail", action="store_true",
+        help="follow new lines every 2 seconds (like tail -f)",
+    )
+    samples_p.set_defaults(func=cmd_samples)
+
+    checkpoints_p = sub.add_parser(
+        "checkpoints",
+        help="list checkpoint files from the current attempt",
+    )
+    checkpoints_p.add_argument("exp_id")
+    checkpoints_p.set_defaults(func=cmd_checkpoints)
+
+    export_p = sub.add_parser(
+        "export",
+        help="export an experiment as a self-contained HTML report",
+    )
+    export_p.add_argument("exp_id")
+    export_p.add_argument(
+        "--output", "-o",
+        help="output path for the HTML file (default: <exp_dir>/report.html)",
+    )
+    export_p.add_argument(
+        "--full", action="store_true",
+        help="include all log lines (default: last 50k lines)",
+    )
+    export_p.set_defaults(func=cmd_export)
 
     annotate_p = sub.add_parser("annotate")
     annotate_p.add_argument("exp_id")

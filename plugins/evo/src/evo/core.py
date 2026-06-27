@@ -6,6 +6,7 @@ import re
 import secrets
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -976,6 +977,72 @@ def capture_experiment_diff(
             f"{result.stderr[:500]}"
         )
     return result.stdout
+
+
+class _DiffRefresher:
+    """Background thread that periodically refreshes diff.patch in the attempt dir.
+
+    During long-running benchmarks the worktree may evolve (e.g. the agent
+    edits more files). This thread rewrites ``attempt_dir / "diff.patch"``
+    every ``interval`` seconds so the dashboard can serve a near-live view
+    of the current diff without polling the sandbox.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        exp_id: str,
+        attempt: int,
+        parent_ref: str,
+        worktree: Path,
+        *,
+        executor: Any = None,
+        interval: float = 5.0,
+        exclude_patterns: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        from .workspace_executor import LocalExecutor
+
+        self._root = root
+        self._exp_id = exp_id
+        self._attempt = attempt
+        self._parent_ref = parent_ref
+        self._worktree = worktree
+        self._executor = executor or LocalExecutor()
+        self._interval = interval
+        self._exclude_patterns = exclude_patterns
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True, name="diff-refresher")
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _run(self) -> None:
+        a_dir = attempt_dir(self._root, self._exp_id, self._attempt)
+        target = a_dir / "diff.patch"
+        while not self._stop.is_set():
+            try:
+                text = capture_experiment_diff(
+                    self._root,
+                    self._exp_id,
+                    self._attempt,
+                    self._parent_ref,
+                    self._worktree,
+                    executor=self._executor,
+                    exclude_patterns=self._exclude_patterns,
+                )
+                target.write_text(text, encoding="utf-8")
+            except Exception:
+                pass  # best-effort; don't crash the driver
+            self._stop.wait(self._interval)
 
 
 def fill_command_template(template: str, *, target: Path, worktree: Path) -> str:

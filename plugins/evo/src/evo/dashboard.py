@@ -15,6 +15,7 @@ from .core import (
     _load_meta,
     _save_meta,
     attempt_dir,
+    attempt_log_path,
     attempt_outcome_path,
     attempt_traces_dir,
     best_committed_score,
@@ -61,6 +62,28 @@ def _redact_value(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
+def _read_attempt_state(root: Path, exp_id: str, attempt: int) -> dict | None:
+    path = attempt_dir(root, exp_id, attempt) / "attempt_state.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _latest_attempt_on_disk(root: Path, exp_id: str) -> int | None:
+    exp_root = experiments_dir_for(root, exp_id) / "attempts"
+    if not exp_root.exists():
+        return None
+    candidates = sorted(
+        (int(p.name) for p in exp_root.iterdir() if p.is_dir() and p.name.isdigit()),
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
 def _public_node(
     root: Path,
     node: dict[str, Any],
@@ -97,6 +120,22 @@ def _public_node(
         blocker = lineage_invalidated_by(graph, node.get("id", ""))
         public["lineage_blocked_by"] = blocker.get("id") if blocker else None
         public["lineage_blocked_reason"] = blocker.get("pruned_reason") if blocker else None
+
+    if public.get("status") == "active":
+        exp_id = node.get("id", "")
+        attempt_n = _latest_attempt_on_disk(root, exp_id)
+        if attempt_n is not None:
+            state = _read_attempt_state(root, exp_id, attempt_n)
+            if state is not None:
+                public["active_attempt"] = {
+                    "n": attempt_n,
+                    "phase": state.get("phase"),
+                    "status": state.get("status"),
+                    "started_at": state.get("started_at"),
+                    "updated_at": state.get("updated_at"),
+                    "pid": state.get("pid"),
+                }
+
     return public
 
 
@@ -948,7 +987,7 @@ def create_app(root: Path | None = None) -> Flask:
         if dirpath.exists():
             # Surface .log and .out at the attempt root and one level under
             # logs/ (the convention training scripts typically use).
-            patterns = ["*.log", "*.out", "logs/*.log", "logs/*.out"]
+            patterns = ["*.log", "*.out", "*.jsonl", "logs/*.log", "logs/*.out", "logs/*.jsonl"]
             seen: set[Path] = set()
             for pat in patterns:
                 for p in sorted(dirpath.glob(pat)):
@@ -1228,6 +1267,95 @@ def create_app(root: Path | None = None) -> Flask:
             "skipped_subagent": skipped_subagent,
             "from_exp_id": from_exp,
         })
+
+    @app.get("/api/node/<exp_id>/metrics-tail")
+    def node_metrics_tail(exp_id: str):
+        attempt = _latest_attempt_n(_root(), exp_id)
+        if attempt is None:
+            return jsonify({"attempt": None, "lines": []})
+        target = attempt_log_path(_root(), exp_id, attempt, "metrics.jsonl")
+        if not target.exists():
+            return jsonify({"attempt": attempt, "lines": []})
+        try:
+            offset = int(request.args.get("offset", "0"))
+        except ValueError:
+            offset = 0
+        size = target.stat().st_size
+        with target.open("rb") as fh:
+            fh.seek(min(offset, size))
+            raw = fh.read()
+        lines = []
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    lines.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        resp = jsonify({"attempt": attempt, "lines": lines, "offset": size})
+        return resp
+
+    @app.get("/api/node/<exp_id>/samples-tail")
+    def node_samples_tail(exp_id: str):
+        attempt = _latest_attempt_n(_root(), exp_id)
+        if attempt is None:
+            return jsonify({"attempt": None, "lines": []})
+        target = attempt_log_path(_root(), exp_id, attempt, "samples.jsonl")
+        if not target.exists():
+            return jsonify({"attempt": attempt, "lines": []})
+        try:
+            offset = int(request.args.get("offset", "0"))
+        except ValueError:
+            offset = 0
+        size = target.stat().st_size
+        with target.open("rb") as fh:
+            fh.seek(min(offset, size))
+            raw = fh.read()
+        lines = []
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    lines.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        resp = jsonify({"attempt": attempt, "lines": lines, "offset": size})
+        return resp
+
+    @app.get("/api/node/<exp_id>/checkpoints")
+    def node_checkpoints(exp_id: str):
+        attempt = _latest_attempt_n(_root(), exp_id)
+        if attempt is None:
+            return jsonify({"attempt": None, "files": []})
+        ckpt_dir = attempt_dir(_root(), exp_id, attempt) / "checkpoints"
+        if not ckpt_dir.exists():
+            return jsonify({"attempt": attempt, "files": []})
+        files = []
+        for path in sorted(ckpt_dir.rglob("*")):
+            if path.is_file():
+                files.append({
+                    "path": str(path.relative_to(ckpt_dir)),
+                    "size": path.stat().st_size,
+                    "mtime": path.stat().st_mtime,
+                })
+        return jsonify({"attempt": attempt, "files": files})
+
+    @app.get("/api/node/<exp_id>/live-diff")
+    def node_live_diff(exp_id: str):
+        attempt = _latest_attempt_n(_root(), exp_id)
+        if attempt is None:
+            return jsonify({"attempt": None, "diff": ""})
+        diff_path = attempt_dir(_root(), exp_id, attempt) / "diff.patch"
+        diff_text = diff_path.read_text(encoding="utf-8") if diff_path.exists() else ""
+        return jsonify({"attempt": attempt, "diff": diff_text})
+
+    @app.get("/api/node/<exp_id>/export-html")
+    def node_export_html(exp_id: str):
+        from .export_html import export_experiment_html
+        root = _root()
+        output = experiments_dir_for(root, exp_id) / "report.html"
+        path = export_experiment_html(root, exp_id, output_path=output)
+        return send_from_directory(str(path.parent), path.name, mimetype="text/html")
 
     return app
 
