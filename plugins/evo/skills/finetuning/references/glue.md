@@ -18,6 +18,11 @@ You write this per task in the experiment worktree. evo provides inputs by conve
   (lives under the experiment record, survives between-attempt cleanup and
   discard). Write the reusable checkpoint here so it can be declared + later
   seeded; the worktree itself is ephemeral.
+- `EVO_METRICS_PATH` — pre-created path for `metrics.jsonl`. Append step-indexed
+  metrics (`{step, loss, reward, kl, grad_norm, lr}`) here for live dashboard
+  visibility. The dashboard polls this file every 5 seconds.
+- `EVO_SAMPLES_PATH` — pre-created path for `samples.jsonl`. Append generated
+  samples (`{text, output, ...}`) here for live preview in the dashboard.
 - Held-out data is **not** provided — evo scores on it independently.
 
 ### Warm-start pattern
@@ -41,6 +46,9 @@ backward pass.)
    `artifacts: [{kind: "lora_adapter"|"checkpoint", uri, content_key, created_by}]`.
 2. `train_summary.json` — the `TrainingTrace` setup/dynamics fields.
 3. `metrics.jsonl` — step-indexed `{step, loss, reward, kl, grad_norm, lr}`.
+   Append to `EVO_METRICS_PATH` for live dashboard visibility.
+4. `samples.jsonl` (optional) — generated samples for live preview.
+   Append to `EVO_SAMPLES_PATH`.
 
 ## Benchmark by convention
 

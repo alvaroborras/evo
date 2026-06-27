@@ -2142,7 +2142,7 @@ async function openDrawer(expId, opts) {
   const deltaColor = deltaColorFor(delta);
   const statusColor = statusColorForNode(node);
   const hasChildren = (node.children || []).length > 0;
-  const activeTab = ['summary', 'diff', 'tasks', 'logs'].includes(state.sidebarTab)
+  const activeTab = ['summary', 'diff', 'tasks', 'logs', 'live'].includes(state.sidebarTab)
     ? state.sidebarTab
     : 'summary';
   // Drives the diff-tab fill layout in CSS (.sidebar[data-tab="diff"]).
@@ -2173,6 +2173,7 @@ async function openDrawer(expId, opts) {
       ${drawerTabButton('diff', 'Diff', activeTab)}
       ${drawerTabButton('tasks', 'Tasks', activeTab)}
       ${drawerTabButton('logs', 'Logs', activeTab)}
+      ${(node.status === 'active' && node.active_attempt) ? drawerTabButton('live', 'Live', activeTab) : ''}
     </div>`;
 
   if (activeTab === 'summary') {
@@ -2456,6 +2457,16 @@ async function openDrawer(expId, opts) {
         <pre id="logs-tail" class="logs-pane">Loading...</pre>
       </div>`;
     }
+  } else if (activeTab === 'live') {
+    const a = node.active_attempt;
+    if (a) {
+      html += `<div class="drawer-section">
+        <span class="drawer-section-title">Attempt ${a.n} — ${esc(a.phase || 'running')}</span>
+        <div class="sidebar-empty">Fetching live data...</div>
+      </div>`;
+    } else {
+      html += `<div class="drawer-section"><div class="sidebar-empty">No active attempt.</div></div>`;
+    }
   }
 
   if (isStale()) return;
@@ -2478,6 +2489,8 @@ async function openDrawer(expId, opts) {
       refreshLogsTail(true);
       if (state.logsAutoRefresh) startLogsAutorefresh(expId);
     }
+  } else if (activeTab === 'live') {
+    loadLiveTab(expId);
   }
 }
 
@@ -2485,6 +2498,112 @@ function formatBytes(n) {
   if (n < 1024) return `${n}B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
   return `${(n / 1024 / 1024).toFixed(1)}MB`;
+}
+
+// Live tab: fetch and render the 5 sub-panels for an active experiment.
+async function loadLiveTab(expId) {
+  const section = document.querySelector('.drawer-section');
+  if (!section) return;
+  try {
+    const [metricsRes, samplesRes, checkpointsRes, diffRes] = await Promise.all([
+      fetch(`/api/node/${expId}/metrics-tail`).then(r => r.json()).catch(() => ({lines: [], offset: 0})),
+      fetch(`/api/node/${expId}/samples-tail`).then(r => r.json()).catch(() => ({lines: [], offset: 0})),
+      fetch(`/api/node/${expId}/checkpoints`).then(r => r.json()).catch(() => ({files: []})),
+      fetch(`/api/node/${expId}/live-diff`).then(r => r.json()).catch(() => ({diff: ''})),
+    ]);
+
+    // Metrics sparklines
+    let metricsHtml = '<div class="live-metrics">';
+    if (metricsRes.lines.length > 0) {
+      const allKeys = new Set();
+      metricsRes.lines.forEach(m => Object.keys(m).forEach(k => allKeys.add(k)));
+      const keys = [...allKeys].sort();
+      for (const key of keys) {
+        const values = metricsRes.lines.map(m => m[key]).filter(v => typeof v === 'number');
+        if (values.length === 0) continue;
+        const last = values[values.length - 1];
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const range = max - min || 1;
+        // Simple ASCII sparkline
+        const sparkChars = '▁▂▃▄▅▆▇█';
+        const sparkLen = Math.min(values.length, 50);
+        const sampled = values.length > sparkLen
+          ? values.filter((_, i) => i % Math.ceil(values.length / sparkLen) === 0)
+          : values;
+        const spark = sampled.map(v => {
+          const idx = Math.round(((v - min) / range) * (sparkChars.length - 1));
+          return `<span style="opacity:${0.5 + (idx / (sparkChars.length - 1)) * 0.5}">${sparkChars[idx]}</span>`;
+        }).join('');
+        metricsHtml += `<div class="live-metric-row"><span class="live-metric-key">${esc(key)}</span><span class="live-metric-spark">${spark}</span><span class="live-metric-val">${last.toFixed(4)}</span></div>`;
+      }
+      metricsHtml += `<div style="font-size:11px;color:var(--text-5);margin-top:4px">${metricsRes.lines.length} lines</div>`;
+    } else {
+      metricsHtml += '<div class="sidebar-empty">Waiting for metrics...</div>';
+    }
+    metricsHtml += '</div>';
+
+    // Samples preview
+    let samplesHtml = '<div class="live-samples">';
+    if (samplesRes.lines.length > 0) {
+      const last3 = samplesRes.lines.slice(-3);
+      for (const s of last3) {
+        const text = s.text || s.output || JSON.stringify(s);
+        samplesHtml += `<pre class="live-sample">${esc(String(text).substring(0, 500))}</pre>`;
+      }
+      if (samplesRes.lines.length > 3) {
+        samplesHtml += `<div style="font-size:11px;color:var(--text-5)">+${samplesRes.lines.length - 3} more</div>`;
+      }
+    } else {
+      samplesHtml += '<div class="sidebar-empty">Waiting for samples...</div>';
+    }
+    samplesHtml += '</div>';
+
+    // Checkpoints
+    let ckptHtml = '<div class="live-checkpoints">';
+    if (checkpointsRes.files.length > 0) {
+      for (const f of checkpointsRes.files.slice(-5)) {
+        ckptHtml += `<div class="live-ckpt"><code>${esc(f.path)}</code> <span style="color:var(--text-5)">${formatBytes(f.size)}</span></div>`;
+      }
+    } else {
+      ckptHtml += '<div class="sidebar-empty">No checkpoints yet</div>';
+    }
+    ckptHtml += '</div>';
+
+    // Diff
+    let diffHtml = '<div class="live-diff">';
+    if (diffRes.diff) {
+      const lines = diffRes.diff.split('\n').slice(0, 30);
+      diffHtml += `<pre class="live-diff-pre">${esc(lines.join('\n'))}</pre>`;
+      if (diffRes.diff.split('\n').length > 30) {
+        diffHtml += `<div style="font-size:11px;color:var(--text-5)">... ${diffRes.diff.split('\n').length - 30} more lines</div>`;
+      }
+    } else {
+      diffHtml += '<div class="sidebar-empty">No diff yet</div>';
+    }
+    diffHtml += '</div>';
+
+    section.innerHTML = `
+      <div class="drawer-section-title">Live Dashboard</div>
+      <div class="live-panel">
+        <div class="live-subpanel"><div class="live-subpanel-title">Metrics</div>${metricsHtml}</div>
+        <div class="live-subpanel"><div class="live-subpanel-title">Samples</div>${samplesHtml}</div>
+        <div class="live-subpanel"><div class="live-subpanel-title">Checkpoints</div>${ckptHtml}</div>
+        <div class="live-subpanel"><div class="live-subpanel-title">Diff</div>${diffHtml}</div>
+      </div>
+    `;
+
+    // Auto-refresh every 5 seconds
+    if (state.sidebarTab === 'live' && state.selectedNode === expId) {
+      setTimeout(() => {
+        if (state.sidebarTab === 'live' && state.selectedNode === expId) {
+          loadLiveTab(expId);
+        }
+      }, 5000);
+    }
+  } catch (e) {
+    section.innerHTML = `<div class="sidebar-empty">Error loading live data: ${esc(e.message)}</div>`;
+  }
 }
 
 // Strip ANSI escape codes from log output for readable rendering.
@@ -2648,7 +2767,7 @@ function drawerTabButton(tab, label, activeTab) {
 }
 
 function setSidebarTab(tab) {
-  if (!['summary', 'diff', 'tasks', 'logs'].includes(tab)) return;
+  if (!['summary', 'diff', 'tasks', 'logs', 'live'].includes(tab)) return;
   state.sidebarTab = tab;
   // Stop log-tail polling when navigating away from the Logs tab.
   if (tab !== 'logs') stopLogsAutorefresh();

@@ -48,6 +48,18 @@ Run the full pipeline on ~10 examples for ~1 minute. Must produce: a checkpoint 
 
 Training for an hour and getting one number at the end is the wrong granularity for evo's tree search. By the time you know the recipe failed, you've spent the budget. Build the verification *into* the training script, not around it.
 
+## Live dashboard monitoring
+
+During training, the evo dashboard shows a **Live** tab with real-time updates:
+
+- **Metrics**: Append JSONL lines to `EVO_METRICS_PATH` for live sparklines (loss, lr, grad_norm, etc.)
+- **Samples**: Append to `EVO_SAMPLES_PATH` for live preview of generated outputs
+- **Checkpoints**: Write to `EVO_CHECKPOINT_DIR` for live checkpoint listing
+- **Diff**: The worktree diff refreshes every 5 seconds automatically
+- **Logs**: Standard output/error logs are tailed in real-time
+
+Use `evo metrics <exp_id> --tail` and `evo samples <exp_id> --tail` for CLI monitoring.
+
 Pattern for any training run expected to exceed ~30 min wall-clock:
 
 1. **Periodic checkpoint** every N steps (e.g. every 0.25 epoch, or every 200 steps — whichever is faster).
